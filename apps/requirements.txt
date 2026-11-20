@@ -1,0 +1,9 @@
+# OMKit picture apps (ispkit, isp_player, isp_fitter, isp_neurofit): Python 3.10 or newer.
+#   python -m pip install -r OMKit/apps/requirements.txt
+numpy>=1.24
+Pillow>=9.1
+rawpy>=0.18          # the camera's RAW files (.ORF)
+
+# Optional: torch with CUDA renders on an NVIDIA GPU (the same 8-bit result as on the CPU, only faster) and runs the
+# fitter's heavy arithmetic there (a fit several times faster).
+# Install the build for your CUDA version from the PyTorch site; without it everything runs on numpy.

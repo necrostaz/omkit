@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISP Fitter</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='%23d8a24a' stroke-width='2'/%3E%3Ccircle cx='8' cy='8' r='2' fill='%23d8a24a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/fitter.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true"></span><h1>ISP Fitter</h1>
+    <span class="sub">a .cube look → OM-5 Mark II colour tables → an .isp profile</span></div>
+  <span class="spacer"></span>
+  <span class="badge" id="backend" title="Where the fit runs: GPU (torch with CUDA) or CPU (numpy)">…</span>
+  <span class="badge" id="prior" title="The photo colour prior the fit uses">prior …</span>
+</header>
+
+<main class="layout">
+  <aside class="side" aria-label="Look, picture, fit and profile">
+    <section class="card">
+      <h2><span class="step" id="step-look">1</span>Look</h2>
+      <div class="drop" id="drop-look" tabindex="0" role="button" aria-label="Choose a .cube file">
+        <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9L12 3Z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg></span>
+        <span class="txt"><b>3D LUT</b><span>.cube - drop here or click</span>
+          <span class="file" id="look-name" hidden></span></span>
+        <input type="file" id="file-look" accept=".cube,.CUBE" hidden>
+      </div>
+      <div id="enc-box" class="grid2" hidden>
+        <label class="field">LUT input <select id="enc-in"></select></label>
+        <label class="field">LUT output <select id="enc-out"></select></label>
+      </div>
+      <p class="hint small" id="enc-note" hidden></p>
+    </section>
+
+    <section class="card">
+      <h2><span class="step" id="step-image">2</span>Picture</h2>
+      <div class="drop" id="drop-image" tabindex="0" role="button" aria-label="Choose a picture">
+        <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="m21 16-5-5-8 8"/></svg></span>
+        <span class="txt"><b>RAW or JPEG</b><span>ORF, JPEG, PNG, TIFF - drop here or click</span>
+          <span class="file" id="image-name" hidden></span></span>
+        <input type="file" id="file-image" accept="image/*,.orf,.ORF,.tif,.tiff" hidden>
+      </div>
+      <label class="field" id="space-box" hidden>Colour space
+        <select id="space"><option value="auto">automatic</option></select></label>
+      <p class="hint small" id="image-how" hidden></p>
+    </section>
+
+    <section class="card">
+      <h2><span class="step" id="step-fit">3</span>Fit</h2>
+      <label class="field">Recipe <select id="variant"></select></label>
+      <p class="hint small" id="variant-desc"></p>
+      <label class="check"><input type="checkbox" id="matrix" checked>
+        <span>Look's own matrix <small>a 3x3 matrix of the look before the curves (the camera applies it together with its own)</small></span></label>
+      <label class="check"><input type="checkbox" id="quick">
+        <span>Quick fit <small>fewer training colours and iterations: several times faster, a little less accurate</small></span></label>
+      <div class="progress" id="progress" hidden><div class="bar"><i id="progress-bar"></i></div><span id="progress-text" class="num"></span></div>
+      <div class="note-box" id="mono-note" hidden></div>
+    </section>
+
+    <section class="card">
+      <h2>Exposure</h2>
+      <div class="ev"><input type="range" id="ev" min="-3" max="3" step="0.25" value="0" aria-label="Exposure, EV"><output id="ev-out" class="num">0 EV</output></div>
+      <div class="btns"><button class="btn" id="autoev" disabled title="Choose the EV at which the look is as bright as the picture itself">Auto EV</button>
+        <button class="btn" id="ev0">0</button></div>
+      <p class="hint small">A camera RAW is metered already. A developed picture is taken as the scene: Auto EV evens out its own tone curve.</p>
+    </section>
+
+    <section class="card">
+      <h2>Accuracy <small class="h2-sub">CIEDE2000</small></h2>
+      <table class="stats" id="stats">
+        <thead><tr><th></th><th>mean</th><th>p95</th><th>max</th></tr></thead>
+        <tbody>
+          <tr title="How far the look is from the original (the scene as plain sRGB) on this picture: the look's own strength, not an error"><td>look strength</td><td id="s-l-mean"></td><td id="s-l-p95"></td><td id="s-l-max"></td></tr>
+          <tr title="The copy through the camera's tables against the look, over the pixels of this picture"><td>error, frame</td><td id="s-i-mean"></td><td id="s-i-p95"></td><td id="s-i-max"></td></tr>
+          <tr title="The copy against the look on ColorChecker's 24 patches, metered exposure"><td>ColorChecker</td><td id="s-c-mean"></td><td id="s-c-p95"></td><td id="s-c-max"></td></tr>
+          <tr title="The copy against the look on the whole RGB cube (17x17x17 sRGB colours, the most saturated included)"><td>RGB cube</td><td id="s-g-mean"></td><td id="s-g-p95"></td><td id="s-g-max"></td></tr>
+        </tbody>
+      </table>
+      <p class="hint small">Below 1: hard to see; 1-2: close side by side; above 3: visible. Error map: black 0, red 5, yellow 10 and above.</p>
+    </section>
+
+    <section class="card" id="isp-card" hidden>
+      <h2><span class="step" id="step-isp">4</span>Profile</h2>
+      <label class="field">Profile name <small>(the camera's menu; at most 31 bytes, ASCII recommended)</small>
+        <input type="text" id="isp-name" maxlength="31" spellcheck="false" autocomplete="off"></label>
+      <p class="hint small" id="isp-name-note"></p>
+      <div class="sub">
+        <div class="sub-head" title="The picture FILMLOOK shows for the preset in its editor (the CANI section of the .isp)">Cassette</div>
+        <figure class="cassette"><img id="cas-img" alt="The cassette, as the camera draws it"></figure>
+        <label class="field">Picture <select id="cas-gen"></select></label>
+        <div class="grid2">
+          <label class="field">Brand line <input type="text" id="cas-brand" spellcheck="false" autocomplete="off"></label>
+          <label class="field">ISO <input type="text" id="cas-iso" maxlength="7" spellcheck="false" autocomplete="off"></label>
+        </div>
+        <label class="field">Name line <input type="text" id="cas-name" spellcheck="false" autocomplete="off"></label>
+        <label class="field">Process line <input type="text" id="cas-proc" spellcheck="false" autocomplete="off"></label>
+        <p class="hint small">Printable ASCII only (the camera's font), drawn in capitals. The name line holds 14 characters in the full font, more in a narrow one. An empty brand or process line keeps the picture's own.</p>
+        <div class="msgs" id="cas-msgs"></div>
+      </div>
+      <button class="btn primary" id="download-isp" disabled>Download .isp</button>
+      <p class="hint small" id="isp-note">Copy the file to the card's <span class="mono">OMKIT\FILMLOOK\</span> folder: FILMLOOK lists it as a preset.</p>
+    </section>
+  </aside>
+
+  <section class="stage">
+    <div class="toolbar">
+      <div class="tabs" role="tablist" aria-label="View mode">
+        <button role="tab" id="tab-grid" aria-selected="true" aria-controls="viewport" data-tab="grid">Four frames</button>
+        <button role="tab" id="tab-split" aria-selected="false" aria-controls="viewport" data-tab="split" tabindex="-1">Split</button>
+      </div>
+      <div class="seg" id="pairs" role="radiogroup" aria-label="What the split compares" hidden>
+        <button role="radio" data-pair="look-isp" aria-checked="true">look | ISP</button>
+        <button role="radio" data-pair="plain-isp" aria-checked="false">original | ISP</button>
+        <button role="radio" data-pair="plain-look" aria-checked="false">original | look</button>
+      </div>
+      <span class="spacer"></span>
+      <div class="status" id="status" role="status"><span class="dot"></span><span id="status-text">Drop a .cube look and a picture</span></div>
+    </div>
+    <div class="viewport" id="viewport" role="tabpanel">
+      <div class="empty" id="empty"><div class="box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4m0 0-4 4m4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        <strong>Drop a .cube look and a picture</strong>
+        <span>Files can be dropped anywhere on the page: a .cube file becomes the look, anything else the picture (a camera RAW .ORF, or JPEG, PNG, TIFF). The fit starts as soon as the look is in.</span>
+      </div></div>
+      <div class="grid4" id="grid" hidden>
+        <figure><div class="frame"><img id="img-plain" alt="The original"></div><figcaption>Original <small>the scene as plain sRGB</small></figcaption></figure>
+        <figure><div class="frame"><img id="img-look" alt="The look"></div><figcaption>Look <small>the .cube</small></figcaption></figure>
+        <figure><div class="frame"><img id="img-isp" alt="The copy through the camera's tables"></div><figcaption>ISP copy <small>the fitted tables, as the camera renders them</small></figcaption></figure>
+        <figure><div class="frame"><img id="img-heat" alt="The error map"></div><figcaption>Error <small>ΔE2000 between look and copy</small></figcaption></figure>
+      </div>
+      <div class="fit" id="split" hidden>
+        <div class="frame compare" id="frame-split">
+          <img id="sw-right" alt="">
+          <img id="sw-left" class="before" alt="">
+          <span class="lab left" id="sw-la"></span><span class="lab right" id="sw-lb"></span>
+          <div class="handle" id="handle" role="slider" tabindex="0" aria-label="Split position"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" aria-valuetext="50 %">
+            <span class="knob"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6-6 6 6 6M15 6l6 6-6 6"/></svg></span>
+          </div>
+        </div>
+      </div>
+      <p class="hint small" id="split-hint" hidden>Drag on the frame; ← → move the split (Shift: 10 %), double-click centres it.</p>
+    </div>
+  </section>
+</main>
+<div class="dropveil" id="dropveil"><div>Release: <b>.cube</b> - the look, anything else - the picture</div></div>
+<script src="/static/fitter.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Line endings and binary data: every text file is checked out with LF line ends, also on Windows, so that the shell
+# scripts, Makefiles and data checks work when a Windows checkout is built from WSL; the data files are binary and never
+# converted.
+* text eol=lf
+src/modules/*/res/** -text
+resources/modules/*/grain/*.GRN binary
+resources/modules/*/presets/*.ISP binary
+resources/modules/*/icons/** binary
+docs/**/*.png binary
+docs/**/*.jpg binary
+apps/**/*.npz binary
+release/**/*.bat text eol=crlf

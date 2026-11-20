@@ -1,0 +1,48 @@
+{
+ "model": "E148",
+ "name": "omkit_stub",
+ "comment": "OMKit loader v2: stock E148 1.1 + hook. A changed build needs the maintainers' review before it goes to a camera.",
+ "symbols": {
+  "omk_done": "0x615ee7c0",
+  "omk_sections": "0xa26e2698",
+  "f_keyup": "0x60130fb8",
+  "f_acre": "0x60051d5c",
+  "f_sleep": "0x60051a2b",
+  "f_ext": "0x6003167e",
+  "f_fopen": "0x606aa3bd",
+  "f_fread": "0x606aa54e",
+  "f_fclose": "0x606aa3c6",
+  "OMK_MAGIC": "0x434b4d4f",
+  "OMK_ABI": "0x1",
+  "OMK_MAX": "0x300000",
+  "OMK_BUF": "0xa345a000",
+  "OMK_ENTRY": "0x6345a010",
+  "OMK_STACK_LEN": "0x800",
+  "OMK_PRIO": "0x42",
+  "OMK_TRIES": "0xa",
+  "OMK_DELAY": "0x3e8",
+  "OMK_SEC_TRIES": "0x12c",
+  "OMK_SEC_DELAY": "0x64"
+ },
+ "blobs": [
+  {
+   "name": "omk_hook",
+   "at": "0x605af510",
+   "asm": "stub.s"
+  },
+  {
+   "name": "omk_data",
+   "at": "0x615ee7c0",
+   "bytes": "00000000"
+  }
+ ],
+ "hooks": [
+  {
+   "name": "omk_site",
+   "site": "0x601b1362",
+   "tramp": "0x605af4c0",
+   "body": "omk_hook",
+   "frame": 16
+  }
+ ]
+}

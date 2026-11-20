@@ -1,0 +1,4 @@
+# Build output of make (OUT) and of release/build_release.py
+/build/
+__pycache__/
+*.pyc

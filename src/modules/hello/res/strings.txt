@@ -1,0 +1,6 @@
+# HELLO strings: English only, printable ASCII
+TITLE = Hello from OMKit
+GREETING = Have a nice shot
+; same text is stored once
+SAME = Hello from OMKit
+EMPTY =

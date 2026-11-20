@@ -1,0 +1,90 @@
+OMKit {version} - OM SYSTEM OM-5 Mark II, firmware 1.1
+=======================================================
+{test}
+!! EXPERIMENTAL SOFTWARE - USE AT YOUR OWN RISK !!
+OMKit changes the camera's firmware. It can make the camera misbehave,
+freeze or stop starting, can cause data loss and may affect the warranty.
+It comes with no warranty, and nobody accepts liability for any damage.
+OMKit is not made or supported by OM Digital Solutions.
+
+ALREADY INSTALLED OMKit BEFORE (and no official firmware since)?
+  Do NOT flash the camera again. Skip part A and go straight to part B.
+
+
+A. FLASH THE CAMERA (only once)
+-------------------------------
+ 1. IMPORTANT: the camera must run EXACTLY firmware 1.1 (the camera's
+    menu shows the version; see its manual).
+    NEVER flash these files over any other firmware version: this can
+    brick the camera.
+      older than 1.1: first update to 1.1 the official way (OM Workspace).
+      newer than 1.1: STOP. This release is not for your camera.
+    Charge the battery fully.
+ 2. Extract (unzip) this whole ZIP into a folder on the computer.
+    Do not run anything from inside the ZIP.
+ 3. You need Python 3.9 or newer on the computer (python.org).
+ 4. Start the firmware tool in the folder "firmware_tool":
+      Windows:  double-click  get_firmware_windows.bat
+      macOS:    double-click  get_firmware_macos.command
+                (if macOS refuses to open it: open Terminal, type
+                "bash " with a space, drag the file into the window
+                and press Enter)
+      Linux:    in a terminal:  sh get_firmware_linux.sh
+    Press Enter when asked. It downloads the official firmware, checks it,
+    patches it and checks the result. Wait for "Done."
+    It writes two folders into firmware_tool/output:
+      patched/   - to install OMKit (next step)
+      original/  - the official firmware, to go back (part C). KEEP IT.
+ 5. Take a memory card WITHOUT an "OMKIT" folder (format it in the camera).
+    Copy the folder  output/patched/DCOLYMP  to the root of the card.
+    The card now holds:  DCOLYMP\E1489999.BIN
+ 6. Switch the camera OFF and put the card in.
+    HOLD the OK button and switch the camera ON while holding OK.
+ 7. Wait and watch the front lamp (the screen stays dark):
+      lamp lit STEADILY = flashing in progress. Do NOT touch the camera:
+                          never switch off, open a cover or remove the
+                          battery or card.
+      lamp BLINKING     = flashing finished. Now you may switch off.
+ 8. Switch the camera off, then on again (do NOT hold OK).
+    Check that it starts normally, as before.
+    If it does not start normally: go to part C, "Back to the stock
+    firmware".
+ 9. Switch the camera off. On the computer DELETE the folder DCOLYMP from
+    the card (or format the card in the camera).
+10. Go on with part B.
+
+
+B. COPY OR UPDATE OMKit ON THE CARD
+-----------------------------------
+ First time:
+ 1. Copy the folder "OMKIT" of this release to the root of the card.
+ 2. Put the card in the camera and switch it on. Done: the modules are
+    already on.
+    In the picture mode screen you now find "Film Look" in place of
+    i-Enhance, and Color/Mono Profiles 1-3.
+
+ Updating (OMKit is on the card already):
+ 1. Read this release's section in CHANGELOG.md first: it says if the
+    update needs more than copying files.
+ 2. Copy the FILES inside this release's OMKIT folders onto the card's
+    OMKIT folders, replacing old ones:
+      OMKIT/CORE.BIN, OMKIT/MODULES/*, OMKIT/FILMLOOK/*, OMKIT/GRAIN/*
+    Do NOT copy OMKIT.INI - your own file keeps your settings.
+    (On macOS copy the files, not the folders: replacing a folder would
+    delete your own presets.)
+ 3. Put the card in the camera and switch it on.
+
+ Your own presets (.ISP) in OMKIT/FILMLOOK stay; delete the bundled ones
+ you do not want.
+
+
+C. IF SOMETHING GOES WRONG / GOING BACK
+---------------------------------------
+ - Start without OMKit: take the card out, or hold OK while switching on
+   and keep holding it for a few seconds (only with NO DCOLYMP folder on
+   the card, or OK starts a firmware update).
+ - Back to the stock firmware: do steps A5-A9 with  output/original/DCOLYMP
+   instead of output/patched/DCOLYMP, using a card without an OMKIT folder.
+
+Full guide and troubleshooting: docs/platform/om5m2/fw1100/install.md in
+the OMKit repository, https://github.com/necrostaz/omkit

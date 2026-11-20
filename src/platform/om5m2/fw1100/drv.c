@@ -1,0 +1,541 @@
+/* OM-5 Mark II driver, firmware 1.1. Firmware addresses live only here, in thunks.s and in fw.ld. */
+#include "omk_drv.h"
+#include "omk_ev.h"
+#include "omk_power.h"
+
+#define CRASH_BASE 0x62ad5580
+#define CRASH_STEP 0x40
+#define BOOT_COUNT 0xa26e13fc
+#define BOOT_EVENTS 0xa26e1400
+#define BOOT_EVENT_SIZE 24
+#define BOOT_NAME_LEN 20
+#define UNCACHED DRV_UNCACHED
+#define ARENA_LO 0xa3470000                 /* resource gap: the arena never starts below this */
+#define ARENA_HI 0xa3780000
+#define GUARD_LO 0x60000200                 /* DbgSup protected range */
+#define GUARD_HI 0x60cbe800
+#define JMP_D32 0xdc
+#define JMP_LEN 5
+#define ICACHE_LINE 16
+
+/* First bytes of the functions from fw.ld: the loader does not change them */
+static const struct {
+    u32 addr;
+    u8 bytes[8];
+} fingerprint[] = {
+    {0x606aa3bd, {0x00, 0xcd, 0xb3, 0x13, 0xf0, 0x2c, 0xdf, 0x00}},
+    {0x606aa54e, {0x47, 0x04, 0x87, 0x82, 0x93, 0xdd, 0x11, 0xeb}},
+    {0x606aa444, {0x47, 0x04, 0x87, 0x82, 0x93, 0xdd, 0x1b, 0xec}},
+    {0x60051a2b, {0x08, 0xdd, 0xcb, 0xf9, 0xfd, 0xff, 0xb0, 0x10}},
+    {0x602f4c5b, {0x1c, 0xcd, 0x08, 0x00, 0xe0, 0x14, 0xdf, 0x00}},
+    {0x6006e645, {0xfc, 0xa5, 0xfc, 0x06, 0xf0, 0x8f, 0x82, 0xfc}},
+    {0x6006e68e, {0x82, 0xfc, 0xa4, 0x40, 0x00, 0xf0, 0x8f, 0xa0}},
+    {0x60023818, {0xfa, 0xc8, 0x80, 0x00, 0xc5, 0x05, 0x00, 0xca}},
+    {0x6002384a, {0xf1, 0xd0, 0xfc, 0xc8, 0x80, 0xe3, 0xa8, 0xa1}},
+    {0x606aa3c6, {0x93, 0xdd, 0x9d, 0xec, 0x00, 0x00, 0x00, 0x08}},   /* fclose */
+    {0x606aa4d2, {0x93, 0xdd, 0x91, 0xeb, 0x00, 0x00, 0x00, 0x08}},   /* fflush */
+    {0x606aa784, {0x93, 0xdd, 0xdf, 0xe8, 0x00, 0x00, 0x00, 0x08}},   /* remove */
+    {0x606aa81f, {0x93, 0x82, 0xdd, 0x43, 0xe8, 0x00, 0x00, 0x00}},   /* mkdir */
+    {0x606ab659, {0x3d, 0x51, 0xcd, 0xa4, 0xf5, 0xf0, 0x24, 0xa0}},   /* exists */
+    {0x606aa646, {0x87, 0x82, 0x93, 0xdd, 0x1b, 0xea, 0x00, 0x00}},   /* fseek */
+    {0x606aa5dc, {0x93, 0xdd, 0x87, 0xea, 0x00, 0x00, 0x00, 0x08}},   /* ftell */
+    {0x602dd18d, {0xf8, 0xfe, 0xfc, 0x80, 0x6f, 0xdd, 0x39, 0x3f}},   /* callback of setting 111 */
+    {0x608442e6, {0xf1, 0xe7, 0xf1, 0xe2, 0x3c, 0x20, 0x08, 0x43}},   /* data cache range invalidation */
+    {0x60051ace, {0x93, 0xf1, 0xe6, 0x82, 0xfc, 0xac, 0xe4, 0x1f}},   /* acre_Event1 */
+    {0x60051143, {0x5b, 0x38, 0x93, 0x96, 0x86, 0x42, 0x1c, 0x00}},   /* OlyEvWt */
+    {0x60051078, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xba, 0x28, 0xc0}},   /* OlyEvSt */
+    {0x6005123a, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xf8, 0x26, 0xc0}},   /* OlyEvCl */
+};
+
+const char *drv_name(void)
+{
+    return "om5m2 fw1100";
+}
+
+const char *drv_root(void)
+{
+    return "C:\\OMKIT\\";
+}
+
+char drv_sep(void)
+{
+    return 0x5c;                            /* backslash */
+}
+
+/* The arena is uncached (0xa...), code executes through the cached alias (0x6...), like core itself. A module is
+ * linked for this address, so its own variables (data, bss) are used at the cached alias too, through the data cache
+ * of the CPU that runs it (CPU 0); core gives the image whole cache lines for that (MEM_LINES). Memory protection
+ * watches only 0x60000200..0x60cbe7ff; the arena is above that */
+void *drv_exec_addr(void *p)
+{
+    u32 a = (u32)p;
+
+    return (void *)(a >= 0xa0000000 && a < 0xc0000000 ? a - UNCACHED : a);
+}
+
+/* There is no instruction cache invalidation in the firmware at run time, and it is
+ * not needed as long as nothing was read or executed at the cached address of the image: core never hands out again the
+ * memory of an image that has already run. Data cache: drv_dcache_inv */
+void drv_code_sync(void *exec, u32 size)
+{
+    (void)exec;
+    (void)size;
+}
+
+int drv_check(void)
+{
+    u32 i, k;
+
+    for (i = 0; i < sizeof(fingerprint) / sizeof(fingerprint[0]); i++)
+        for (k = 0; k < sizeof(fingerprint[0].bytes); k++)
+            if (((const volatile u8 *)fingerprint[i].addr)[k] != fingerprint[i].bytes[k])
+                return 1;
+    return 0;
+}
+
+/* One region: the arena in the resource gap, verified with a sample on the camera. The second gap 0xa3cb88f8..0xa3f25540 after verification.
+ * Start: past the end of the core image with its stack (__image_end, cached address), rounded up to 4 KB: the core image and stack
+ * are written through the cache, the arena's blocks through the uncached address, and a shared cache line would corrupt a
+ * module (core 0.53 on the camera). Inside the arena only module images are used through the cache; each has its own lines */
+extern u32 __image_end[];
+
+int drv_mem_region(u32 i, void **base, u32 *size)
+{
+    u32 lo = ((u32)(uptr)__image_end + UNCACHED + 0xfff) & ~0xfffu;
+
+    if (i)
+        return 0;
+    if (lo < ARENA_LO)
+        lo = ARENA_LO;
+    *base = (void *)lo;
+    *size = ARENA_HI - lo;
+    return 1;
+}
+
+/* Only the NMI handler writes task, it is the task number. Vector 0x60030020 updates sp, psw, pc of CPU 0 on every interrupt.
+ * RAM is lost at power-off: the block is almost all ones with random flipped bits, so the value matters, not the difference from ffffffff */
+int drv_crash_read(int cpu, omk_crash *out)
+{
+    const volatile u32 *src = (const volatile u32 *)(CRASH_BASE + cpu * CRASH_STEP);
+    int i;
+
+    out->task = src[0];
+    out->sp = src[1];
+    out->psw = src[2];
+    out->pc = src[3];
+    out->cause = src[4];
+    for (i = 0; i < 8; i++)
+        out->regs[i] = src[8 + i];
+    return out->task > 0 && out->task < 0x1000;
+}
+
+/* Jump in firmware code through the uncached address: memory protection watches only 0x6....
+ * Verified on the camera. The five bytes do not cross an instruction cache line, the first byte is written last */
+/* Under the firmware lock: no task of CPU 0 can run the site while bytes 1..4 are new and byte 0 is still the old opcode.
+ * Byte 0 goes last, so until then the old instruction's first byte stays. CPUs 1 and 2 are not stopped: sites they run
+ * (live view) are a known residual risk of the order */
+int drv_code_jump(u32 site, const u8 *before, void *target)
+{
+    volatile u8 *p = (volatile u8 *)(site + UNCACHED);
+    u32 rel = (u32)target - site, st;
+    int k;
+
+    if (site / ICACHE_LINE != (site + JMP_LEN - 1) / ICACHE_LINE)
+        return 2;
+    st = drv_lock();
+    for (k = 0; k < JMP_LEN; k++)
+        if (p[k] != before[k]) {
+            drv_unlock(st);
+            return 1;
+        }
+    for (k = 1; k < JMP_LEN; k++)
+        p[k] = rel >> ((k - 1) * 8);
+    p[0] = JMP_D32;
+    drv_unlock(st);
+    return 0;
+}
+
+int drv_dcache_inv_fw(u32 addr, u32 len);    /* thunks.s */
+
+/* Only lines that cannot be dirty: the protected range is never written through the cache (that would be an NMI), so
+ * dropping its lines loses nothing; elsewhere a dirty line of firmware data would be lost */
+int drv_dcache_inv(u32 addr, u32 len)
+{
+    if (addr < GUARD_LO || addr + len > GUARD_HI || addr + len < addr)
+        return -1;
+    return drv_dcache_inv_fw(addr, len);
+}
+
+/* Uncached firmware heap scheap_phyalloc 0x60023818 (implementation 0x60023b01): one for all CPUs, under a hardware semaphore.
+ * Class: first the blocks never handed out yet (ISSUED counter), then the stack of freed blocks (FREED).
+ * Tables 0x60028288..0x600282d4: block counts 178, 21, 43, stride including header 192, 2112, 16448. */
+#define FWHEAP_ISSUED 0xa26dbc84
+#define FWHEAP_FREED 0xa26dbc94
+#define FWHEAP_CLASSES 3
+
+int drv_fwheap_class(u32 i, u32 *block, u32 *total, u32 *free)
+{
+    static const u32 blocks[FWHEAP_CLASSES] = {128, 2048, 16384}, totals[FWHEAP_CLASSES] = {178, 21, 43};
+
+    if (i >= FWHEAP_CLASSES)
+        return 0;
+    *block = blocks[i];
+    *total = totals[i];
+    *free = totals[i] - ((const volatile u32 *)FWHEAP_ISSUED)[i] + ((const volatile u32 *)FWHEAP_FREED)[i];
+    return 1;
+}
+
+int drv_boot_event(u32 i, char *name, u32 *time)
+{
+    const volatile u8 *e = (const volatile u8 *)(BOOT_EVENTS + i * BOOT_EVENT_SIZE);
+    u32 k;
+
+    if (i >= *(const volatile u16 *)BOOT_COUNT)
+        return 0;
+    for (k = 0; k < BOOT_NAME_LEN; k++)
+        name[k] = e[k];
+    name[BOOT_NAME_LEN] = 0;
+    *time = *(const volatile u32 *)(e + BOOT_NAME_LEN);
+    return 1;
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * Events. Hook: a jmp to a trampoline in thunks.s, installed by drv_code_jump. */
+typedef struct {
+    u32 d0, d1, a0, a1, arg4, result;       /* order as in the thunks.s trampolines */
+} hook_regs;
+
+void drv_tramp_pm(void);
+void drv_tramp_s1(void);
+u32 drv_orig_pm(hook_regs *r);
+
+#define PM_REJECTED 0x100                   /* response of 0x602d78a3: a rule or ONOFF replaced the mode */
+
+static const struct {
+    u32 event, site, phases;
+    u8 before[JMP_LEN];
+    void (*tramp)(void);
+} hooks[] = {
+    /* availability handler 111: entry, the displaced instructions are movm [d2],(sp); add -4,sp */
+    {OMK_EV_PICTMODE_CHECK, 0x602d7964, OMK_PH_NOTIFY_BEFORE | OMK_PH_REPLACE | OMK_PH_FILTER_AFTER | OMK_PH_NOTIFY_AFTER,
+     {0xcf, 0x80, 0xf8, 0xfe, 0xfc}, drv_tramp_pm},
+    /* API 0x80001: entry, the displaced instruction is mov 0x80001,d0 (6 bytes); site verified on the camera, core 0.11 */
+    {OMK_EV_S1_API, 0x60323a64, OMK_PH_NOTIFY_BEFORE, {0xfc, 0xcc, 0x01, 0x00, 0x08}, drv_tramp_s1},
+};
+
+#define NHOOKS (sizeof(hooks) / sizeof(hooks[0]))
+
+int drv_ev_supported(u32 event, u32 *phases)
+{
+    u32 i;
+
+    for (i = 0; i < NHOOKS; i++)
+        if (hooks[i].event == event) {
+            *phases = hooks[i].phases;
+            return 1;
+        }
+    return 0;
+}
+
+int drv_ev_install(u32 event)
+{
+    u32 i;
+
+    for (i = 0; i < NHOOKS; i++)
+        if (hooks[i].event == event)
+            return drv_code_jump(hooks[i].site, hooks[i].before, (void *)hooks[i].tramp);
+    return 3;
+}
+
+static void pm_orig(void *data, void *ctx)
+{
+    hook_regs *r = ctx;
+    omk_ev_pictmode_check *d = data;
+
+    r->result = drv_orig_pm(r);
+    d->allowed = (r->result & 0xffff) == 0;
+}
+
+/* Calls of the event hooks on CPUs 1 and 2 (the original runs without handlers there). Hooks on those CPUs must not touch
+ * cached core variables (the data caches of the CPUs are not coherent): the counters live in their own 64 bytes, used only through the uncached
+ * alias, so no CPU ever holds their line in its cache. Increments from two CPUs may race: a statistic, not a decision */
+static u32 other_cpu_slot[16] __attribute__((aligned(64), section(".data.cpu_shared")));
+
+static volatile u32 *other_cpu_calls(void)
+{
+    return (volatile u32 *)((u32)other_cpu_slot + UNCACHED);
+}
+
+u32 drv_ev_other_cpu(u32 event)
+{
+    return event < 16 ? other_cpu_calls()[event] : 0;
+}
+
+/* From the trampoline. Response to the firmware: the original one if modules did not change allowed, otherwise 0 or PM_REJECTED */
+void drv_hook_pm(hook_regs *r)
+{
+    omk_ev_pictmode_check d;
+
+    if (drv_cpu() != 0) {
+        other_cpu_calls()[OMK_EV_PICTMODE_CHECK]++;
+        r->result = drv_orig_pm(r);
+        return;
+    }
+    d.mode = r->a1 & 0xffff;
+    d.allowed = 1;
+    if (!ev_dispatch(OMK_EV_PICTMODE_CHECK, &d, pm_orig, r) || d.allowed != ((r->result & 0xffff) == 0))
+        r->result = d.allowed ? 0 : PM_REJECTED;
+}
+
+static void s1_orig(void *data, void *ctx)
+{
+    (void)data;
+    (void)ctx;                              /* the original continues by itself after the trampoline */
+}
+
+void drv_hook_s1(void)
+{
+    if (drv_cpu() != 0) {
+        other_cpu_calls()[OMK_EV_S1_API]++;
+        return;
+    }
+    ev_dispatch(OMK_EV_S1_API, 0, s1_orig, 0);
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * Screen or viewfinder, for the power probe line of the log: video compositor channel 0, scale of OSD plane 2. On the camera
+ * the screen has no scaling (0), the viewfinder has it (0x11, window 1024 x 768): .
+ * Read only (the drawing into the OSD buffers was removed in core 0.94) */
+#define VSC0 0x9c000000
+#define VSC_RSZ_OSD3 0x178
+
+static u32 vsc(u32 off)
+{
+    return ((const volatile u32 *)VSC0)[off / 4];
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * Power hooks. The sites' bytes are checked against the
+ * image; all of them run in the application task. The kinds in thunks.s are POWER_HOOK_* of omk_power.h */
+void drv_tramp_off(void);
+void drv_tramp_card(void);
+void drv_tramp_sleep(void);
+void drv_tramp_gate(void);
+void drv_tramp_wake(void);
+
+static const struct {
+    const char *name;
+    u32 site;
+    u8 before[JMP_LEN];
+    void (*tramp)(void);
+} power_hooks[] = {
+    {"power-off", 0x6089e774, {0xcf, 0xf0, 0xf8, 0xfe, 0xe4}, drv_tramp_off},
+    {"card off", 0x601b3267, {0xfc, 0xdc, 0xc9, 0x0a, 0x21}, drv_tramp_card},
+    {"sleep", 0x6089e863, {0xcf, 0xa0, 0xf8, 0xfe, 0xf8}, drv_tramp_sleep},
+    {"sleep gate", 0x60325f80, {0x82, 0xfc, 0xcc, 0x01, 0x00}, drv_tramp_gate},
+    {"wake", 0x60898419, {0x00, 0x42, 0x14, 0x8f, 0x23}, drv_tramp_wake},
+};
+
+int drv_power_install(u32 i, const char **name)
+{
+    if (i >= sizeof(power_hooks) / sizeof(power_hooks[0]))
+        return -1;
+    *name = power_hooks[i].name;
+    return drv_code_jump(power_hooks[i].site, power_hooks[i].before, (void *)power_hooks[i].tramp);
+}
+
+/* From the trampolines. Only CPU 0: the core state lives in cached memory of CPU 0 */
+void drv_hook_power(u32 kind, u32 arg)
+{
+    if (drv_cpu() == 0)
+        power_hook(kind, arg);
+}
+
+/* CameraCommon::shutDown d1 */
+const char *drv_power_reason(u32 reason)
+{
+    switch (reason) {
+    case 0:
+        return "card unmount without the power-off hook";
+    case 1:
+        return "power lever";
+    case 4:
+        return "deep sleep (auto power off)";
+    case 5:
+        return "battery";
+    case 10:
+        return "quick sleep";
+    }
+    return 0;
+}
+
+/* "Power lever off accepted" (0x61e41990), K1: set to 1 by the system event
+ * forwarding (event 39) and by the lever check on mode changes, before CameraCommon::shutDown; cleared only when
+ * startShutDown gives up (cancel). Lever only. Read through the cached address on CPU 0, as the firmware does */
+#define LEVER_OFF_FLAG 0x61e41990
+
+int drv_power_pending(void)
+{
+    return *(const volatile u32 *)LEVER_OFF_FLAG == 1;
+}
+
+static int ram_ptr(u32 p)
+{
+    return p >= 0x60000000 && p < 0x64000000 && !(p & 3);
+}
+
+/* For the log: K1 lever flag, K3 (0x61e42010) OlyHfwPower began power-off or sleep, K5 UI state word (0x6234f838, read at
+ * its uncached alias 0xa234f838 - see GUI_STATE in pictprof.c; bytes: group, state; 0x0104 - black screen), K4 raw input byte group 0 (0xa26dea7c, uncached; bit 0 - lever in the emulator),
+ * (0x62151ee8), K2 application state (+192 of the object reached from 0x61e497d8 -> +0xd8 -> +0x70 = object + 20;
+ * a hypothesis from the emulator, every pointer checked; 0xffffffff - path broken). */
+u32 drv_power_probe(u32 *w, u32 max)
+{
+    u32 v[7], n, p;
+
+    v[0] = *(const volatile u32 *)LEVER_OFF_FLAG;
+    v[1] = *(const volatile u32 *)0x61e42010;
+    v[2] = *(const volatile u32 *)0xa234f838;   /* past the cache, as every reader of the GUI state (pictprof.c) */
+    v[3] = *(const volatile u8 *)0xa26dea7c;
+    v[4] = *(const volatile u32 *)0x62151ee8;
+    v[5] = 0xffffffff;
+    p = *(const volatile u32 *)0x61e497d8;
+    if (ram_ptr(p)) {
+        p = *(const volatile u32 *)(p + 0xd8);
+        if (ram_ptr(p)) {
+            p = *(const volatile u32 *)(p + 0x70);
+            if (ram_ptr(p))
+                v[5] = *(const volatile u32 *)(p + 172);
+        }
+    }
+    v[6] = vsc(VSC_RSZ_OSD3) != 0;          /* 1 - the viewfinder: its plane is scaled, the screen's is not */
+    for (n = 0; n < max && n < 7; n++)
+        w[n] = v[n];
+    return n;
+}
+
+/* Application states (K2) that last a moment in normal work: 0x5101 half-press, 0x0002 a transition; the UI hangs
+ * after a shot (core 0.90-0.93, the on-screen text) stayed in them. The input byte K4 changes with the keys of group 0
+ * (bit 1 cleared on half-press: a hypothesis) */
+#define APP_HALF_PRESS 0x5101
+#define APP_TRANSITION 0x0002
+
+int drv_ui_probe(u32 *app, u32 *keys)
+{
+    u32 w[6];
+
+    if (drv_power_probe(w, 6) < 6 || w[5] == 0xffffffff)
+        return -1;
+    *app = w[5];
+    *keys = w[3];
+    return w[5] == APP_HALF_PRESS ? DRV_UI_HALF : w[5] == APP_TRANSITION ? DRV_UI_TRANSIENT : 0;
+}
+
+/* Media busy flags: the camera's power code waits while (0x61e418f0) = 1 or (0x61e418f4) != 0
+ * before sleep. A hypothesis that this is the camera's own card work (a picture being written); core's writes do not set
+ * them. Read through the cache on CPU 0, like the firmware */
+int drv_card_busy(void)
+{
+    return *(const volatile u32 *)0x61e418f0 == 1 || *(const volatile u32 *)0x61e418f4 != 0;
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * The core task's wait: an RTOS event flag instead of a plain sleep, so a hook can wake it at once (power-off, sleep, wake)
+ * rather than after up to 250 ms. The firmware's own tasks wait this way (OlyEvWt with a timeout). Services work on the
+ * objects of their own CPU only: the flag belongs to CPU 0, it is set from tasks of CPU 0 only, never under drv_lock.
+ * If the flag cannot be made or the wait misbehaves, plain dly_tsk is used. Misbehaving is: the wait fails at once
+ * (an error code within WAIT_QUICK_US) WAIT_FAIL_MAX times in a row, or it "succeeds" at once more than WAIT_SPIN_MAX
+ * times within WAIT_SPIN_US - a flag that never clears. A wake-up that was already there when the wait began is a
+ * success at once and legitimate (dial steps in an editor come faster than the loop serves them): it never counts as a
+ * failure, and hooks cannot produce hundreds of them a second */
+int drv_ev_create(const char *name);
+int drv_ev_wait(int id, u32 ms);
+int drv_ev_set(int id);
+int drv_ev_clear(int id);
+
+#define WAIT_QUICK_US 2000                  /* a return sooner than this was not a wait */
+#define WAIT_FAIL_MAX 50                    /* failures at once in a row */
+#define WAIT_SPIN_US 1000000                /* the window of the count of successes at once ... */
+#define WAIT_SPIN_MAX 500                   /* ... and its limit: a stuck flag gives thousands a second, hooks a few dozen */
+
+static int core_flag;                       /* > 0 - the flag id; 0 - none; < 0 - given up */
+static u32 quick_fails, quick_wakes, wakes_t0;
+
+int drv_wait_init(int on)
+{
+    if (!on || core_flag)
+        return core_flag;
+    core_flag = drv_ev_create("OMK_CORE");
+    if (core_flag <= 0)
+        core_flag = -1;
+    return core_flag;
+}
+
+/* Core task only. 1 - woken by a hook, 0 - the time ran out (or the plain sleep) */
+int drv_wait(u32 ms)
+{
+    u32 t0;
+    int rc;
+
+    if (core_flag <= 0) {
+        drv_sleep(ms);
+        return 0;
+    }
+    t0 = drv_ticks();
+    rc = drv_ev_wait(core_flag, ms);
+    drv_ev_clear(core_flag);                /* whatever the flag's attribute: the next wait waits again */
+    if (drv_ticks_since(t0) >= WAIT_QUICK_US || ms < 10) {
+        quick_fails = 0;                    /* a real wait (or one too short to tell) */
+    } else if (rc) {
+        if (++quick_fails >= WAIT_FAIL_MAX) {   /* the wait refuses: never spin, fall back */
+            core_flag = -1;
+            return 0;
+        }
+    } else {                                /* woken at once: legitimate unless it never stops */
+        quick_fails = 0;
+        if (!quick_wakes || drv_ticks_since(wakes_t0) >= WAIT_SPIN_US) {
+            quick_wakes = 0;
+            wakes_t0 = t0;
+        }
+        if (++quick_wakes > WAIT_SPIN_MAX) {
+            core_flag = -1;
+            return 0;
+        }
+    }
+    return rc == 0;
+}
+
+/* From a task on CPU 0, outside drv_lock: the core task stops waiting. Elsewhere: nothing, it notices by its timeout */
+void drv_wake(void)
+{
+    if (core_flag > 0 && drv_cpu() == 0)
+        drv_ev_set(core_flag);
+}
+
+int drv_wait_state(void)
+{
+    return core_flag;
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * Subprocessor clock: seconds at 0x98e00098, 1/1024 s in bits 5..14 of
+ * 0x98e0009c; it keeps counting while the camera sleeps. The firmware checks the block id first: ((0x98e00000) >> 2) & 63 = 42.
+ * The two words are read apart: the seconds are read again to catch a carry in between */
+int drv_rtc(u32 *sec, u32 *frac1024)
+{
+    volatile const u32 *r = (volatile const u32 *)0x98e00000;
+    u32 s1, f, s2, k;
+
+    if (((r[0] >> 2) & 63) != 42)
+        return -1;
+    for (k = 0; k < 3; k++) {
+        s1 = r[0x98 / 4];
+        f = r[0x9c / 4];
+        s2 = r[0x98 / 4];
+        if (s1 == s2) {
+            *sec = s1;
+            *frac1024 = (f >> 5) & 0x3ff;
+            return 0;
+        }
+    }
+    return -1;
+}

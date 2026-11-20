@@ -1,0 +1,77 @@
+OMKit
+Copyright 2026 The OMKit Authors
+
+Licences
+--------
+OMKit is licensed in two parts:
+
+- Software (source code, build files, scripts, tools, the applications, the
+  agent skill, and everything not listed below) is licensed under the Apache
+  License, Version 2.0. See LICENSE.
+
+- Documentation and data are licensed under the Creative Commons Attribution
+  4.0 International licence (CC BY 4.0). See LICENSE-CC-BY-4.0. This covers:
+    docs/                      (texts and pictures)
+    resources/                 (module pictures, grain tiles, presets and
+                                their manifests)
+    apps/ispkit/data/          (the bundled colour prior)
+
+Files that you make with OMKit (for example your own .isp presets, grain
+tiles, priors or modules) are yours; OMKit's licences do not apply to them.
+Modules built with the OMKit SDK may be licensed as their authors choose.
+
+Disclaimer
+----------
+OMKit changes the behaviour of a camera by means of an unofficial patch to its
+firmware. It is provided "AS IS", without warranties or conditions of any
+kind; you use it entirely at your own risk (see the licences for the full
+terms). It can make the camera misbehave or stop working and may affect its
+warranty.
+
+Firmware and trademarks
+-----------------------
+OMKit is an independent project. It is not affiliated with, endorsed by or
+sponsored by OM Digital Solutions Corporation or OM SYSTEM. OMKit does not
+contain or distribute the manufacturer's firmware; its licences grant no
+rights to that firmware, which remains the property of its owner.
+
+"OM SYSTEM", "OM-5 Mark II", "Olympus" and other camera names, and film names
+such as "Kodak", "Portra", "Ektar", "Kodachrome", "Tri-X", "Vision3",
+"Fujifilm", "Superia", "Eterna", "Ilford" and "HP5", are trademarks of their
+respective owners. They are used only to describe the camera OMKit runs on
+and the character of the looks the presets imitate; their use implies no
+connection with or approval by their owners.
+
+Third-party material
+--------------------
+The 5x8 bitmap font table "font5" in src/platform/om5m2/fw1100/editor.c, its
+copy FONT5_HEX in apps/ispkit/canister.py, and text drawn with it (for
+example, names and ISO values in cassette pictures and in module pictures)
+contain the glyphs for characters 0x20-0x7E of the classic 5x7 font of the
+Adafruit GFX Library (glcdfont.c, https://github.com/adafruit/Adafruit-GFX-Library),
+used under the following licence:
+
+  Software License Agreement (BSD License)
+
+  Copyright (c) 2012 Adafruit Industries.  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  - Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  - Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.

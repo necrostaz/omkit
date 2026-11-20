@@ -1,0 +1,638 @@
+/* Driver for testing core on the host: files C:\OMKIT\X live in the HOST_DIR directory, the test sets the time.
+ * As on the camera, wb mode does not truncate an existing file. Firmware heap: three classes on top of malloc. */
+#include <stdio.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
+#include <stdlib.h>
+#include <string.h>
+#include "omk_drv.h"
+#include "omk_events.h"
+#include "host_drv.h"
+#include "omk_look.h"
+#include "omk_core.h"
+
+u32 host_ticks;
+u32 host_cpu;
+u32 host_region_size = 1 << 20;
+const char *host_dir = ".";
+static unsigned char heap[1 << 20] __attribute__((aligned(16)));
+
+static const u32 fw_block[3] = {128, 2048, 16384};
+u32 host_fw_total[3] = {8, 4, 4};
+u32 host_fw_out[3];
+
+/* C:\OMKIT\A\B -> host_dir/A/B */
+static void host_path(char *out, const char *path)
+{
+    const char *root = drv_root();
+    size_t n = strlen(root), i;
+
+    if (!strncmp(path, root, n))
+        path += n;
+    snprintf(out, 512, "%s/%s", host_dir, path);
+    for (i = strlen(host_dir); out[i]; i++)
+        if (out[i] == 0x5c)
+            out[i] = '/';
+}
+
+u32 host_written, host_fopens;
+int host_no_card;                       /* 1 - no file opens, as without a card */
+
+void *drv_fopen(const char *path, const char *mode)
+{
+    char p[512];
+    FILE *f;
+
+    host_path(p, path);
+    host_fopens++;
+    if (host_no_card)
+        return 0;
+    if (mode[0] == 'r')
+        return fopen(p, "rb");
+    if (mode[0] == 'a')                     /* the firmware: open or create, at the end */
+        return fopen(p, "ab");
+    f = fopen(p, "r+b");                    /* the firmware's w does not truncate */
+    return f ? f : fopen(p, "wb");
+}
+
+int drv_remove(const char *path)
+{
+    char p[512];
+
+    host_path(p, path);
+    return remove(p);
+}
+
+int drv_mkdir(const char *path)
+{
+    char p[512];
+
+    host_path(p, path);
+#ifdef _WIN32
+    return _mkdir(p);
+#else
+    return mkdir(p, 0777);
+#endif
+}
+
+int drv_exists(const char *path)
+{
+    char p[512];
+    struct stat st;
+
+    host_path(p, path);
+    return stat(p, &st) == 0;
+}
+
+int drv_fseek(void *fp, u32 offset)
+{
+    return fseek(fp, (long)offset, SEEK_SET);
+}
+
+u32 drv_ftell(void *fp)
+{
+    return (u32)ftell(fp);
+}
+
+u32 drv_fread(void *buf, u32 size, u32 n, void *fp)
+{
+    return fread(buf, size, n, fp);
+}
+
+u32 drv_fwrite(const void *buf, u32 size, u32 n, void *fp)
+{
+    host_written += size * n;               /* the tests check how much a flush writes */
+    return fwrite(buf, size, n, fp);
+}
+
+void drv_fclose(void *fp)
+{
+    fclose(fp);
+}
+
+u32 drv_fflush(void *fp)
+{
+    return fflush(fp);
+}
+
+void drv_sleep(u32 ms)
+{
+    host_ticks = (host_ticks + ms * 1000) & 0x3fffffff;
+}
+
+u32 drv_ticks(void)
+{
+    return host_ticks;
+}
+
+u32 drv_cpu(void)
+{
+    return host_cpu;
+}
+
+int host_task = 7;
+
+int drv_task_current(u32 cpu)
+{
+    return cpu ? -1 : host_task;
+}
+
+u32 drv_lock(void)
+{
+    return 0x5a;
+}
+
+void drv_unlock(u32 state)
+{
+    if (state != 0x5a)
+        fprintf(stderr, "unlock with a foreign state\n");
+}
+
+int drv_mem_region(u32 i, void **base, u32 *size)
+{
+    if (i)
+        return 0;
+    *base = heap + 8;                       /* unaligned start: core aligns it itself */
+    *size = host_region_size - 8;
+    return 1;
+}
+
+int drv_fwheap_class(u32 i, u32 *block, u32 *total, u32 *free)
+{
+    if (i >= 3)
+        return 0;
+    *block = fw_block[i];
+    *total = host_fw_total[i];
+    *free = host_fw_total[i] - host_fw_out[i];
+    return 1;
+}
+
+void *drv_fwheap_alloc(u32 size)
+{
+    u32 c;
+    unsigned char *p;
+
+    if (host_cpu)
+        fprintf(stderr, "firmware heap alloc from cpu %u\n", host_cpu);
+    for (c = 0; c < 3 && fw_block[c] < size; c++)
+        ;
+    if (c == 3 || host_fw_out[c] == host_fw_total[c])
+        return 0;
+    p = malloc(16 + fw_block[c]);              /* glibc aligns to 16 */
+    p[0] = c;
+    host_fw_out[c]++;
+    return p + 16;
+}
+
+void drv_fwheap_free(void *p)
+{
+    unsigned char *b = (unsigned char *)p - 16;
+
+    host_fw_out[b[0]]--;
+    free(b);
+}
+
+const char *drv_name(void)
+{
+    return "host";
+}
+
+const char *drv_root(void)
+{
+    static const char root[] = {'C', ':', 0x5c, 'O', 'M', 'K', 'I', 'T', 0x5c, 0};
+
+    return root;
+}
+
+char drv_sep(void)
+{
+    return 0x5c;
+}
+
+void *drv_exec_addr(void *p)
+{
+    return p;
+}
+
+void drv_code_sync(void *exec, u32 size)
+{
+    (void)exec;
+    (void)size;
+}
+
+int drv_check(void)
+{
+    return 0;
+}
+
+int drv_boot_event(u32 i, char *name, u32 *time)
+{
+    (void)i;
+    (void)name;
+    (void)time;
+    return 0;
+}
+
+int host_install_rc;
+u32 host_installs[8];
+
+int drv_ev_supported(u32 event, u32 *phases)
+{
+    if (event == OMK_EV_PICTMODE_CHECK)
+        *phases = OMK_PH_NOTIFY_BEFORE | OMK_PH_REPLACE | OMK_PH_FILTER_AFTER | OMK_PH_NOTIFY_AFTER;
+    else if (event == OMK_EV_S1_API)
+        *phases = OMK_PH_NOTIFY_BEFORE;
+    else
+        return 0;
+    return 1;
+}
+
+int drv_ev_install(u32 event)
+{
+    host_installs[event]++;
+    return host_install_rc;
+}
+
+/* Power hooks: one pretend hook, always installed (core/power.c) */
+int drv_power_install(u32 i, const char **name)
+{
+    if (i)
+        return -1;
+    *name = "test";
+    return 0;
+}
+
+const char *drv_power_reason(u32 reason)
+{
+    return reason == 1 ? "power lever" : 0;
+}
+
+int host_power_pending;                 /* what drv_power_pending reports: the lever flag */
+
+int drv_power_pending(void)
+{
+    return host_power_pending;
+}
+
+u32 drv_power_probe(u32 *w, u32 max)
+{
+    u32 n;
+
+    for (n = 0; n < max && n < 6; n++)
+        w[n] = n ? 0 : (u32)host_power_pending;
+    return n;
+}
+
+/* Picture profiles: the driver state as the host test sets it (core/prof.c) */
+u32 host_prof, host_prof_seq, host_prof_ui, host_prof_base = 1, host_prof_installs;
+int host_prof_install_rc;
+
+int drv_prof_count(u32 *colors, u32 *monos)
+{
+    *colors = *monos = 3;
+    return 1;
+}
+
+int drv_prof_install(int cache_inv)
+{
+    (void)cache_inv;
+    host_prof_installs++;
+    return host_prof_install_rc;
+}
+
+void drv_prof_set(u32 prof)
+{
+    host_prof = prof;
+}
+
+u32 drv_prof_get(void)
+{
+    return host_prof;
+}
+
+int drv_prof_base(void)
+{
+    return host_prof_base;
+}
+
+u32 drv_prof_stored_mode(void)
+{
+    return host_prof_base ? 1 : 5;
+}
+
+void drv_prof_stats(drv_prof_info *st)
+{
+    memset(st, 0, sizeof(*st));
+    st->ui_seq = host_prof_seq;
+    st->ui_prof = host_prof_ui;
+}
+
+int drv_prof_service(void)
+{
+    return 0;
+}
+
+int drv_edp_install(void)
+{
+    return 0;
+}
+
+void drv_edp_service(void)
+{
+}
+
+void drv_edp_stats(u32 *items, u32 *renders, u32 *cpu, u32 *drawn, u32 *failed)
+{
+    *items = *renders = *cpu = *drawn = *failed = 0;
+}
+
+void drv_imp_stats(u32 *lines, u32 *selects, u32 *skipped, u32 *last_prof, u32 *bad)
+{
+    *lines = *selects = *skipped = *last_prof = *bad = 0;
+}
+
+void drv_prof_prepare(void)
+{
+}
+
+int drv_prof_take_recent(void)
+{
+    return 0;
+}
+
+int drv_card_busy(void)
+{
+    return 0;
+}
+
+int host_ended;                             /* core_mark_ended calls (main.c is not in the host build) */
+
+void core_mark_ended(void)
+{
+    host_ended++;
+}
+
+u32 host_ev_other_cpu[16];
+
+u32 drv_ev_other_cpu(u32 event)
+{
+    return event < 16 ? host_ev_other_cpu[event] : 0;
+}
+
+int host_wakes, host_rtc_ok = 1;
+u32 host_rtc_sec, host_rtc_frac;
+
+int drv_wait_init(int on)
+{
+    return on ? 1 : 0;
+}
+
+int drv_wait(u32 ms)
+{
+    drv_sleep(ms);
+    return 0;
+}
+
+void drv_wake(void)
+{
+    host_wakes++;
+}
+
+int drv_wait_state(void)
+{
+    return 1;
+}
+
+int drv_rtc(u32 *sec, u32 *frac1024)
+{
+    if (!host_rtc_ok)
+        return -1;
+    *sec = host_rtc_sec;
+    *frac1024 = host_rtc_frac;
+    return 0;
+}
+
+int drv_prof_lv_read(drv_lv_view *v)
+{
+    (void)v;
+    return -1;
+}
+
+u32 host_icons;
+
+int drv_prof_picture_size(u32 pic, u32 *w, u32 *h)
+{
+    if ((pic & 0xf00) == 0x100 && (pic & 3) < 3) {
+        *w = pic & 3 ? 80 : 66;
+        *h = pic & 3 ? 60 : 50;
+        return 0;
+    }
+    if ((pic & 0xf00) == 0x200 || (pic & 0xf00) == 0x300) {
+        *w = (pic & 0xf00) == 0x200 ? 124 : 128;
+        *h = 39;
+        return 0;
+    }
+    if ((pic & 0xf00) == 0x400) {
+        *w = 80;
+        *h = 36;
+        return 0;
+    }
+    if ((pic & 0xf00) == 0x500 && (pic & 0xff) < 9) {
+        *w = (pic & 0xff) < 5 ? 66 : 80;
+        *h = (pic & 0xff) < 5 ? 50 : 60;
+        return 0;
+    }
+    return -1;
+}
+
+int drv_prof_picture(u32 pic, u32 w, u32 h, const u8 *pixels)
+{
+    (void)pic;
+    (void)w;
+    (void)h;
+    (void)pixels;
+    host_icons++;
+    return 0;
+}
+
+u32 host_matrices;
+
+int drv_prof_mono_matrix(u32 filter, u32 level, const s16 *matrix)
+{
+    (void)filter;
+    (void)level;
+    host_matrices += matrix ? 1 : 0;
+    return 0;
+}
+
+void drv_prof_flush(void)
+{
+}
+
+int drv_prof_mono_matrix_get(u32 filter, u32 level, s16 *matrix)
+{
+    u32 k;
+
+    for (k = 0; k < 9; k++)                 /* rows of 256 as the camera's: the diagonal 256 - 2 * (filter + level) */
+        matrix[k] = (s16)(k % 4 ? (s16)(filter + level) : (s16)(256 - 2 * (filter + level)));
+    return 0;
+}
+
+int host_isp_ok;                        /* 1 - the colour path hooks install (0: the service is not available) */
+int host_isp_busy;                      /* drv_isp_set answers -2 (too soon) this many times */
+u32 host_isp_stock;                     /* drv_isp_set(0, 0) calls: back to the camera's own tables */
+
+int drv_isp_install(void)
+{
+    return host_isp_ok ? 0 : 1;
+}
+
+int drv_isp_set(const u8 *block, u32 size)
+{
+    (void)size;
+    if (!host_isp_ok)
+        return -3;
+    if (!block)
+        host_isp_stock++;
+    if (host_isp_busy) {
+        host_isp_busy--;
+        return -2;
+    }
+    return 0;
+}
+
+void drv_isp_census(int on)
+{
+    (void)on;
+}
+
+void drv_isp_service(u32 now)
+{
+    (void)now;
+}
+
+void drv_isp_scope(u32 scope)
+{
+    (void)scope;
+}
+
+void *drv_fopen_long(const char *path, const char *mode)
+{
+    (void)mode;
+    return drv_fopen(path, "r");            /* the host's file system takes long names as they are */
+}
+
+int drv_findfirst(const char *mask, void *entry)
+{
+    (void)mask;
+    (void)entry;
+    return -1;                              /* no folder listing on the host: nothing found */
+}
+
+int drv_findnext(int handle, void *entry)
+{
+    (void)handle;
+    (void)entry;
+    return -1;
+}
+
+int drv_findclose(int handle)
+{
+    (void)handle;
+    return 0;
+}
+
+void drv_edp_gaps(u32 *min, u32 *last, u32 *count)
+{
+    *min = *last = *count = 0;
+}
+
+/* The film look and the look's grain (look.c, grain.c) are not in the host build: their API entries refuse */
+int look_enable(omk_mod *m, const char *slot, omk_look_fn fn, void *ctx)
+{
+    (void)m, (void)slot, (void)fn, (void)ctx;
+    return -1;
+}
+
+int look_list(omk_mod *m, const char *const *names, u32 count, u32 current)
+{
+    (void)m, (void)names, (void)count, (void)current;
+    return -1;
+}
+
+int look_set(omk_mod *m, int on)
+{
+    (void)m, (void)on;
+    return -1;
+}
+
+int look_get(void)
+{
+    return 0;
+}
+
+int look_picture_size(u32 pic, u32 *w, u32 *h)
+{
+    (void)pic, (void)w, (void)h;
+    return -1;
+}
+
+int look_picture(omk_mod *m, u32 pic, u32 w, u32 h, const u8 *pixels)
+{
+    (void)m, (void)pic, (void)w, (void)h, (void)pixels;
+    return -1;
+}
+
+int look_exif(omk_mod *m, const char *text)
+{
+    (void)m, (void)text;
+    return -1;
+}
+
+int look_name(omk_mod *m, const char *text)
+{
+    (void)m, (void)text;
+    return -1;
+}
+
+int look_art(omk_mod *m, u32 index, const void *data, u32 size)
+{
+    (void)m, (void)index, (void)data, (void)size;
+    return -1;
+}
+
+int look_edits(omk_mod *m, const omk_look_edits *e)
+{
+    (void)m, (void)e;
+    return -1;
+}
+
+int look_grain(omk_mod *m, u32 entry, s32 tile, u32 level)
+{
+    (void)m, (void)entry, (void)tile, (void)level;
+    return -2;
+}
+
+void look_drop_module(omk_mod *m)
+{
+    (void)m;
+}
+
+void grain_drop_module(struct omk_mod *m)
+{
+    (void)m;
+}
+
+/* main.c is not in the host build: the tests call core's functions as firmware tasks would */
+int core_in_task(void)
+{
+    return 0;
+}
+
+u32 grain_list(struct omk_mod *m, char (*files)[13], u32 max)
+{
+    (void)m, (void)files, (void)max;
+    return 0;
+}

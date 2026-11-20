@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ISP Player</title>
+<link rel="stylesheet" href="/static/player.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true"></span><h1>ISP Player</h1>
+    <span class="sub">a picture through an .isp profile · OM-5 Mark II colour path model</span></div>
+  <span class="spacer"></span>
+  <span class="badge" id="backend" title="Where the tables are computed: GPU (a copy of the model checked against it) or CPU">…</span>
+  <span class="badge" id="version" title="Version of the colour path model (ispkit)">model …</span>
+</header>
+
+<main class="layout">
+  <aside class="side" aria-label="Files and profile details">
+    <section class="card">
+      <h2><span class="step" id="step-image">1</span>Picture</h2>
+      <div class="drop" id="drop-image" tabindex="0" role="button" aria-label="Choose a picture">
+        <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="m21 16-5-5-8 8"/></svg></span>
+        <span class="txt"><b>RAW or JPEG</b><span>ORF, JPEG, PNG, TIFF - drop here or click</span>
+          <span class="file" id="image-name" hidden></span></span>
+        <input type="file" id="file-image" accept="image/*,.orf,.ORF,.tif,.tiff" hidden>
+      </div>
+      <label class="field" id="space-box" hidden>Colour space
+        <select id="space"><option value="auto">automatic</option></select></label>
+      <p class="hint small" id="image-how" hidden></p>
+    </section>
+
+    <section class="card">
+      <h2><span class="step" id="step-isp">2</span>Profile .isp</h2>
+      <div class="drop" id="drop-isp" tabindex="0" role="button" aria-label="Choose an .isp file">
+        <span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16M12 4c-2.5 2.2-2.5 13.8 0 16"/></svg></span>
+        <span class="txt"><b>Profile file</b><span>.isp - drop here or click</span>
+          <span class="file" id="isp-name" hidden></span></span>
+        <input type="file" id="file-isp" accept=".isp,.ISP" hidden>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Exposure</h2>
+      <div class="ev"><input type="range" id="ev" min="-3" max="3" step="0.25" value="0" aria-label="Exposure, EV"><output id="ev-out" class="num">0 EV</output></div>
+      <div class="btns"><button class="btn" id="autoev" disabled title="Choose the EV at which the picture through the profile is as bright as the original">Auto EV</button>
+        <button class="btn" id="ev0">0</button></div>
+      <p class="hint small" id="ev-note">A camera RAW is metered already: its grey is where the camera put it. A developed picture is taken as the scene.</p>
+    </section>
+    <section class="card" id="isp-card" hidden aria-live="polite">
+      <figure class="cassette"><img id="cassette" alt="The profile's cassette, as the camera draws it"><figcaption id="cassette-cap"></figcaption></figure>
+      <div class="title"><strong id="i-title"></strong><span id="i-file"></span></div>
+      <div class="chips" id="i-chips"></div>
+      <div class="verdict" id="i-verdict"></div>
+      <dl class="kv" id="i-kv"></dl>
+      <div class="block" id="i-curves-box">
+        <h3>Curves <small id="i-curves-note"></small></h3>
+        <svg class="plot" id="i-curves" viewBox="0 0 160 100" preserveAspectRatio="none" role="img" aria-label="Gamma R, G, B, the tone curve and the resulting curve"></svg>
+        <div class="legend"><span><i style="background:#e86a5f"></i>gamma R</span><span><i style="background:#6cc08b"></i>G</span><span><i style="background:#5f9be8"></i>B</span><span><i style="background:#9a9aa0"></i>tone</span><span><i style="background:#f0c070"></i>result (as in the camera's editor)</span></div>
+      </div>
+      <div class="block">
+        <h3>Matrix and saturation <small id="i-matrix-note"></small></h3>
+        <div class="mrow"><table class="matrix" id="i-matrix" aria-label="The profile's 3×3 matrix"></table><dl class="kv" id="i-k"></dl></div>
+      </div>
+      <details id="i-sectors-box" open>
+        <summary>Colour sectors <span id="i-sectors-note"></span></summary>
+        <table class="sectors" id="i-sectors"></table>
+        <p class="hint small">Saturation and luma: share of the full scale (1023); hue shift: degrees; width: the sector's hue window.</p>
+      </details>
+      <details id="i-meta-box">
+        <summary>META <span id="i-meta-note"></span></summary>
+        <table class="tbl" id="i-meta"></table>
+      </details>
+      <details>
+        <summary>File sections <span id="i-sec-note"></span></summary>
+        <table class="tbl" id="i-sections"></table>
+      </details>
+    </section>
+
+  </aside>
+
+  <section class="stage">
+    <div class="toolbar">
+      <div class="tabs" role="tablist" aria-label="View mode">
+        <button role="tab" id="tab-view" aria-selected="true" aria-controls="viewport" data-tab="view">ISP view</button>
+        <button role="tab" id="tab-split" aria-selected="false" aria-controls="viewport" data-tab="split" tabindex="-1">Split</button>
+      </div>
+      <span class="strength" id="strength" hidden></span>
+      <span class="spacer"></span>
+      <div class="status" id="status" role="status"><span class="dot"></span><span id="status-text">Drop a picture and an .isp profile</span></div>
+      <a class="btn" id="download" aria-disabled="true" title="Save the frame through the profile (PNG)">Download PNG</a>
+    </div>
+    <div class="viewport" id="viewport" role="tabpanel">
+      <div class="empty" id="empty"><div class="box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4m0 0-4 4m4-4 4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        <strong>Drop a picture and an .isp profile</strong>
+        <span>Files can be dropped anywhere on the page: an .isp file becomes the profile, anything else the picture (a camera RAW .ORF, or JPEG, PNG, TIFF).</span>
+      </div></div>
+      <div class="fit" id="fit" hidden>
+        <div class="frame view" id="frame-view">
+          <img id="img-view" alt="The picture through the ISP profile">
+        </div>
+        <div class="frame compare" id="frame-split" hidden>
+          <img id="img-after" alt="The picture through the ISP profile">
+          <img id="img-before" class="before" alt="The original picture">
+          <div class="handle" id="handle" role="slider" tabindex="0" aria-label="Split position: the original on the left, ISP on the right"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" aria-valuetext="50 %">
+            <span class="knob"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6-6 6 6 6M15 6l6 6-6 6"/></svg></span>
+          </div>
+        </div>
+      </div>
+      <div class="caption" id="caption" hidden></div>
+    </div>
+  </section>
+</main>
+<div class="dropveil" id="dropveil"><div>Release: <b>.isp</b> - the profile, anything else - the picture</div></div>
+<script src="/static/player.js"></script>
+</body>
+</html>
