@@ -5,12 +5,6 @@ them. The camera is flashed once, with a small loader patch; from then on everyt
 core, the modules you choose, their updates and all their settings. Adding, updating or removing a module is a matter of
 copying files to the card, and since nothing of OMKit is kept in the camera, going back to the stock behaviour is simple.
 
-Repository: [github.com/necrostaz/omkit](https://github.com/necrostaz/omkit). Releases: [github.com/necrostaz/omkit/releases](https://github.com/necrostaz/omkit/releases).
-
-Documentation: [docs/README.md](docs/README.md) - the settings file, the modules, the architecture, the module SDK, the
-camera's firmware. Building from source: [docs/build.md](docs/build.md). Changes of every release:
-[CHANGELOG.md](CHANGELOG.md).
-
 ## Supported cameras and firmware
 
 | Camera | Firmware | Status | Install guide |
