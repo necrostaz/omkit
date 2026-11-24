@@ -368,6 +368,8 @@ const char *drv_power_reason(u32 reason)
         return "battery";
     case 10:
         return "quick sleep";
+    case 11:
+        return "reboot (a restart request)";
     }
     return 0;
 }
@@ -442,6 +444,20 @@ int drv_ui_probe(u32 *app, u32 *keys)
  * the full press; past the key task. Core task only, never under drv_lock: the key task runs at once on CPU 0 */
 int drv_key_api(u32 event, u32 state);     /* thunks.s */
 void drv_app_event(u32 event, u32 arg);
+
+/* The reboot request: 0x041B006B into the application's queue (0x60046624), as the firmware's PTP operation 0x970A
+ * (0x614bed6b -> 0x614beec2) and the Wi-Fi page exec_reboot.cgi (0x6142e328) post it. The event becomes the HFW event
+ * 0x14f (table 0x60bc774c) and the application's OLY_WIFI_REQ_BOOT 0x01060011 (table 0x60fb1e8c); the PC sub-application's
+ * common table (0x60f8951c) runs 0x60d1629b for it in any of its states: CameraCommon::shutDown(1, 11, 0) in the
+ * application's task - startShutDown's reason 11 is mode 0 with a wake-up alarm of 1000 ms (table 0x60b7e16c). Shooting,
+ * playback and the menus have no entry for it (static reading of E148 1.1) */
+#define EV_REBOOT_REQUEST 0x041B006B
+
+int drv_restart_request(void)
+{
+    drv_app_event(EV_REBOOT_REQUEST, 0);
+    return 0;
+}
 
 int drv_shutter(u32 key, int down, u32 path)
 {

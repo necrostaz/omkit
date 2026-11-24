@@ -17,6 +17,13 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `core` presses the shutter button by its own path in the camera and chooses a preset of the film look or a profile
   before each step, as the user would. For testing presets
   ([docs/config.md](docs/config.md#10-shoot-the-test-scenario)).
+- **A test session over USB.** With `[debug] write = on`, the computer restarts the camera over USB by the firmware's own
+  reboot request (a normal power-off that keeps the settings and unmounts the card, then a wake-up alarm), starts or
+  stops the test scenario, and reads the build that runs (`INFO`); `omkdebug.py session` does a whole session: files,
+  scenario, restart, the pictures and the logs ([docs/debug.md](docs/debug.md#6-a-test-session)). A scenario waits until
+  the camera shoots (`[shoot] arm_wait`), and `OMKIT\SHOOT.RUN` starts one at the next power-on only, removed before it
+  runs ([docs/config.md](docs/config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)).
+- The log's first line names the build: `OMKit core 1.42 (branch@commit)`.
 
 ### Changed
 

@@ -6,6 +6,9 @@
 #include "omk_mem.h"
 
 #define CORE_VERSION "1.42"
+#ifndef CORE_BUILD                          /* the Makefile: git branch@commit of the build, "-dirty" with changes */
+#define CORE_BUILD "unknown"
+#endif
 
 /* Milliseconds since camera start. The driver counter wraps every 1073 s, so call this at least once every 17 minutes */
 u32 omk_ms(void);
@@ -20,6 +23,10 @@ int cfg_size(const char *section, const char *key, u32 *out);   /* bytes, suffix
 u32 cfg_count(void);
 void cfg_entry(u32 i, const char **section, const char **key, const char **value);
 u32 cfg_bad_lines(u32 *first);          /* how many lines failed to parse, and the number of the first one */
+/* A one-shot file of the OMKit folder with keys of one section (no header, or that section's), read after OMKIT.INI:
+ * its keys win. 1 read (wrong: its lines not understood), 0 not there, -1 longer than 1 KB (not used). Once per start */
+int cfg_once(const char *name, const char *section, u32 *wrong);
+void cfg_once_drop(void);                   /* its keys forgotten (it could not be consumed) */
 
 int str_ieq(const char *a, const char *b);
 u32 str_len(const char *s);

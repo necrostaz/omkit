@@ -11,13 +11,15 @@
  *    its state (STATUS) and then for its result (GET XFER).
  *  - [debug] card_writes = off: neither the log nor the stores are written to the card (they stay in RAM).
  *  - [debug] write = on: files of the OMKit folder written over USB (a temporary file, its CRC-32 read back from the card,
- *    then the rename), and the restart.
+ *    then the rename), the restart, and the test scenario started or stopped (core/shoot.c).
  * Everything here is core's cached data of CPU 0: the core task and the PTP task are both tasks of CPU 0; the state they
  * share changes under drv_lock. */
 #include "omk_core.h"
 #include "omk_debug.h"
 #include "omk_dring.h"
 #include "omk_log.h"
+#include "omk_power.h"
+#include "omk_shoot.h"
 #include "omk_store.h"
 
 #define WATCH_MAX 12
@@ -30,9 +32,12 @@
 #define SNAP_OBJS 64
 #define TMP_NAME "OMKDBG.TMP"
 #define ALIGN_PTP 128                       /* our PTP buffers: the firmware's own sit on 128-byte steps (0x9702) */
+#define RESTART_GRACE_MS 500                /* RESTART: the job's end reaches the computer (it asks every 20 ms) before the
+                                               camera leaves USB */
+#define RESTART_TAKEN_MS 5000               /* no power-off this long after the request: the firmware did not take it */
 
 enum { T_CARD_BEGIN = 1, T_CARD_END, T_WINDOW, T_CAM_BUSY, T_CAM_IDLE, T_STUCK, T_MARK, T_BOOT, T_JOB };
-enum { J_NONE, J_SNAP, J_READ, J_LIST, J_WBEGIN, J_WDATA, J_WCOMMIT, J_WABORT, J_RESTART };
+enum { J_NONE, J_SNAP, J_READ, J_LIST, J_WBEGIN, J_WDATA, J_WCOMMIT, J_WABORT, J_RESTART, J_SHOOT };
 
 typedef struct {
     char name[DRV_TASK_NAME];
@@ -60,10 +65,16 @@ static struct {
     u32 kind, seq, arg[3], result, bytes, crc, extra;
 } job;
 static char path[DBG_PATH_MAX + 1];         /* from PUT PATH */
+static char text_arg[DBG_TEXT_MAX + 1];     /* from PUT TEXT: the steps of the next SHOOT START */
+static char run_name[9];
 static char wtarget[OMK_PATH_MAX + 8], wtmp[OMK_PATH_MAX + 8];
 static void *wfp;
 static u32 wsize, wdone, wcrc, wcrc_want, wlast;
 static volatile u32 level_req, mark_req, mark_tag;
+static u32 restart_state, restart_t;        /* 0; 1 the request is due at restart_t; 2 posted at restart_t */
+#ifdef OMK_EMU
+static u32 emu_restart_ms;                  /* the emulator has no USB: [debug] emu_restart starts the job at this time */
+#endif
 
 int core_card_ok(void)
 {
@@ -596,11 +607,69 @@ static void job_wcommit(void)
     job_end(result);
 }
 
+/* The test scenario: started (the steps of PUT TEXT, else OMKIT.INI's) or stopped. A start waits for the camera to shoot:
+ * in the MTP mode it begins once the cable is out */
+static void job_shoot(void)
+{
+    int rc, delay = cfg_int("shoot", "start_delay", 5000);
+
+    if (job.arg[0] == DBG_SHOOT_STOP) {
+        shoot_stop();
+        job_end(DBG_E_OK);
+        return;
+    }
+    rc = shoot_start(text_arg[0] ? text_arg : 0, delay < 0 || delay > 600000 ? 5000 : (u32)delay);
+    log_printf(rc ? OMK_LOG_WARN : OMK_LOG_INFO, "debug: test scenario %s from USB%s%s", rc == -2 ? "NOT started (one runs)" :
+               rc ? "NOT started (a step not understood)" : "started", text_arg[0] ? ": " : "", text_arg);
+    text_arg[0] = 0;
+    job_end(rc == -2 ? DBG_E_BUSY : rc ? DBG_E_STEPS : DBG_E_OK);
+}
+
+/* The restart: refused while a file is being written, a scenario presses keys, or a power-off or sleep is under way; else
+ * the job ends at once and the firmware's reboot request follows RESTART_GRACE_MS later (dbg_service). The power-off it
+ * leads to is an ordinary one, in the application's task: the power hooks, the card-off gate and the last save as for the
+ * lever. The log goes to the card before the request */
+static void job_restart(u32 now)
+{
+    shoot_info si;
+
+    shoot_status(&si);
+    if (wfp || restart_state || !power_running() || drv_power_pending() || (si.state == SHOOT_RUNNING && !si.waiting)) {
+        log_printf(OMK_LOG_WARN, "debug: restart refused: %s", wfp ? "a file is being written" : restart_state ?
+                   "one is under way" : si.state == SHOOT_RUNNING && !si.waiting ? "the test scenario is shooting" :
+                   "a power-off or sleep is under way");
+        job_end(si.state == SHOOT_RUNNING && !si.waiting ? DBG_E_BUSY : DBG_E_STATE);
+        return;
+    }
+    log_printf(OMK_LOG_INFO, "debug: restart over USB: the firmware's reboot request in %u ms", RESTART_GRACE_MS);
+    log_flush();
+    restart_state = 1;
+    restart_t = now + RESTART_GRACE_MS;
+    job.extra = RESTART_GRACE_MS;
+    job_end(DBG_E_OK);
+}
+
+static void restart_service(u32 now)
+{
+    if (restart_state == 1 && (s32)(now - restart_t) >= 0) {
+        restart_state = 2;
+        restart_t = now;
+        mark("restart request", 0);
+        drv_restart_request();
+        log_printf(OMK_LOG_INFO, "debug: the reboot request posted, waiting for the power-off");
+    } else if (restart_state == 2 && now - restart_t >= RESTART_TAKEN_MS) {
+        restart_state = 0;                  /* the service runs only while the camera does: no power-off came */
+        log_printf(OMK_LOG_WARN, "debug: the reboot request was not taken in %u ms (the camera not in the PC mode of USB?), "
+                   "running on", RESTART_TAKEN_MS);
+    }
+}
+
 static void job_run(u32 now)
 {
     u32 kind = job.kind;
 
-    if ((kind == J_WBEGIN || kind == J_WDATA || kind == J_WCOMMIT || kind == J_WABORT) && drv_card_busy())
+    if ((kind == J_WBEGIN || kind == J_WDATA || kind == J_WCOMMIT || kind == J_WABORT || kind == J_RESTART) &&
+        drv_card_busy())
         return;                             /* the camera writes a picture: as every write of core, later */
     job.state = DBG_J_RUNNING;
     switch (kind) {
@@ -626,11 +695,16 @@ static void job_run(u32 now)
         write_drop();
         job_end(DBG_E_OK);
         break;
+    case J_SHOOT:
+        job_shoot();
+        break;
+    case J_RESTART:
+        job_restart(now);
+        break;
     default:
-        job_end(DBG_E_RESTART);             /* the restart: not available (docs: debug) */
+        job_end(DBG_E_STATE);
         break;
     }
-    (void)now;
 }
 
 /* ---- PTP handlers (the firmware's PTP task, CPU 0): no waits, no card, no log ---- */
@@ -680,7 +754,50 @@ static u32 version(void)
 static u32 flags(void)
 {
     return (cur ? DBG_F_RING : 0) | (prev_valid ? DBG_F_PREV : 0) | (write_on ? DBG_F_WRITE : 0) |
-           (card_on ? 0 : DBG_F_NO_CARD) | (ptp_on ? DBG_F_PTP : 0) | (stage && xfer ? DBG_F_BUFFERS : 0);
+           (card_on ? 0 : DBG_F_NO_CARD) | (ptp_on ? DBG_F_PTP : 0) | (stage && xfer ? DBG_F_BUFFERS : 0) | DBG_F_SHOOT |
+           DBG_F_INFO | (write_on ? DBG_F_RESTART : 0);
+}
+
+/* GET INFO: key=value lines, plain text */
+static u32 info_str(u32 at, const char *v)
+{
+    while (*v && at < DBG_INFO_MAX - 1)
+        stage[at++] = *v++;
+    return at;
+}
+
+static u32 info_num(u32 at, u32 v)
+{
+    char d[11];
+    u32 n = 0;
+
+    do
+        d[n++] = '0' + v % 10;
+    while ((v /= 10) && n < sizeof(d));
+    while (n && at < DBG_INFO_MAX - 1)
+        stage[at++] = d[--n];
+    return at;
+}
+
+static u32 info(void)
+{
+    static const char *const shoot_states[] = {"idle", "running", "done", "failed", "stopped"};
+    shoot_info si;
+    u32 at;
+
+    shoot_status(&si);
+    at = info_str(0, "core=" CORE_VERSION "\nbuild=" CORE_BUILD "\nrun=");
+    at = info_str(at, run_name);
+    at = info_num(info_str(at, "\npower-on="), cur ? cur->h[DH_BOOT] : 0);
+    at = info_str(info_str(at, "\nrestart="), flags() & DBG_F_RESTART ? "yes" : "no");
+    at = info_str(info_str(at, "\nshoot="), si.state < 5 ? shoot_states[si.state] : "?");
+    at = info_str(at, si.waiting ? ",waiting" : "");
+    at = info_num(info_str(at, "\nshoot_taken="), si.taken);
+    at = info_num(info_str(at, "\nshoot_failed="), si.failed);
+    at = info_num(info_str(at, "\nshoot_total="), si.total);
+    at = info_num(info_str(at, "\nshoot_step="), si.state == SHOOT_RUNNING ? si.step + 1 : 0);
+    at = info_num(info_str(at, "\nshoot_steps="), si.steps);
+    return info_str(at, "\n");
 }
 
 static void h_cmd(const drv_ptp_msg *q, drv_ptp_msg *r)
@@ -738,6 +855,22 @@ static void h_cmd(const drv_ptp_msg *q, drv_ptp_msg *r)
             reply(r, 0x201d, 0, 0, 0, 0);
             return;
         }
+        break;
+    case DBG_SHOOT:
+        if (q->p[1] == DBG_SHOOT_STATUS) {  /* the scenario's words, read on CPU 0 as the core task writes them */
+            shoot_info si;
+
+            shoot_status(&si);
+            reply(r, 0x2001, 5, si.state | si.waiting << 8, si.total, si.taken);
+            r->p[3] = si.failed;
+            r->p[4] = (si.state == SHOOT_RUNNING ? si.step + 1 : 0) | si.steps << 16;
+            return;
+        }
+        if (q->p[1] > DBG_SHOOT_STOP) {
+            reply(r, 0x201d, 0, 0, 0, 0);
+            return;
+        }
+        kind = J_SHOOT, need_write = 1;
         break;
     default:                                /* camera control (0x40..0x4f) and anything else: not done */
         reply(r, 0x2005, 0, 0, 0, 0);
@@ -818,6 +951,9 @@ static void h_get(const drv_ptp_msg *q, drv_ptp_msg *r)
     case DBG_HIST:
         n = drv_ptp_history(stage, DBG_STAGE);
         break;
+    case DBG_INFO:
+        n = info();
+        break;
     case DBG_XFER:
         if (job.state != DBG_J_DONE || q->p[1] & 1 || q->p[1] > job.bytes || q->p[2] > job.bytes - q->p[1])
             return;
@@ -856,6 +992,20 @@ static void h_put(const drv_ptp_msg *q, drv_ptp_msg *r)
         for (i = 0; i < len && stage[i]; i++)
             path[i] = stage[i] == '/' ? '\\' : stage[i] >= 'a' && stage[i] <= 'z' ? stage[i] - 32 : stage[i];
         path[i] = 0;
+        reply(r, 0x2001, 0, 0, 0, 0);
+        return;
+    }
+    if (sub == DBG_TEXT) {                  /* printable ASCII, up to DBG_TEXT_MAX; empty clears it */
+        len = drv_ptp_recv_len();
+        if (len > DBG_TEXT_MAX || (len && !drv_ptp_recv(stage, len)))
+            return;
+        for (i = 0; i < len && stage[i] >= 0x20 && stage[i] < 0x7f; i++)
+            text_arg[i] = stage[i];
+        if (i < len && stage[i]) {
+            text_arg[0] = 0;
+            return;
+        }
+        text_arg[i] = 0;
         reply(r, 0x2001, 0, 0, 0, 0);
         return;
     }
@@ -919,6 +1069,7 @@ void dbg_setup(const char *run)
     on = cfg_bool("debug", "enabled", 0);
     if (!on)
         return;
+    mem_copy(run_name, run, 8);
     write_on = cfg_bool("debug", "write", 0);
     card_on = cfg_bool("debug", "card_writes", 1);
     ring_level = parse_level(cfg_str("debug", "ring_level", "debug"), OMK_LOG_DEBUG);
@@ -992,7 +1143,7 @@ static u8 *alloc_aligned(u32 size)
 void dbg_start(void)
 {
     static const char *const keys[] = {"enabled", "write", "card_writes", "ring_level", "tasks", "window_ms",
-                                       "window_every", "stuck_ms"};
+                                       "window_every", "stuck_ms", "emu_restart"};
     const char *sec, *key, *val;
     u32 i, k, n;
     int rc = -1;
@@ -1013,6 +1164,9 @@ void dbg_start(void)
     if (window_every < 10)
         window_every = 10;
     stuck_ms = cfg_ms("stuck_ms", 1000, 600000);
+#ifdef OMK_EMU
+    emu_restart_ms = write_on ? cfg_ms("emu_restart", 0, 600000) : 0;
+#endif
     watch_list();
     core_id = drv_task_current(0);
     stage = alloc_aligned(DBG_STAGE);
@@ -1079,9 +1233,16 @@ void dbg_service(u32 now)
         window_until = 0;
     }
     ui_check(now);
+#ifdef OMK_EMU
+    if (emu_restart_ms && (s32)(now - emu_restart_ms) >= 0 && start_job(J_RESTART, DBG_RESTART_KEY, 0))
+        emu_restart_ms = 0;
+#endif
     if (job.state == DBG_J_QUEUED)
         job_run(now);
-    if (wfp && now - wlast >= WRITE_IDLE_MS && job.state != DBG_J_QUEUED) {
+    restart_service(now);
+    /* signed: the job just run took its time after `now` (omk_ms at its end), so wlast may be later than now - unsigned,
+     * that dropped the file at once after every WBEGIN and WDATA on the camera (card155) */
+    if (wfp && (s32)(now - wlast) >= WRITE_IDLE_MS && job.state != DBG_J_QUEUED) {
         log_printf(OMK_LOG_WARN, "debug: no data for %s for %u s, the temporary file dropped", wtarget, WRITE_IDLE_MS / 1000);
         write_drop();
     }
@@ -1089,6 +1250,8 @@ void dbg_service(u32 now)
 
 u32 dbg_tick(u32 tick)
 {
+    if (on && restart_state == 1)
+        return RESTART_GRACE_MS / 5;
     if (on && (window_until || job.state == DBG_J_QUEUED) && window_every < tick)
         return window_every;
     return tick;

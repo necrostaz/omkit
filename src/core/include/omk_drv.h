@@ -261,7 +261,8 @@ int drv_card_busy(void);
  * (semaphore, event flag, mutex): 0, -1 kind not known to the driver, -2 no such object. drv_mutex_read: mutex slot i of
  * cpu: 1 exists, 0 empty, -1 no more.
  * drv_ui_probe: the application state and the raw input byte; DRV_UI_HALF or DRV_UI_TRANSIENT for the states that should
- * last a moment only, 0 another state, -1 not readable */
+ * last a moment only, 0 another state, -1 not readable. DRV_APP_SHOOTING: the application state of shooting, idle (the
+ * camera after every picture of the test scenario; in the MTP mode of USB the state is not readable) */
 #define DRV_TASK_RETS 6
 #define DRV_TASK_NAME 20
 enum { DRV_TS_RUN = 1, DRV_TS_RDY = 2, DRV_TS_WAI = 4, DRV_TS_SUS = 8, DRV_TS_DMT = 16 };   /* uITRON 4.0 TTS_*: WAI | SUS both */
@@ -296,6 +297,7 @@ int drv_task_current(u32 cpu);
 int drv_obj_read(u32 kind, u32 id, drv_obj *o);
 int drv_mutex_read(u32 cpu, u32 i, drv_obj *o);
 enum { DRV_UI_HALF = 1, DRV_UI_TRANSIENT = 2 };
+#define DRV_APP_SHOOTING 0x5100
 int drv_ui_probe(u32 *app, u32 *keys);
 
 /* The debug service (core/debug.c, core 1.40).
@@ -342,5 +344,12 @@ enum { DRV_SHUTTER_KEYS = 0, DRV_SHUTTER_WIFI = 1 };
 int drv_shutter(u32 key, int down, u32 path);
 int drv_look_choose(int on, u32 index);
 int drv_look_find(const char *name);
+
+/* The restart (the debug service): the firmware's own reboot request, as its PTP operation 0x970A and the Wi-Fi remote's
+ * reboot page post it - an event to the application, which, in the PC mode of USB (MTP), does an ordinary power-off with
+ * the reason "reboot" (settings saved, the card unmounted, the power hooks run in the application's task) and a wake-up
+ * alarm of 1 s. Outside the PC mode the application ignores it. Core task only, never under drv_lock. 0 posted, -1 not on
+ * this platform */
+int drv_restart_request(void);
 
 #endif
