@@ -79,6 +79,9 @@ u32 drv_setting_read(u32 id);           /* read-only access to the working value
 /* Startup timeline kept by the firmware: name up to 20 characters and time in drv_ticks. 0 - no more entries */
 int drv_boot_event(u32 i, char *name, u32 *time);
 int drv_crash_read(int cpu, omk_crash *out);   /* 1: a record exists */
+/* The firmware's word of its last requested restart (0x8ff000b0, written by 0x60058ae0 right before it restarts the
+ * camera, 255 by the NMI path 0x60059ec2; read by 0x60058afa): read only, as early as possible */
+u32 drv_restart_cause(void);
 
 /* Module code: core writes the image at an address from drv_mem_region, it executes at drv_exec_addr (on the camera, a
  * cached alias). drv_code_sync: after writing code, before the first call */
@@ -219,6 +222,54 @@ void drv_grain_look_gain(u32 gain);
 #define DRV_GRAIN_CHROMA_MAX 1024
 void drv_grain_route(u32 route, u32 chroma, u32 tag);
 int drv_grain_route_state(u32 *freed, u32 *live);
+/* The optics layer's probe (platform opticsdrv.c, core 1.33): a CPU step of our own in the look's still jobs on the mask
+ * route (DRV_GRAIN_LIST, DRV_GRAIN_MASK), after the development into the picture buffer and before the pass to the job's
+ * outputs. It measures and logs (level 1), also reads through the window's cached view when armed (level 2, one job an
+ * arming), or writes stripes into the picture (level 3). drv_optics_install: once, the level 1..3 - 0, or a code (1 bad
+ * level, 2 no memory, 10 and up a firmware function not as expected); not installed - the job lists are as without it.
+ * drv_optics_arm: the next job of level 2 reads through the cached view. drv_optics_service: core task - the jobs'
+ * reports to the log, the counts since install in *st */
+enum {                                      /* the bisection's substages (opticsdrv.c's header), in their order */
+    DRV_OPTICS_N, DRV_OPTICS_A0, DRV_OPTICS_A, DRV_OPTICS_B, DRV_OPTICS_C1, DRV_OPTICS_C2, DRV_OPTICS_C3, DRV_OPTICS_W0,
+    DRV_OPTICS_W1, DRV_OPTICS_W2, DRV_OPTICS_D, DRV_OPTICS_E, DRV_OPTICS_F, DRV_OPTICS_FULL, DRV_OPTICS_SUBS
+};
+#define DRV_OPTICS_TESTS (1u << DRV_OPTICS_C3)  /* tests only: the ones after them do not include them, so a reset there
+                                                   does not end the bisection */
+#define DRV_OPTICS_WORKER DRV_OPTICS_W0        /* from this substage on the work is done by the worker task */
+#define DRV_OPTICS_CRUMB 28                 /* the crumb words: magic, boot, heartbeat ms, state (job << 16 | substage << 8 |
+                                               phase), ticks, phases reached (bits), jobs listed, the last job ended; at the
+                                               step's entry: psw, sp, the lowest sp seen, task id, its stack base and size,
+                                               the request C (mode | RawJpeg << 16 | FileType << 24), the worker's
+                                               request | done << 16 (16 bits each); the worker task (16..23): its loops,
+                                               wakes with no request, those in a row at once, naps, the last wait's result,
+                                               its phase, the ticks then, requests done; (24..27) at its start: its sp, psw,
+                                               current | base priority << 16 (its TCB), the flags' ids req | done << 16 */
+typedef struct {
+    u32 jobs;                               /* jobs reported */
+    u32 cached, cached_same;                /* of them: a cached read begun; ended with the same sum as past the cache */
+    u32 armed;                              /* the arming not taken yet */
+    u32 listed, noroom, lost;               /* steps put into lists, lists with no room, jobs not reported (ring) */
+    u32 ended[DRV_OPTICS_SUBS];             /* our jobs ended (H3), by the substage they were listed with */
+} drv_optics_info;
+int drv_optics_install(u32 level);
+void drv_optics_arm(void);
+void drv_optics_service(drv_optics_info *st);
+/* The bisection (core 1.34): drv_optics_sub - the substage of the jobs listed from now on (after install: N, no step);
+ * drv_optics_crumb - at start, the crumbs of the run before into old[DRV_OPTICS_CRUMB], this run's start (boot) in their
+ * place: 1 - they were there (the memory outlived the reset or power-off); drv_optics_beat - core's heartbeat (ms);
+ * names of substages and phases for the log */
+void drv_optics_sub(u32 sub);
+int drv_optics_crumb(u32 boot, u32 *old);
+void drv_optics_beat(u32 ms);
+/* The worker task (core 1.37): made once by the core task, CPU 0, priority 56, its stack from the arena; it does the
+ * work of the substages from W1 on for the step, which waits for it. 0 - running (*tid its id), or a code: 1 no probe,
+ * 2 no memory, 3 no event flag, 4 the task not made, 5 made but not running after the wait */
+int drv_optics_worker(u32 *tid);
+/* Core task, a test of the worker without a picture ([optics] worker_test): a request of the loop of W2 handed and
+ * waited for as the step does. 0 - answered (*us the wait, *work the worker's own time, *state OW_*), -1 no worker */
+int drv_optics_worker_test(u32 *us, u32 *work, u32 *state);
+const char *drv_optics_sub_name(u32 sub);
+const char *drv_optics_phase(u32 phase);
 /* The image memory allocator in its large layout (mode 1, as for the ART filters) or not: the allocator setup hook
  * (platform pictprof.c) installed if needed; a change asks the GUI task for a picture mode rebuild (at the next UI read of
  * 111 or write). 0, or a code. drv_alloc_mode: the mode now (any task, any CPU) */

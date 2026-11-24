@@ -5,7 +5,7 @@
 #include "omk_drv.h"
 #include "omk_mem.h"
 
-#define CORE_VERSION "1.32"
+#define CORE_VERSION "1.39"
 
 /* Milliseconds since camera start. The driver counter wraps every 1073 s, so call this at least once every 17 minutes */
 u32 omk_ms(void);
@@ -47,5 +47,9 @@ struct omk_mod;
 u32 grain_list(struct omk_mod *m, char (*files)[13], u32 max);   /* API 17: the grain containers; the first call takes the service */
 void grain_drop_module(struct omk_mod *m);  /* the owner failed module_init: no grain, the service is free */
 int grain_look(u32 entry, s32 tile, u32 level);   /* the look owner's choice (look.c checks the owner): 0, -1 bad, -2 no service */
+
+/* optics.c: the optics layer - [optics] probe, its store for the cached read (level 2); before the modules */
+void optics_setup(void);
+void optics_service(u32 now);
 
 #endif

@@ -702,6 +702,226 @@ static void test_power(void)
     free(t);
 }
 
+/* The optics probe's cached read (core/optics.c, [optics] probe = 2), one power-on a phase in the same folder:
+ *   1 - run 7 starts; no arming before a job's report; then the arming: the line and the reports before it in the log
+ *       file and "armed" in the store, both on the card, when the driver gets it; a read reported - armed again after the
+ *       next report; power-off with the arming not taken;
+ *   2 - the run before ended without a power-off while armed: counted as a reset, no arming any more in run 7;
+ *   3 - [optics] run = 8: starts again, arms. The log file grows over the phases (log_keep_previous is main.c's) */
+static int opt_arm_ok;
+static int opt_store_armed(void);
+
+/* drv_optics_arm: the log on the card has the reports before the arming and its own line, the store says "armed" */
+static void opt_on_arm(void)
+{
+    long n;
+    char *t = read_file("LOG/CORE.LOG", &n);
+
+    opt_arm_ok = t && strstr(t, "optics: job report before the arming") &&
+                 strstr(t, "optics: arming the cached read for the next job") && opt_store_armed() == 1;
+    free(t);
+}
+
+/* "armed" of the store OPTICS on the card, -1 none; *reads its read count. Of the two copies the one saved last (the
+ * record's own save count; one record, key 1: its value is right after the file header, 20 bytes, and the record
+ * header, 8) */
+static int opt_store_rec(u32 *reads)
+{
+    static const char *const name[2] = {"STORE/OPTICS.STA", "STORE/OPTICS.STB"};
+    u32 w[6], best = 0;
+    int k, armed = -1;
+    long n;
+    char *t;
+
+    for (k = 0; k < 2; k++) {
+        t = read_file(name[k], &n);
+        if (t && n >= 28 + 24) {
+            memcpy(w, t + 28, sizeof(w));
+            if (w[5] > best) {
+                best = w[5];
+                armed = (int)w[1];
+                if (reads)
+                    *reads = w[2];
+            }
+        }
+        free(t);
+    }
+    return armed;
+}
+
+static int opt_store_armed(void)
+{
+    return opt_store_rec(0);
+}
+
+static void test_optics(int phase)
+{
+    long n;
+    char *t;
+    u32 reads = 0;
+
+    omk_dir(LOG_DIR);
+    omk_dir(STORE_DIR);
+    write_file("OMKIT.INI", phase < 3 ? "[optics]\nprobe = 2\nrun = 7\n" : "[optics]\nprobe = 2\nrun = 8\n");
+    CHECK(cfg_load() == 1);
+    log_setup(1, OMK_LOG_INFO, 0);
+    log_keep_previous();
+    host_prev_ended = phase != 2;
+    memset(&host_opt, 0, sizeof(host_opt));
+    host_opt_on_arm = opt_on_arm;
+    optics_setup();
+    CHECK(host_opt_level == 2);
+    optics_service(1000);
+    CHECK(host_opt_arms == 0);              /* no report yet: nothing to have on the card first */
+    log_printf(OMK_LOG_INFO, "optics: job report before the arming");
+    host_opt.jobs = 1;
+    optics_service(1250);
+    if (phase == 2) {
+        CHECK(host_opt_arms == 0);
+        log_flush();
+        t = read_file("LOG/CORE.LOG", &n);
+        CHECK(t && strstr(t, "counted as a reset by the cached read") && strstr(t, "1 resets - off"));
+        free(t);
+        CHECK(opt_store_armed() == 0);
+        return;
+    }
+    CHECK(host_opt_arms == 1 && opt_arm_ok);
+    CHECK(opt_store_armed() == 1);          /* on the card before the driver got it */
+    optics_service(1500);
+    CHECK(host_opt_arms == 1);              /* armed, not taken: no second arming */
+    /* the arming taken by a job: the read counted and "armed" cleared on the card at once */
+    host_opt.armed = 0;
+    host_opt.cached = host_opt.cached_same = 1;
+    optics_service(1750);
+    CHECK(host_opt_arms == 1 && opt_store_rec(&reads) == 0 && reads == 1);
+    /* its report: the next arming - not while the log cannot be written, then 2 s later */
+    host_opt.jobs = 2;
+    opt_arm_ok = 0;
+    host_no_card = 1;
+    optics_service(2000);
+    CHECK(host_opt_arms == 1 && opt_store_armed() == 0);
+    host_no_card = 0;
+    optics_service(2250);
+    CHECK(host_opt_arms == 1);
+    optics_service(4100);
+    CHECK(host_opt_arms == 2 && opt_arm_ok);
+    CHECK(opt_store_rec(&reads) == 1 && reads == 1);
+    if (phase == 3) {
+        log_flush();
+        t = read_file("LOG/CORE.LOG", &n);
+        CHECK(t && strstr(t, "cached read test run 8 starts"));
+        free(t);
+    }
+}
+
+/* The optics probe's bisection ([optics] bisect, core 1.34), one power-on a phase in the same folder:
+ *   1 - run 1 starts at N (no step until armed); every substage is armed only with its line in the log and "armed" in the
+ *       store on the card; a job ended with it - passed, the next one armed: N, A0, then A armed and the run "resets";
+ *   2 - the run before ended without a power-off with A armed: "A RESET THE CAMERA", the stills stay at A0, no arming;
+ *       the crumbs of the run before are logged (the memory kept them);
+ *   3 - [optics] bisect = 2: starts again at N;
+ *   4..6 - a run from C3: C3 (a test) resets, the bisection goes on; the worker made before W1 is armed, never at start;
+ *       W1 resets - the end, the stills at C2; 7 - from W1 with no worker: stopped before it */
+static void test_bisect(int phase)
+{
+    long n;
+    char *t;
+    u32 k;
+
+    omk_dir(LOG_DIR);
+    omk_dir(STORE_DIR);
+    if (phase >= 4) {                       /* bisect_from; a test (C3) that resets: the bisection goes on; the worker */
+        write_file("OMKIT.INI", phase < 7 ? "[optics]\nprobe = 1\nbisect = 3\nbisect_from = C3\n" :
+                                            "[optics]\nprobe = 1\nbisect = 4\nbisect_from = W0\n");
+        CHECK(cfg_load() == 1);
+        log_setup(1, OMK_LOG_INFO, 0);
+        log_keep_previous();
+        host_prev_ended = phase == 4 || phase == 7;
+        host_opt_worker_rc = phase == 7 ? 4 : 0;
+        host_opt_workers = 0;
+        memset(&host_opt, 0, sizeof(host_opt));
+        optics_setup();
+        CHECK(host_opt_sub == DRV_OPTICS_C2);   /* until the arming: the one before C3 (or before W1, C3 being a test) */
+        CHECK(host_opt_workers == 0);       /* not at start */
+        optics_service(1000);
+        if (phase == 4) {
+            CHECK(host_opt_sub == DRV_OPTICS_C3 && host_opt_workers == 0);
+            return;                         /* the "reset" with C3 armed */
+        }
+        log_flush();
+        t = read_file("LOG/CORE.LOG", &n);
+        if (phase == 5) {                   /* C3 marked; the worker made, then W0 armed; then the "reset" with W0 armed */
+            CHECK(host_opt_sub == DRV_OPTICS_W0 && host_opt_workers == 1);
+            CHECK(t && strstr(t, "bisection run 3 starts at C3") && strstr(t, "substage C3 RESET THE CAMERA") &&
+                  strstr(t, "the test C3 reset the camera") && strstr(t, "substage W0 armed for the next still (the worker "
+                  "task made first)") && strstr(t, "the worker task runs: id 119"));
+            CHECK(t && strstr(t, "substage W0 armed") < strstr(t, "the worker task runs"));   /* armed on the card first */
+        } else if (phase == 6) {            /* W0 is no test: the bisection ends there, the stills at C2 */
+            CHECK(host_opt_sub == DRV_OPTICS_C2 && host_opt_workers == 0);
+            CHECK(t && strstr(t, "substage W0 RESET THE CAMERA") && strstr(t, "W0 reset the camera, the stills stay at C2"));
+        } else {                            /* no worker: stopped before W0, "armed" taken back, asked once */
+            optics_service(4000);
+            CHECK(host_opt_sub == DRV_OPTICS_C2 && host_opt_workers == 1);
+            free(t);
+            log_flush();
+            t = read_file("LOG/CORE.LOG", &n);
+            CHECK(t && strstr(t, "the worker task not running, code 4") && strstr(t, "bisection stopped before W0"));
+        }
+        free(t);
+        return;
+    }
+    write_file("OMKIT.INI", phase < 3 ? "[optics]\nprobe = 1\nbisect = 1\n" : "[optics]\nprobe = 1\nbisect = 2\n");
+    CHECK(cfg_load() == 1);
+    log_setup(1, OMK_LOG_INFO, 0);
+    log_keep_previous();
+    host_prev_ended = phase != 2;
+    memset(&host_opt, 0, sizeof(host_opt));
+    if (phase == 2) {                       /* the step's crumbs left by the run before */
+        host_opt_crumb[0] = 0x4f435242u;
+        host_opt_crumb[3] = 3 << 16 | DRV_OPTICS_A << 8 | 7;
+    }
+    optics_setup();
+    CHECK(host_opt_level == 1);
+    if (phase == 2) {
+        CHECK(host_opt_sub == DRV_OPTICS_A0);
+        for (k = 0; k < 4; k++)
+            optics_service(1000 + 250 * k);
+        CHECK(host_opt_sub == DRV_OPTICS_A0);
+        log_flush();
+        t = read_file("LOG/CORE.LOG", &n);
+        CHECK(t && strstr(t, "substage A RESET THE CAMERA") && strstr(t, "the stills stay at A0"));
+        CHECK(t && strstr(t, "crumbs of the run before") && strstr(t, "job 3 at A: last phase '250 ms busy'"));
+        free(t);
+        return;
+    }
+    CHECK(host_opt_sub == DRV_OPTICS_N);
+    for (k = DRV_OPTICS_N; k <= DRV_OPTICS_A; k++) {
+        optics_service(1000 + 1000 * k);    /* armed: its line on the card, "armed" in the store, then the driver */
+        CHECK(host_opt_sub == k);
+        t = read_file("LOG/CORE.LOG", &n);
+        CHECK(t && strstr(t, k == DRV_OPTICS_N ? "substage N armed" : k == DRV_OPTICS_A0 ? "substage A0 armed" :
+                                                                                         "substage A armed"));
+        free(t);
+        if (k == DRV_OPTICS_A)
+            break;                          /* the "reset" with A armed: the process ends here */
+        optics_service(1250 + 1000 * k);
+        CHECK(host_opt_sub == k);           /* no job of it ended yet: no move */
+        host_opt.ended[k]++;
+        host_ui_state = DRV_UI_HALF;        /* the job ended, the application still in its half-press state */
+        optics_service(1400 + 1000 * k);
+        optics_service(1450 + 1000 * k);
+        CHECK(host_opt_sub == k);           /* not passed: else the second call would have armed the next one */
+        host_ui_state = 0;
+        optics_service(1500 + 1000 * k);    /* passed; the next one armed at the next loop */
+    }
+    if (phase == 3) {
+        log_flush();
+        t = read_file("LOG/CORE.LOG", &n);
+        CHECK(t && strstr(t, "bisection run 2 starts") && strstr(t, "substage A0 passed"));
+        free(t);
+    }
+}
+
 int main(int argc, char **argv)
 {
     host_dir = argc > 1 ? argv[1] : ".";
@@ -712,6 +932,10 @@ int main(int argc, char **argv)
         test_mem();
     else if (argc > 2 && !strcmp(argv[2], "power"))
         test_power();
+    else if (argc > 3 && !strcmp(argv[2], "optics"))
+        test_optics(atoi(argv[3]));
+    else if (argc > 3 && !strcmp(argv[2], "bisect"))
+        test_bisect(atoi(argv[3]));
     else {
         test_cfg_template();
         test_log();

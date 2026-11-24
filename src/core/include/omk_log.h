@@ -14,7 +14,7 @@ void log_printf(int level, const char *fmt, ...);
 void log_vprintf(int level, const char *fmt, va_list ap);
 void log_vprintf_from(int level, const char *who, const char *fmt, va_list ap);   /* line "who: text" */
 
-void log_flush(void);                   /* service loop only: file calls */
+int log_flush(void);                    /* service loop only: file calls. 1 - every log file has the text logged so far */
 u32 log_room(void);                     /* free bytes in the ring */
 /* Boot checkpoint, core task only: at debug level the line goes to the card at once, so a crash right after it leaves a
  * trace (the camera may go down before the next regular write). Below debug - a debug line that is not even kept */

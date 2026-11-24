@@ -14,7 +14,7 @@ PYTHON ?= python3
 # as u16/u32 words, structures over arena blocks), as embedded code usually does; the type-based alias rule must not
 # let the optimizer reorder such reads and writes
 CFLAGS := -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-strict-aliasing -nostdlib -Wall -Wextra -Isrc/core/include -Isrc/sdk/include $(EXTRA)
-OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o taskdump.o drv.o pictprof.o editor.o import.o ispdrv.o graindrv.o kernel.o thunks.o)
+OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o optics.o taskdump.o drv.o pictprof.o editor.o import.o ispdrv.o graindrv.o opticsdrv.o kernel.o thunks.o)
 LD_SCRIPTS := src/core/core.ld src/platform/$(PLATFORM)/fw.ld
 
 all: $(OUT)/CORE.BIN
@@ -51,6 +51,11 @@ $(OUT)/ispdrv.o: src/platform/$(PLATFORM)/ispdrv.c src/core/include/*.h src/sdk/
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
 $(OUT)/graindrv.o: src/platform/$(PLATFORM)/graindrv.c src/platform/$(PLATFORM)/texfill.h src/core/include/*.h src/sdk/include/*.h
+	@mkdir -p $(OUT)
+	$(TC)gcc $(CFLAGS) -c $< -o $@
+
+# optprobe.h, optwork.h: the plain C parts of the optics probe's step, run as they are by the host tests (tests/host)
+$(OUT)/opticsdrv.o: src/platform/$(PLATFORM)/opticsdrv.c src/platform/$(PLATFORM)/optprobe.h src/platform/$(PLATFORM)/optwork.h src/core/include/*.h src/sdk/include/*.h
 	@mkdir -p $(OUT)
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
@@ -107,9 +112,9 @@ HAVE_TC = $(shell command -v $(TC)gcc 2>/dev/null)
 HAVE_NUMPY = $(shell $(PYTHON) -c "import numpy" 2>/dev/null && echo yes)
 HAVE_PIL = $(shell $(PYTHON) -c "import numpy, PIL" 2>/dev/null && echo yes)
 
-$(TEST)/test_core: $(HOST_CORE) tests/host/test_core.c $(HOST_DEPS)
+$(TEST)/test_core: $(HOST_CORE) src/core/optics.c tests/host/test_core.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
-	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) tests/host/host_drv.c tests/host/test_core.c -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) src/core/optics.c tests/host/host_drv.c tests/host/test_core.c -o $@
 
 $(TEST)/test_mod: $(HOST_CORE) src/core/module.c src/core/api.c src/core/event.c tests/host/test_mod.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
@@ -129,10 +134,18 @@ $(TEST)/test_filmlook: $(FILMLOOK_SRC)/*.c $(FILMLOOK_SRC)/*.h tests/host/test_f
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -I$(FILMLOOK_SRC) $(FILMLOOK_SRC)/edits.c $(FILMLOOK_SRC)/ispfile.c tests/host/test_filmlook.c -o $@
 
-# The driver's plain C parts: the grain texture's fill and the editors' sines
+# The driver's plain C parts: the grain texture's fill, the editors' sines and the optics probe's checks and stripes
 $(TEST)/test_texfill: src/platform/$(PLATFORM)/texfill.h tests/host/test_texfill.c src/sdk/include/omk_types.h
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -O1 -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_texfill.c -o $@
+
+$(TEST)/test_optprobe: src/platform/$(PLATFORM)/optprobe.h tests/host/test_optprobe.c src/sdk/include/omk_types.h
+	@mkdir -p $(TEST)
+	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_optprobe.c -o $@
+
+$(TEST)/test_optwork: src/platform/$(PLATFORM)/optwork.h tests/host/test_optwork.c src/sdk/include/omk_types.h
+	@mkdir -p $(TEST)
+	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_optwork.c -o $@
 
 $(TEST)/test_edtrig: src/platform/$(PLATFORM)/edtrig.h tests/host/test_edtrig.c src/sdk/include/omk_types.h
 	@mkdir -p $(TEST)
@@ -142,7 +155,7 @@ $(TEST)/test_edtrig: src/platform/$(PLATFORM)/edtrig.h tests/host/test_edtrig.c 
 test-hello:
 	$(if $(HAVE_TC),@$(MAKE) -s -C src/modules MOD=hello OUT=$(abspath $(TEST))/modules >/dev/null)
 
-test-host: $(TEST)/test_core $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig test-hello
+test-host: $(TEST)/test_core $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_optprobe $(TEST)/test_optwork test-hello
 	@echo "host tests:"
 	@sh tests/host/run.sh $(TEST) $(HOST_CC) $(if $(HAVE_TC),$(abspath $(TEST))/modules $(TC) "$(PYTHON)")
 

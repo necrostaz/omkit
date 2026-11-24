@@ -252,14 +252,15 @@ static int append(log_file *f, u32 h)
     return 1;
 }
 
-/* Service loop (and the card-off gate) only: file calls */
-void log_flush(void)
+/* Service loop (and the card-off gate) only: file calls. 1 - the files took everything up to now (a file stopped for a
+ * full card counts as not) */
+int log_flush(void)
 {
     u32 st, h, free_to;
     int ok;
 
     if (!enabled)
-        return;
+        return 0;
     st = drv_lock();
     h = head;
     dirty = 0;
@@ -293,6 +294,8 @@ void log_flush(void)
         log_printf(OMK_LOG_WARN, "log: %u lines lost, the buffer was full", lost - lost_told);
         lost_told = lost;
     }
+    return ok && core_file.state != FILE_STOPPED && core_file.done == h &&
+           (!run_file.path || (run_file.state != FILE_STOPPED && run_file.done == h));
 }
 
 /* Free bytes in the ring now: a writer of many lines (the task dump) waits while it is low, rather than losing lines */

@@ -1235,3 +1235,104 @@ _drv_fw_tex_release:
 	call	fw_tex_release,[a2,a3],12
 	add	4,sp
 	rets
+
+# The optics layer's probe (opticsdrv.c). The step runs in the firmware's still job task; its C code keeps to the arena
+# block, the job and the stack, and calls the firmware only through the thunks below - the calls the stock CPU step
+# 0x6038c84a and the window's users (0x604258a5, 0x60425a1c) make.
+	.global	_drv_tramp_optics_step, _drv_fw_job_wait, _drv_fw_job_buf, _drv_fw_win_map, _drv_fw_win_unmap
+	.global	_drv_fw_cache_flush
+
+# A step of the job's list, called by the step executor 0x60389f71 with calls (a1), a0 = h: the return address at (sp),
+# no frame made for it (the stock step 0x6038c84a makes its own: movm [a2],(sp); add -4,sp ... ret [a2],8).
+# drv_optics_step(h) with every register kept, then d0 0 - the executor's "next step" - and rets
+_drv_tramp_optics_step:
+	movm	[d2,d3,a2,a3,other],(sp)
+	add	-12,sp
+	mov	a0,d0
+	call	_drv_optics_step,[],0
+	add	12,sp
+	movm	(sp),[d2,d3,a2,a3,other]
+	clr	d0
+	rets
+
+# The wait for the pass of the step before, as 0x6038c850 calls it: a0 = h -> d0 (u16; 0 - the pass ended well). d0 h
+_drv_fw_job_wait:
+	mov	d0,a0
+	add	-4,sp
+	call	fw_job_wait,[a2],8
+	add	4,sp
+	rets
+
+# The job's buffer by its type, as the firmware's callers do: a0 = h, d0 the type -> d0 the slot, 48 - none. d0 h, d1 type
+_drv_fw_job_buf:
+	mov	d0,a0
+	mov	d1,d0
+	add	-4,sp
+	call	fw_job_buf,[d2],4
+	add	4,sp
+	rets
+
+# The image memory window, as 0x604258a5 maps and 0x60425a1c releases it: d0 the bus address, d1 the flags (bit 0: do
+# not wait for the window's semaphore) -> d0 the window's address, 0 - none; release: d0 the window's address -> d0, 0 -
+# not released
+_drv_fw_win_map:
+	add	-4,sp
+	call	fw_win_map,[d2,d3,a2,a3],48
+	add	4,sp
+	rets
+
+_drv_fw_win_unmap:
+	add	-4,sp
+	call	fw_win_unmap,[d2,d3,a2,a3],52
+	add	4,sp
+	rets
+
+# This CPU's data cache written back (with the system cache) and dropped, no arguments
+_drv_fw_cache_flush:
+	add	-4,sp
+	call	fw_cache_flush,[d2,d3],16
+	add	4,sp
+	rets
+
+
+# The worker task of the optics probe (opticsdrv.c). Its entry, as the kernel starts a task made by acre_Task (the
+# loader's OMK_LOAD task is entered the same way): a frame for the C call, drv_optics_worker_main (it does not return;
+# if it ever does, the task ends itself as the loader's does, ext_tsk)
+	.global	_drv_tramp_optics_worker, _drv_fw_acre_task, _drv_fw_job_cancel
+_drv_tramp_optics_worker:
+	add	-12,sp
+	call	_drv_optics_worker_main,[],0
+	add	12,sp
+	call	fw_ext_tsk,[a2],8
+
+# acre_Task 0x60051d5c as the loader calls it: d0 the start (2 - now), d1 exinf, a0 name, a1 entry, (4,sp) priority,
+# (8,sp) stack size, (12,sp) the stack's base (0 - the kernel's pool; acre_tsk 0x60030b02 keeps a given one) -> d0 the
+# task id, -1 none (also when the name table is full - the task made all the same). C: d0 name, d1 entry, (12,sp)
+# priority, (16,sp) size, (20,sp) base; our frame: (0,sp) the slot call writes its return address to, (4..12,sp) the
+# arguments
+_drv_fw_acre_task:
+	add	-16,sp
+	mov	(28,sp),a0
+	mov	a0,(4,sp)
+	mov	(32,sp),a0
+	mov	a0,(8,sp)
+	mov	(36,sp),a0
+	mov	a0,(12,sp)
+	mov	d0,a0
+	mov	d1,a1
+	mov	2,d0
+	clr	d1
+	call	fw_acre_task,[d2,d3,a2,a3],56
+	add	16,sp
+	rets
+
+# The job's cancel check 0x6038a8a5 as the stock waits call it (0x60386bd6): a0 = P (h+4), a1 = h+11318 -> d0 (u8) 1 -
+# the job is cancelled (it then sets the u16 at a1 to 1), 0 - go on. d0 P, d1 the u16
+_drv_fw_job_cancel:
+	mov	d0,a0
+	mov	d1,a1
+	add	-4,sp
+	call	fw_job_cancel,[a2],8
+	add	4,sp
+	extbu	d0
+	rets

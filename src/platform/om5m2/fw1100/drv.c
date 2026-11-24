@@ -12,6 +12,8 @@
 #define UNCACHED DRV_UNCACHED
 #define ARENA_LO 0xa3470000                 /* resource gap: the arena never starts below this */
 #define ARENA_HI 0xa3780000
+#define ARENA_TAIL 128                      /* the region's last 128 bytes are not the arena: opticsdrv.c's crumbs
+                                               (0xa377ff80), which a reset must not find overwritten by a block */
 #define GUARD_LO 0x60000200                 /* DbgSup protected range */
 #define GUARD_HI 0x60cbe800
 #define JMP_D32 0xdc
@@ -108,7 +110,7 @@ int drv_mem_region(u32 i, void **base, u32 *size)
     if (lo < ARENA_LO)
         lo = ARENA_LO;
     *base = (void *)lo;
-    *size = ARENA_HI - lo;
+    *size = ARENA_HI - ARENA_TAIL - lo;
     return 1;
 }
 
@@ -127,6 +129,13 @@ int drv_crash_read(int cpu, omk_crash *out)
     for (i = 0; i < 8; i++)
         out->regs[i] = src[8 + i];
     return out->task > 0 && out->task < 0x1000;
+}
+
+/* A word of the processor's shared memory (0x8ff0...): the firmware reads and writes it with plain mov, as kernel.c
+ * reads the kernel pointers next to it. Nothing at start clears it (its writers are the restart paths only) */
+u32 drv_restart_cause(void)
+{
+    return *(const volatile u32 *)0x8ff000b0;
 }
 
 /* Jump in firmware code through the uncached address: memory protection watches only 0x6....

@@ -147,12 +147,35 @@ static void setup_memory(void)
         log_printf(OMK_LOG_INFO, "memory: firmware heap allowed, limit %u", limit);
 }
 
+static u32 restart_cause;                   /* the firmware's restart word, read before anything else */
+
+/* The causes 0x60058afa prints for the word (its strings at 0x6007bfd4..) */
+static const char *restart_name(u32 v)
+{
+    switch (v) {
+    case 2:
+        return "CPU1 ADDEC De Reboot";
+    case 3:
+        return "Heap Destroy";
+    case 5:
+        return "CPU2 ADDEC De Reboot";
+    case 16:
+        return "ARM De Reboot";
+    case 255:
+        return "the NMI path";
+    default:
+        return "no text in the firmware";
+    }
+}
+
 static void log_diagnostics(void)
 {
     omk_crash c;
     char name[21];
     u32 i, time, block, total, free, used, largest;
 
+    log_printf(restart_cause ? OMK_LOG_WARN : OMK_LOG_INFO, "restart word (0x8ff000b0) at start: %08x (%s; it keeps the last "
+               "restart the firmware asked for - it may be an old one)", restart_cause, restart_name(restart_cause));
     for (i = 0; i < OMK_CPUS; i++)
         if (drv_crash_read(i, &c))
             log_printf(OMK_LOG_WARN, "NMI record cpu %u: task %u cause %08x regs %08x %08x %08x %08x", i, c.task, c.cause,
@@ -226,6 +249,7 @@ void core_main(void)
                                                firmware function is called - no log either (it takes the firmware
                                                lock and opens a file). Back to the loader, silently */
         return;
+    restart_cause = drv_restart_cause();    /* before core does anything else */
     omk_ms();
     mem_init();
     make_run_id();
@@ -245,6 +269,7 @@ void core_main(void)
     log_checkpoint("boot: installing power hooks");
     power_install();
     taskdump_setup(omk_ms());               /* before the modules: its buffer is taken from the arena first */
+    optics_setup();                         /* [optics] probe: the step's block from the arena, before the modules too */
 #ifdef OMK_EMU
     {
         /* OMK_EMU: a build for running core in an emulator, never for a camera - a check of the thunks to the
@@ -302,6 +327,7 @@ void core_main(void)
         look_service(now);
         isp_service(now);
         grain_service(now);
+        optics_service(now);
         modules_tick(now);
         taskdump_service(now);
         if (!busy)

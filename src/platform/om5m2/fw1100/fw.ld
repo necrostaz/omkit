@@ -93,3 +93,12 @@ grain_det_back = 0x6036fbc0;            /* the pass setup's check 0x6036fbbb pas
 fw_art_plan = 0x6038c072;               /* the ART planner (-> 0x6038d263), called as 0x6038a53a does: call ...,[],4, a0 h */
 fw_tex_build = 0x603a3bdb;              /* texture builder: a0 P, a1 parameters -> a0 record; [d2,d3,a2,a3],28 */
 fw_tex_release = 0x603a452a;            /* texture release: a0 P, a1 record; [a2,a3],12 */
+/* the optics layer's probe, opticsdrv.c */
+fw_job_wait = 0x6038a70c;               /* wait for the pass of the step before: a0 h -> d0 (u16); [a2],8 (0x6038c850) */
+fw_job_buf = 0x603868ea;                /* the job's buffer by type: a0 h, d0 type -> d0 slot, 48 none; [d2],4 */
+fw_win_map = 0x60411572;                /* image memory window: d0 bus, d1 flags -> d0 window or 0; [d2,d3,a2,a3],48 */
+fw_win_unmap = 0x604116a1;              /* its release: d0 window -> d0 (0 - error); [d2,d3,a2,a3],52 */
+fw_cache_flush = 0x60069fbf;            /* this CPU's cache written back and dropped; [d2,d3],16 */
+fw_acre_task = 0x60051d5c;              /* acre_Task: the loader's task maker; [d2,d3,a2,a3],56 */
+fw_ext_tsk = 0x6003167e;                /* ext_tsk, as the loader's task ends: [a2],8 */
+fw_job_cancel = 0x6038a8a5;             /* the job's cancel check: a0 P, a1 &u16 -> d0 u8; [a2],8 */

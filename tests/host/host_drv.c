@@ -636,3 +636,99 @@ u32 grain_list(struct omk_mod *m, char (*files)[13], u32 max)
     (void)m, (void)files, (void)max;
     return 0;
 }
+
+/* The optics probe's driver (platform opticsdrv.c) for core/optics.c: the test sets the counts drv_optics_service gives;
+ * drv_optics_arm calls host_opt_on_arm (when set) at the moment the driver would get the arming */
+int host_prev_ended = 1;                    /* core_prev_ended (main.c is not in the host build) */
+u32 host_opt_level, host_opt_arms;
+drv_optics_info host_opt;
+void (*host_opt_on_arm)(void);
+
+int core_prev_ended(void)
+{
+    return host_prev_ended;
+}
+
+int drv_optics_install(u32 level)
+{
+    host_opt_level = level;
+    return 0;
+}
+
+void drv_optics_arm(void)
+{
+    host_opt_arms++;
+    host_opt.armed = 1;
+    if (host_opt_on_arm)
+        host_opt_on_arm();
+}
+
+void drv_optics_service(drv_optics_info *st)
+{
+    *st = host_opt;
+}
+
+u32 host_opt_sub = 99, host_opt_crumb[DRV_OPTICS_CRUMB];
+
+void drv_optics_sub(u32 sub)
+{
+    host_opt_sub = sub;
+}
+
+int drv_optics_crumb(u32 boot, u32 *old)
+{
+    u32 i;
+
+    for (i = 0; i < DRV_OPTICS_CRUMB; i++)
+        old[i] = host_opt_crumb[i];
+    host_opt_crumb[0] = 0;
+    host_opt_crumb[1] = boot;
+    return old[0] == 0x4f435242u;
+}
+
+void drv_optics_beat(u32 ms)
+{
+    host_opt_crumb[2] = ms;
+}
+
+const char *drv_optics_sub_name(u32 sub)
+{
+    static const char *const name[DRV_OPTICS_SUBS] = {"N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full"};
+
+    return sub < DRV_OPTICS_SUBS ? name[sub] : "?";
+}
+
+const char *drv_optics_phase(u32 phase)
+{
+    return phase == 7 ? "250 ms busy" : "a phase";
+}
+
+u32 drv_restart_cause(void)
+{
+    return 0;
+}
+
+int host_opt_worker_rc;                     /* what drv_optics_worker answers */
+u32 host_opt_workers;                       /* its calls */
+
+int drv_optics_worker(u32 *tid)
+{
+    host_opt_workers++;
+    *tid = host_opt_worker_rc ? 0 : 0x77;
+    return host_opt_worker_rc;
+}
+
+int drv_optics_worker_test(u32 *us, u32 *work, u32 *state)
+{
+    *us = *work = *state = 0;
+    return -1;
+}
+
+int host_ui_state;                          /* what drv_ui_probe answers: 0 a lasting state, DRV_UI_HALF ... */
+
+int drv_ui_probe(u32 *app, u32 *keys)
+{
+    *app = host_ui_state ? 0x5101 : 0x5100;
+    *keys = 0;
+    return host_ui_state;
+}

@@ -30,6 +30,22 @@ for group in all cfg mem power; do
     if [ "$out" = ok ]; then pass "core: $group"; else fail "core: $group"; echo "$out" | sed 's/^/        /'; fi
 done
 
+# The optics probe's cached read (core/optics.c): three power-ons in one folder - armed only with the log and the state on
+# the card, a reset while armed stops it, another run number starts again
+mkdir "$tmp/optics"
+for phase in 1 2 3; do
+    out=$("$BIN/test_core" "$tmp/optics" optics $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics, power-on $phase"; else fail "core: optics, power-on $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+
+# The optics probe's bisection: substages armed one by one with the log and the state on the card, a reset stops it at
+# the one before, another run number starts again; a run from a substage on, a test that resets lets it go on
+mkdir "$tmp/bisect"
+for phase in 1 2 3 4 5 6 7; do
+    out=$("$BIN/test_core" "$tmp/bisect" bisect $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics bisection, power-on $phase"; else fail "core: optics bisection, power-on $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+
 # A module sees only src/sdk/include: the public header declares no driver, and the driver header is not there
 if printf '#include "omk_api.h"\n#ifdef OMK_DRV_H\n#error driver\n#endif\nint f(const omk_api *a) { return a->version; }\n' |
         "$HOST_CC" -x c -fsyntax-only -Werror -Isrc/sdk/include - && [ ! -e src/sdk/include/omk_drv.h ]; then
@@ -105,8 +121,9 @@ out=$("$BIN/test_filmlook" "$tmp/filmedits" resources/modules/filmlook/presets e
 if [ "$out" = ok ]; then pass "filmlook edits: the blocks and the pace"; else fail "filmlook edits"; echo "$out" | sed 's/^/        /'; fi
 
 # The driver's plain C parts (src/platform/om5m2/fw1100): the grain texture's fill by rows against the word-by-word
-# one and the definition; the editors' quarter sine table against the full one it replaced
-for t in test_texfill test_edtrig; do
+# one and the definition; the editors' quarter sine table against the full one it replaced; the optics probe's address
+# checks, sum and stripes; the handing of its work to its worker task (request, answer, stop, the limits)
+for t in test_texfill test_edtrig test_optprobe test_optwork; do
     if out=$("$BIN/$t" 2>&1) && [ "$out" = ok ]; then pass "driver: ${t#test_}"; else fail "driver: ${t#test_}"; echo "$out" | sed 's/^/        /'; fi
 done
 

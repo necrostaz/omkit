@@ -49,6 +49,8 @@
  *    2-3, Cr 4-5); byte 1 the source (0 memory, 1 the constant +120, 2 the generator), byte 2 the weight (2 the gain, 0 the
  *    gain x C, 1 the gain x (1 - C)) - read from the stock cases (31: generator weighted by its mask; 33, 18: lerp to a
  *    constant; 36: the texture in Y and the generator in Cb/Cr, +132 0x002A2824)
+ *    The optics layer's step (core 1.33, opticsdrv.c), when [optics] probe is on, goes into the list right before that
+ *    pass to the outputs.
  * Chroma (core 1.21): the generator in Cb and Cr of input B (+132 byte 1 0x28, byte 0 0x24 as case 36), its gain in the high
  *    half of +136 and in +140, a new seed +172 (bit 31 restarts it, as cases 32 and 34) a pass.
  *
@@ -160,6 +162,7 @@
 #define LIST_MASK 4
 #define LIST_901 8
 #define LIST_OUT 16                         /* a step that writes the job's outputs follows the development 0x901 */
+#define LIST_PROBE 32                       /* the optics layer's step before it (opticsdrv.c) */
 #define TEX_STAGE 0x100
 #define MASK_STAGE 0x901
 #define TEX_MARK 0x80                       /* byte +4 of the parameters: 0x6038c0c1 gives 1 or 3, and the sizes do not
@@ -282,6 +285,8 @@ void drv_tramp_grain_h2(void);
 void drv_tramp_grain_h3(void);
 void drv_tramp_grain_wl(void);
 void drv_tramp_grain_det(void);
+u32 drv_optics_list(u8 *h, int room);       /* opticsdrv.c: the optics layer's step for a list, 0 - none */
+void drv_optics_ended(u8 *h);               /* opticsdrv.c: our job ended (its substage counted) */
 u32 drv_fw_tex_build(u8 *p, const u16 *params);    /* thunks.s: 0x603a3bdb, the record or 0 */
 void drv_fw_tex_release(u8 *p, u32 rec);           /* thunks.s: 0x603a452a */
 
@@ -653,6 +658,14 @@ u32 drv_grain_wl(u8 *h)
     return 1;
 }
 
+/* A step at entry k of the job's list; +4 and +8 are 0 (the creator zeroes the table, 0x603895ec, and writes them so) */
+static void put_step(u8 *h, u32 k, u32 fn)
+{
+    *(u32 *)(h + H_STEPS + 12 * k) = fn;
+    *(u32 *)(h + H_STEPS + 12 * k + 4) = 0;
+    *(u32 *)(h + H_STEPS + 12 * k + 8) = 0;
+}
+
 /* W after the ART planner: the job's key back, the list it built checked (in the ring entry W left open) */
 void drv_grain_wl_after(u8 *h)
 {
@@ -689,10 +702,15 @@ void drv_grain_wl_after(u8 *h)
      * of key 12 builds. Room for it and for the selector's step */
     if (t->live[i].route != DRV_GRAIN_GF && n && n + 2 <= STEPS && !(list & LIST_OUT) &&
         *(const u32 *)(h + H_STEPS + 12 * (n - 1)) == STEP_M901) {
-        *(u32 *)(h + H_STEPS + 12 * n) = STEP_OUT;      /* +4 and +8 are 0: the creator zeroes the table (0x603895ec) */
-        *(u32 *)(h + H_STEPS + 12 * n + 4) = 0;
-        *(u32 *)(h + H_STEPS + 12 * n + 8) = 0;
-        *(u16 *)(h + H_NSTEPS) = ++n;
+        /* The optics layer's step (opticsdrv.c, [optics] probe) goes in first, right after the development 0x901: it
+         * waits for that pass and works on the buffer 0x1000 before the pass to the outputs reads it. Room for it too */
+        k = drv_optics_list(h, n + 3 <= STEPS);
+        if (k) {
+            put_step(h, n++, k);
+            list |= LIST_PROBE;
+        }
+        put_step(h, n++, STEP_OUT);
+        *(u16 *)(h + H_NSTEPS) = n;
         list |= LIST_OUT;
     }
     r = &t->ring[t->live[i].ring & (TEX_RING - 1)];
@@ -810,6 +828,7 @@ void drv_grain_tex_clean(u8 *h)
     if (i == TEX_LIVE)
         return;
     cpu = cpu_now();
+    drv_optics_ended(h);                    /* the optics probe's count of the job (nothing without the probe) */
     {
         volatile u32 *d = &t->done[cpu][t->done_n[cpu] % DONE_RING].seq;
 
@@ -836,6 +855,21 @@ void drv_grain_tex_clean(u8 *h)
             t->t_job_max[cpu] = us;
     }
     t->live[i].h = 0;                       /* last */
+}
+
+/* The look's grain shot of our job h (its ring entry + 1), 0 - not one of our jobs now. Any CPU: the arena block only
+ * (opticsdrv.c's step, for its report) */
+u32 drv_grain_shot(u32 h)
+{
+    volatile tex_t *t = tex();
+    u32 i;
+
+    if (!t || !h)
+        return 0;
+    for (i = 0; i < TEX_LIVE; i++)
+        if (t->live[i].h == h)
+            return t->live[i].ring + 1;
+    return 0;
 }
 
 /* Core task: the arena block, then the hooks. W last: it is the one that makes our jobs, so it goes in only with S, A
