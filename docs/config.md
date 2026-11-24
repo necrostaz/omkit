@@ -209,3 +209,29 @@ slot = ienhance
 name = Film Look
 grain_tile = CLASS400
 ```
+
+## 10. `[shoot]`: the test scenario
+
+A series of pictures without the user, for testing presets: `core` presses the shutter button itself - by the button's
+own path in the camera, half-press first, then the full press - and before each step chooses a preset the way the user
+chooses it in the picture mode screen, so the module that owns it (FILMLOOK, CREATPRF) applies it as usual. The camera's
+own settings (exposure mode, focus, quality, ISO) stay as set on the camera. Not in the sample: a test tool, off unless
+asked for. The camera does not take pictures while it is connected to a computer for data (Storage, MTP): use the USB
+choice that only charges, or no cable.
+
+| Key | Type | Default | Range | Effect |
+|---|---|---|---|---|
+| `run` | text | `off` | `off`, `boot` | `boot` - the scenario starts once after the modules have loaded |
+| `start_delay` | number | `5000` | 0..600000 | milliseconds from the start of the modules to the first step |
+| `steps` | text | empty | up to 16 steps separated by commas | the presets in order: `look:N` - entry N (from 1) of the film look, `look:NAME` - the entry of that name (as the picture mode screen shows it), `prof:cN` / `prof:mN` - colour or monochrome profile N, `stock` - the camera's own picture mode (the look and the profiles off), `keep` - no change. Empty: one step without a change. An unknown step stops the scenario before the first picture, with an error in the log |
+| `shots` | number | `1` | 1..20 | pictures per step (200 in a scenario at most) |
+| `interval` | number | `3000` | 500..3600000 | milliseconds between two pictures, from the end of the one before |
+| `settle` | number | `1500` | 0..60000 | milliseconds after a change of preset before the next picture |
+| `trigger` | text | `keys` | `keys`, `wifi` | `keys` - the shutter button's own path; `wifi` - the events the camera's Wi-Fi remote control sends (for comparison) |
+| `half` | number | `1500` | 100..10000 | the longest wait for the half-press (focus); without it the full press follows anyway |
+| `hold` | number | `150` | 50..2000 | milliseconds the full press is held |
+| `write` | number | `20000` | 2000..120000 | the longest wait for a picture to be made and the camera idle again; three pictures in a row not seen made stop the scenario |
+
+A number out of range is taken at the nearest end. Every press is released on every way out - the end, a time limit,
+power-off or sleep, a stop - and a half-press the camera still shows 3 s after the release is released once more. The log
+has a line per step and per picture and the result: `shoot: done: N of M pictures made`.

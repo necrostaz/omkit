@@ -6,6 +6,12 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Test scenario (`[shoot]` in `OMKIT.INI`).** A series of pictures without the user: `core` presses the shutter button
+  by its own path in the camera and chooses a preset of the film look or a profile before each step, as the user would.
+  For testing presets; off unless asked for ([docs/config.md](docs/config.md#10-shoot-the-test-scenario)).
+
 ## [0.1.0] - 2026-11-20
 
 First public release, for the OM SYSTEM OM-5 Mark II on firmware 1.1.

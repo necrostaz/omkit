@@ -14,7 +14,7 @@ PYTHON ?= python3
 # as u16/u32 words, structures over arena blocks), as embedded code usually does; the type-based alias rule must not
 # let the optimizer reorder such reads and writes
 CFLAGS := -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-strict-aliasing -nostdlib -Wall -Wextra -Isrc/core/include -Isrc/sdk/include $(EXTRA)
-OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o taskdump.o drv.o pictprof.o editor.o import.o ispdrv.o graindrv.o kernel.o thunks.o)
+OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o taskdump.o shoot.o drv.o pictprof.o editor.o import.o ispdrv.o graindrv.o kernel.o thunks.o)
 LD_SCRIPTS := src/core/core.ld src/platform/$(PLATFORM)/fw.ld
 
 all: $(OUT)/CORE.BIN
@@ -111,6 +111,10 @@ $(TEST)/test_core: $(HOST_CORE) tests/host/test_core.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) tests/host/host_drv.c tests/host/test_core.c -o $@
 
+$(TEST)/test_shoot: $(HOST_CORE) src/core/shoot.c tests/host/test_shoot.c $(HOST_DEPS)
+	@mkdir -p $(TEST)
+	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) src/core/shoot.c tests/host/host_drv.c tests/host/test_shoot.c -o $@
+
 $(TEST)/test_mod: $(HOST_CORE) src/core/module.c src/core/api.c src/core/event.c tests/host/test_mod.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) src/core/module.c src/core/api.c src/core/event.c tests/host/host_drv.c \
@@ -142,7 +146,7 @@ $(TEST)/test_edtrig: src/platform/$(PLATFORM)/edtrig.h tests/host/test_edtrig.c 
 test-hello:
 	$(if $(HAVE_TC),@$(MAKE) -s -C src/modules MOD=hello OUT=$(abspath $(TEST))/modules >/dev/null)
 
-test-host: $(TEST)/test_core $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig test-hello
+test-host: $(TEST)/test_core $(TEST)/test_shoot $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig test-hello
 	@echo "host tests:"
 	@sh tests/host/run.sh $(TEST) $(HOST_CC) $(if $(HAVE_TC),$(abspath $(TEST))/modules $(TC) "$(PYTHON)")
 

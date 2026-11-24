@@ -30,6 +30,13 @@ for group in all cfg mem power; do
     if [ "$out" = ok ]; then pass "core: $group"; else fail "core: $group"; echo "$out" | sed 's/^/        /'; fi
 done
 
+# The test scenario (tests/host/test_shoot.c): its state machine against a simulated camera, by keys and by wifi events
+for path in keys wifi; do
+    mkdir "$tmp/shoot_$path"
+    out=$("$BIN/test_shoot" "$tmp/shoot_$path" $path 2>&1)
+    if [ "$out" = ok ]; then pass "core: test scenario ($path)"; else fail "core: test scenario ($path)"; echo "$out" | sed 's/^/        /'; fi
+done
+
 # A module sees only src/sdk/include: the public header declares no driver, and the driver header is not there
 if printf '#include "omk_api.h"\n#ifdef OMK_DRV_H\n#error driver\n#endif\nint f(const omk_api *a) { return a->version; }\n' |
         "$HOST_CC" -x c -fsyntax-only -Werror -Isrc/sdk/include - && [ ! -e src/sdk/include/omk_drv.h ]; then

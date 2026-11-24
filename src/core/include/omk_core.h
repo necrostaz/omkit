@@ -5,7 +5,7 @@
 #include "omk_drv.h"
 #include "omk_mem.h"
 
-#define CORE_VERSION "1.32"
+#define CORE_VERSION "1.41"
 
 /* Milliseconds since camera start. The driver counter wraps every 1073 s, so call this at least once every 17 minutes */
 u32 omk_ms(void);

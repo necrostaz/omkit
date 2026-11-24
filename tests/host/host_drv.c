@@ -287,6 +287,7 @@ u32 drv_power_probe(u32 *w, u32 max)
 
 /* Picture profiles: the driver state as the host test sets it (core/prof.c) */
 u32 host_prof, host_prof_seq, host_prof_ui, host_prof_base = 1, host_prof_installs;
+u32 host_prof_takes;
 int host_prof_install_rc;
 
 int drv_prof_count(u32 *colors, u32 *monos)
@@ -327,6 +328,7 @@ void drv_prof_stats(drv_prof_info *st)
     memset(st, 0, sizeof(*st));
     st->ui_seq = host_prof_seq;
     st->ui_prof = host_prof_ui;
+    st->takes = host_prof_takes;
 }
 
 int drv_prof_service(void)
