@@ -380,7 +380,9 @@ static void test_write(void)
     CHECK(put(DBG_PATH, 0, "OMKIT\\OMKDBG.TMP", 16).code == 0x2001 && call(DBG_OP_CMD, DBG_WBEGIN, 4, 0, 0).code == 0x2001);
     CHECK(job_wait() == (0x100 | DBG_E_PATH));
     CHECK(put(DBG_WDATA, 0, "abcd", 4).code == 0x201d);                 /* no file open */
-    /* a file in a folder that is not there yet, in two pieces, then replaced */
+    /* a file in a folder that is not there yet, in two pieces, then replaced; every card operation takes 5 ms (the job ends
+     * later than the service pass began: the open file must not look idle) */
+    host_fopen_us = 5000;
     CHECK(put(DBG_PATH, 0, "OMKIT\\MODULES\\HELLO.OMM", 23).code == 0x2001);
     CHECK(call(DBG_OP_CMD, DBG_WBEGIN, sizeof(body) - 1, crc_of(body, sizeof(body) - 1), 0).code == 0x2001);
     CHECK(job_wait() == 0);
@@ -392,6 +394,7 @@ static void test_write(void)
     CHECK(call(DBG_OP_CMD, DBG_WCOMMIT, 0, 0, 0).code == 0x2001 && job_wait() == 0);
     n = file_size("MODULES/HELLO.OMM");
     CHECK(n == (long)sizeof(body) - 1 && file_size("MODULES/OMKDBG.TMP") == -1);
+    host_fopen_us = 0;
     /* a wrong sum: the old file stays */
     CHECK(call(DBG_OP_CMD, DBG_WBEGIN, 3, 12345, 0).code == 0x2001 && job_wait() == 0);
     CHECK(put(DBG_WDATA, 0, "xyz", 3).code == 0x2001 && job_wait() == 0);

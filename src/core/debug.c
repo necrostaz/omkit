@@ -1240,7 +1240,9 @@ void dbg_service(u32 now)
     if (job.state == DBG_J_QUEUED)
         job_run(now);
     restart_service(now);
-    if (wfp && now - wlast >= WRITE_IDLE_MS && job.state != DBG_J_QUEUED) {
+    /* signed: the job just run took its time after `now` (omk_ms at its end), so wlast may be later than now - unsigned,
+     * that dropped the file at once after every WBEGIN and WDATA on the camera (card155) */
+    if (wfp && (s32)(now - wlast) >= WRITE_IDLE_MS && job.state != DBG_J_QUEUED) {
         log_printf(OMK_LOG_WARN, "debug: no data for %s for %u s, the temporary file dropped", wtarget, WRITE_IDLE_MS / 1000);
         write_drop();
     }

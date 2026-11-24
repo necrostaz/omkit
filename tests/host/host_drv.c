@@ -41,6 +41,8 @@ static void host_path(char *out, const char *path)
 u32 host_written, host_fopens;
 int host_no_card;                       /* 1 - no file opens, as without a card */
 
+u32 host_fopen_us;
+
 void *drv_fopen(const char *path, const char *mode)
 {
     char p[512];
@@ -48,6 +50,7 @@ void *drv_fopen(const char *path, const char *mode)
 
     host_path(p, path);
     host_fopens++;
+    host_ticks = (host_ticks + host_fopen_us) & 0x3fffffff;   /* a card operation takes time, as on the camera */
     if (host_no_card)
         return 0;
     if (mode[0] == 'r')
