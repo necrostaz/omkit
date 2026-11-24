@@ -389,7 +389,7 @@ int main(int argc, char **argv)
     fclose(f);
     mem_init();
     CHECK(cfg_load() == 1);
-    log_setup(0, OMK_LOG_DEBUG, 0);
+    log_setup(0, OMK_LOG_DEBUG);
     test_parse();
     test_done(wifi);
     if (!wifi) {

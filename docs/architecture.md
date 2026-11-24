@@ -62,9 +62,9 @@ OMKIT/
   OMKIT.INI             settings of core and modules; in a release with the bundled modules on; if missing, core
                         writes its sample (no module on)
   MODULES/NAME.OMM      module files; loaded only when listed in [modules] of OMKIT.INI
-  LOG/CORE.LOG          the log of the current power-on (or of the last two, after a crash)
-  LOG/XXXXXXXX.LOG      one log per power-on, with run_logs = on (XXXXXXXX: the run id)
-  STORE/NAME.STA|.STB   the stores of core (CORE), core services (GRAIN) and modules: two copies each
+  LOG/CORE.LOG          the log: the power-ons one after another, each from a header line; never removed by core
+  STORE/NAME.STA|.STB   the stores of core (CORE), core services (GRAIN) and modules: two copies each, of a fixed
+                        length, rewritten in place
   GRAIN/*.GRN           grain tile containers for the film look (formats/grn.md)
   NAME/                 a module's own folder: its files (presets, data); made by core at the module's first file call
 ```
@@ -73,11 +73,23 @@ All names are 8.3 (`A-Z 0-9 _`, a three-letter extension). Long file names can b
 but nothing creates them. `core` makes `LOG` and `STORE` itself, at start and again before writing (the card may have
 been formatted meanwhile), and a module's folder at the module's first file call.
 
+**A reset during a card write.** The camera's file system has no journal: making or removing a file, or giving it a new
+cluster, changes the allocation bitmap, the FAT and the file's directory entries in several separate writes, and a reset
+between two of them leaves the volume inconsistent (an entry set half written: Windows hides the folder and `chkdsk`
+reports it; or a cluster marked free that a file still uses). The camera neither notices nor repairs this. So `core`
+keeps such changes out of its regular writes: a store's two copies are made once, with a fixed length, and from then on
+rewritten in place - only the data and the modification time in the file's first directory entry change, one sector,
+so a reset at any point leaves either the old or the new state (checked by cutting every write of a save in an emulator,
+on exFAT and FAT32). The log is appended to, which changes its length in its directory entry at every write and the FAT
+and the bitmap once a cluster; it is never removed. Old OMKit versions removed and made the log and the store files
+again at every start and every save. If the card was reset during writes and Windows does not show a folder of `OMKIT`,
+run `chkdsk X: /f` (or `fsck.exfat` / `fsck.vfat`) on it.
+
 `OMKIT.INI` sections:
 
 | Section | Keys |
 |---|---|
-| `[core]` | `log` (on/off), `log_level` (error, warn, info, debug), `run_logs`, `fw_heap`, `fw_heap_limit`, `core_events`, `fw_cache_inv`, `taskdump`, `taskdump_every`, `taskdump_base`, `taskdump_stuck`. Unknown keys are reported in the log |
+| `[core]` | `log` (on/off), `log_level` (error, warn, info, debug), `fw_heap`, `fw_heap_limit`, `core_events`, `fw_cache_inv`, `taskdump`, `taskdump_every`, `taskdump_base`, `taskdump_stuck`. Unknown keys are reported in the log |
 | `[modules]` | `enabled` (off: load nothing), then `NAME = on/off` per module; line order is load order |
 | `[grain]` | the grain of the film look's stills: `mask`, `chroma` and test keys (see the template `core` writes) |
 | `[NAME]` | a module's own settings, plus two keys `core` reads for every module: `memory` (a size limit, e.g. `512K`) and `event_<event> = off | priority` |
@@ -248,7 +260,7 @@ profile or a look is shown over a stock mode and applied to shooting from memory
 ### 7.3. Log
 
 A ring buffer in RAM between the writers (any task on CPU 0) and one consumer, the `core` task, which appends what is new
-to the files. A line is formatted on the caller's stack; under the firmware lock it is only copied into the ring.
+to the file. A line is formatted on the caller's stack; under the firmware lock it is only copied into the ring.
 
 | Property | Value |
 |---|---|
@@ -257,8 +269,9 @@ to the files. A line is formatted on the caller's stack; under the firmware lock
 | Ring | 32 KB; a line that does not fit is dropped whole and counted (`log: N lines lost`) |
 | Write | when the log has been quiet for 0.5 s, at least every 3 s; not while the camera writes the card, and never during power-off or sleep |
 | No card or folder | the file does not open: the next try after 1 s, then 2, 4 ... up to 60 s apart, not at every pass; a write that works, or the camera running again after a sleep or a power-off that did not happen, ends the pauses (`log: the card takes the log again, after N tries without it`). The lines wait in the ring meanwhile |
-| Files | `LOG\CORE.LOG` (started empty at each power-on), and `LOG\<run id>.LOG` with `run_logs = on` |
-| After a crash | if the previous run did not end with a power-off, `CORE.LOG` keeps it and the new run is appended (up to 1 MB) |
+| File | `LOG\CORE.LOG`, one for all power-ons: each start appends to it, `core` never removes or cuts it (delete it on a computer when it gets too long). Each power-on begins with an empty line and a header: `======== OMKit core <version> (<branch>@<commit>), <platform>, run <run id>, started <date and time> ========` (the build's branch and commit; the camera clock's date), then, when the modules are loaded, `modules: NAME 1.5, ...` with their versions. Older versions removed the file at each power-on, and `run_logs = on` wrote a file per power-on; that key is gone (ignored), old `XXXXXXXX.LOG` files are left as they are |
+| Open file | the file stays open between writes (each portion is written and flushed at once), because the first write after an open walks the file's cluster chain from its start - a cost that grows with the file; it is closed after 30 s without lines, at sleep and power-off, and before a file job of the debug service. When the camera mounts the card again (its PC mode over USB), it frees every open file without a write: `core` sees that by the file's identity and opens the log again (`log: ... opened again`), never closing a freed file - its slot may already be another file's. While the card is not mounted nothing is written |
+| After a crash | the run that went down is simply before the next one in the file; the `CORE` store tells whether it ended with a power-off |
 | Power-off | the last lines are written at the card-off point of the power-off |
 | Boot checkpoints | at `debug` level, a few lines (module loading, hook installation) are written to the card at once, so a crash leaves a trace |
 
@@ -274,6 +287,10 @@ number and CRC-32.
   first change not saved yet, so a value that keeps changing still reaches the card -, alternately to `NAME.STA` and
   `NAME.STB`; at start the intact copy with the higher sequence number wins. A failed or cut write leaves the other copy
   intact. Only the persistent records are written.
+- Both copies have one fixed length (the header and the store's whole record space, rounded up to 512 bytes, zeros
+  after the records) and a save rewrites the copy in place: no file is made, removed or grown, so a reset during a save
+  cannot break the card's volume (above). A copy that is not there or has another length - a new card, a store of
+  another size, the files of an older core - is made once, at its first save.
 - A save that fails (no card, no folder, a short write) is tried again after 3 s, then 6, 12 ... up to 60 s apart
   (`store NAME: cannot open ...` once, `store NAME: card back, saved` when it works); the camera running again after a
   sleep or a power-off that did not happen ends the pauses. The save at the card-off point is always tried.
@@ -330,7 +347,7 @@ The freezing of all tasks in a light sleep is also **from the firmware code**, o
 ### 7.7. Diagnostics
 
 - **Boot count and unclean end.** The `CORE` store tells whether the last run ended with a power-off; if not, the log
-  says so and keeps the previous run's lines.
+  says so; the lines of the run that went down are just before, in the same `CORE.LOG`.
 - **Crash records.** At start, `core` logs the reset records the firmware's NMI handler left (task, cause, registers),
   when there are any.
 - **Stack.** The `core` stack (16 KB) is filled with a pattern; the used depth is logged at debug level, a warning when

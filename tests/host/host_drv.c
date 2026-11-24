@@ -1,6 +1,7 @@
 /* Driver for testing core on the host: files C:\OMKIT\X live in the HOST_DIR directory, the test sets the time.
  * As on the camera, wb mode does not truncate an existing file. Firmware heap: three classes on top of malloc. */
 #include <stdio.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #ifdef _WIN32
@@ -38,12 +39,63 @@ static void host_path(char *out, const char *path)
             out[i] = '/';
 }
 
-u32 host_written, host_fopens;
+u32 host_written, host_fopens, host_removes, host_inplace;
 int host_no_card;                       /* 1 - no file opens, as without a card */
 
 u32 host_fopen_us;
 
+/* Files open now, and whether the firmware no longer takes them (the camera's PC mode: every call gives 0x9414) */
+static struct {
+    FILE *f;
+    int stale;
+} open_files[32];
+
+static FILE *opened(FILE *f)
+{
+    unsigned i;
+
+    for (i = 0; f && i < sizeof(open_files) / sizeof(open_files[0]); i++)
+        if (!open_files[i].f) {
+            open_files[i].f = f;
+            open_files[i].stale = 0;
+            break;
+        }
+    return f;
+}
+
+static int stale(void *fp, int forget)
+{
+    unsigned i;
+    int r = 0;
+
+    for (i = 0; i < sizeof(open_files) / sizeof(open_files[0]); i++)
+        if (open_files[i].f == fp) {
+            r = open_files[i].stale;
+            if (forget)
+                open_files[i].f = 0;
+        }
+    return r;
+}
+
+void host_files_stale(void)
+{
+    unsigned i;
+
+    for (i = 0; i < sizeof(open_files) / sizeof(open_files[0]); i++)
+        if (open_files[i].f)
+            open_files[i].stale = 1;
+}
+
+#define HOST_STALE_RC 0x9414                /* the firmware's answer on such a file (camera, card157) */
+
+static FILE *host_fopen(const char *path, const char *mode);
+
 void *drv_fopen(const char *path, const char *mode)
+{
+    return opened(host_fopen(path, mode));
+}
+
+static FILE *host_fopen(const char *path, const char *mode)
 {
     char p[512];
     FILE *f;
@@ -53,6 +105,11 @@ void *drv_fopen(const char *path, const char *mode)
     host_ticks = (host_ticks + host_fopen_us) & 0x3fffffff;   /* a card operation takes time, as on the camera */
     if (host_no_card)
         return 0;
+    if (mode[0] == 'r' && mode[1] == '+') {   /* the firmware: no truncation, made if not there */
+        host_inplace++;
+        f = fopen(p, "r+b");
+        return f ? f : fopen(p, "w+b");
+    }
     if (mode[0] == 'r')
         return fopen(p, "rb");
     if (mode[0] == 'a')                     /* the firmware: open or create, at the end */
@@ -66,6 +123,7 @@ int drv_remove(const char *path)
     char p[512];
 
     host_path(p, path);
+    host_removes++;
     return remove(p);
 }
 
@@ -112,18 +170,25 @@ u32 drv_fread(void *buf, u32 size, u32 n, void *fp)
 
 u32 drv_fwrite(const void *buf, u32 size, u32 n, void *fp)
 {
+    if (stale(fp, 0))
+        return 0;
     host_written += size * n;               /* the tests check how much a flush writes */
     return fwrite(buf, size, n, fp);
 }
 
-void drv_fclose(void *fp)
+int host_fclose_rc;                         /* what drv_fclose answers (0 - closed), the file is closed anyway */
+
+int drv_fclose(void *fp)
 {
+    int was = stale(fp, 1);
+
     fclose(fp);
+    return was ? HOST_STALE_RC : host_fclose_rc;
 }
 
 u32 drv_fflush(void *fp)
 {
-    return fflush(fp);
+    return stale(fp, 0) ? HOST_STALE_RC : (u32)fflush(fp);
 }
 
 void drv_sleep(u32 ms)
@@ -373,6 +438,18 @@ int drv_prof_take_recent(void)
     return 0;
 }
 
+u32 drv_file_id(void *fp)
+{
+    return fp && !stale(fp, 0) ? 0x10000u | ((u32)(uintptr_t)fp & 0xfff0u) | 1u : 0;
+}
+
+int host_unmounted;                         /* 1 - the volume is not mounted (USB Storage) */
+
+int drv_card_mounted(void)
+{
+    return !host_unmounted;
+}
+
 int drv_card_busy(void)
 {
     return 0;
@@ -414,6 +491,13 @@ void drv_wake(void)
 int drv_wait_state(void)
 {
     return 1;
+}
+
+drv_date_t host_date = {2026, 11, 24, 15, 2, 11, 0, {0}};
+
+void drv_date(drv_date_t *d)
+{
+    *d = host_date;
 }
 
 int drv_rtc(u32 *sec, u32 *frac1024)

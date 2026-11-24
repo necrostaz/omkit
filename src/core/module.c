@@ -288,6 +288,50 @@ static void load_one(const char *key)
     m->state = MOD_RUNNING;
 }
 
+/* The versions of the running modules, for the run's header in CORE.LOG (main.c, log_header): "modules: NAME 1.5, ...",
+ * as many lines as they take */
+static void log_versions(void)
+{
+    char line[120];
+    u32 i, n = 0, k, v;
+    const char *p;
+
+    for (i = 0; i < nmods; i++) {
+        if (mods[i].state != MOD_RUNNING)
+            continue;
+        if (n > sizeof(line) - 24) {        /* room for ", NAME 65535.65535" */
+            line[n] = 0;
+            log_printf(OMK_LOG_INFO, "modules: %s", line);
+            n = 0;
+        }
+        if (n) {
+            line[n++] = ',';
+            line[n++] = ' ';
+        }
+        for (p = mods[i].name; *p; p++)
+            line[n++] = *p;
+        line[n++] = ' ';
+        for (k = 0; k < 2; k++) {           /* major.minor */
+            char digits[5];
+            u32 m = 0;
+
+            v = k ? mods[i].version & 0xffff : mods[i].version >> 16;
+            do {
+                digits[m++] = '0' + v % 10;
+                v /= 10;
+            } while (v);
+            while (m)
+                line[n++] = digits[--m];
+            if (!k)
+                line[n++] = '.';
+        }
+    }
+    if (n) {
+        line[n] = 0;
+        log_printf(OMK_LOG_INFO, "modules: %s", line);
+    }
+}
+
 /* [modules]: enabled = off disables everything; NAME = on | off, line order is load order, on a repeat the last value wins.
  * 1 - done. 0 - a power-off or a sleep began between two modules: the rest is not read (a module takes up to seconds of
  * card reads and of its module_init, and the card-off gate waits for the core task one second at most); the caller
@@ -331,6 +375,7 @@ int modules_load(void)
             failed++;
     }
     log_printf(OMK_LOG_INFO, "modules: %u running, %u failed", loaded, failed);
+    log_versions();
     log_checkpoint("modules: activating event hooks");
     ev_activate();
     log_checkpoint("modules: event hooks active");

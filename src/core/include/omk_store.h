@@ -1,6 +1,7 @@
 /* Module store: a dictionary of key (2 bytes) to value (bytes).
  * Persistent values are written to the card by the core service loop 1.5 s after the last change, alternating between two
  * files: NAME.STA and NAME.STB, each with a version number and CRC32. At load the intact version with the higher number wins.
+ * Both files have one fixed length and are rewritten in place, so a reset during a save cannot break the card's volume.
  * Reads come from memory only. Calls are short and can be made from any task on CPU 0. */
 #ifndef OMK_STORE_H
 #define OMK_STORE_H

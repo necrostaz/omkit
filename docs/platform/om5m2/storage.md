@@ -61,9 +61,8 @@ by OMKit on the camera except `stat`).
 | `C:\OMKIT\OMKIT.INI` | Configuration | Created with defaults if missing; otherwise only read |
 | `C:\OMKIT\MODULES\NAME.OMM` | Module files | Only read |
 | `C:\OMKIT\NAME\` | Files of module `NAME` (for example the grain tiles in `GRAIN\`) | Through the module file API |
-| `C:\OMKIT\LOG\CORE.LOG` | Log of the current power-on (kept and continued if the previous power-on did not end with a power-off, up to 1 MiB) | Removed at the first write of a power-on, then appended (`ab`) |
-| `C:\OMKIT\LOG\XXXXXXXX.LOG` | Log of each power-on, if `run_logs = on` | Appended |
-| `C:\OMKIT\STORE\NAME.STA`, `NAME.STB` | Stores of `core` and modules | Two copies written in turn, each with a version number and a CRC-32; the newest intact copy is used, so a power loss during a write damages at most one copy. The file is removed before it is written (no truncation otherwise) |
+| `C:\OMKIT\LOG\CORE.LOG` | Log of all power-ons, each from its header line | Appended (`ab`); never removed by `core` |
+| `C:\OMKIT\STORE\NAME.STA`, `NAME.STB` | Stores of `core` and modules | Two copies written in turn, each with a version number and a CRC-32; the newest intact copy is used, so a power loss during a write damages at most one copy. Both have a fixed length and are rewritten in place (`r+b`): only the data and the modification time in the file's first directory entry change, so a reset during a save leaves the volume consistent. A copy that is missing or has another length is made once (`remove`, then `wb`) |
 
 `core` creates the `LOG` and `STORE` folders at start and again before writing, in case the card was formatted meanwhile
 (check that the folder exists, then `mkdir`, as the firmware itself does). The layout of the card is part of OMKit's

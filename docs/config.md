@@ -19,7 +19,8 @@ are on that module's page (section 7).
 - Updating OMKit with a newer release keeps your own `OMKIT.INI` (the install guide of the platform, for example
   [platform/om5m2/fw1100/install.md](platform/om5m2/fw1100/install.md#6-updating-omkit)).
 
-The first lines of `OMKIT\LOG\CORE.LOG` say which case it was:
+The first lines of each power-on in `OMKIT\LOG\CORE.LOG` (after its header line `======== OMKit core ...`) say which case it
+was:
 
 | Log line | Meaning |
 |---|---|
@@ -54,9 +55,8 @@ The first lines of `OMKIT\LOG\CORE.LOG` say which case it was:
 
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
-| `log` | switch | `on` | | `off` - nothing is logged and no log file is written |
+| `log` | switch | `on` | | `off` - nothing is logged and no log file is written. The log `OMKIT\LOG\CORE.LOG` holds the power-ons one after another, each from a header line; `core` never removes it - delete it on a computer when it gets too long. (`run_logs`, a file per power-on, is gone; the key is ignored) |
 | `log_level` | text | `info` | `error`, `warn`, `info`, `debug`, `off` | how much detail goes to the log. `info`: start, modules, what the user chose, power states, warnings and errors - a few lines a session; `debug` adds the lines that repeat with use (one per picture, per dial step, per second in an editor; counters) and also writes a few boot lines to the card at once, so a crash during start leaves a trace. An unknown value: `info`, with the warning `config: log_level '...' unknown, using info` |
-| `run_logs` | switch | `off` | | `on` - every power-on also gets its own log `OMKIT\LOG\XXXXXXXX.LOG` (XXXXXXXX: the run id from the first log line) |
 | `fw_heap` | switch | `off` | | `on` - when the module memory (the arena) is full, small module buffers may come from the camera's firmware heap, up to `fw_heap_limit` in total. The heap is shared with shooting and the menus: turn it on only if a module reports that it is out of memory. Needs `fw_heap_limit`, otherwise it stays off with a warning. Code and resources never go there, and `core` always leaves at least a quarter of each heap class to the camera |
 | `fw_heap_limit` | size | `256K` in the sample, none without it | | the most the modules may take from the firmware heap. Not a size: a warning, and `fw_heap` stays off |
 | `core_events` | switch | `on` | | how the `core` task waits between its passes: `on` - on an event flag that the power-off and sleep hooks set, so it reacts at once; `off` - a plain 250 ms sleep. A diagnostic switch |
@@ -160,8 +160,6 @@ These are for developers and troubleshooting; the bundled modules need neither.
 log = on
 ; error | warn | info | debug - how much detail
 log_level = info
-; on - also write a separate log for every power-on, OMKIT\LOG\XXXXXXXX.LOG
-run_logs = off
 ; on - if the arena runs out of space, take small module buffers (up to 16K) from the firmware heap.
 ; Requires fw_heap_limit. The heap is shared with shooting: enable only if the arena is too small for modules
 fw_heap = off

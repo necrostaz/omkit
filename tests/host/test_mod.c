@@ -690,7 +690,7 @@ int main(int argc, char **argv)
     fclose(f);
     prepare();
     mem_init();
-    log_setup(1, OMK_LOG_DEBUG, 0);
+    log_setup(1, OMK_LOG_DEBUG);
     module_call = fake_init;
     if (!strcmp(argv[3], "load"))
         test_load();

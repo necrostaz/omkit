@@ -69,10 +69,11 @@ static void stack_service(u32 now)
 }
 
 static const char *const level_names[] = {"off", "error", "warn", "info", "debug"};
+/* run_logs: a log file per power-on, dropped (a file made at every start); still known, so that an old
+ * OMKIT.INI gets no warning, and ignored */
 static const char *const core_keys[] = {"log", "log_level", "run_logs", "fw_heap", "fw_heap_limit", "core_events",
                                          "fw_cache_inv", "taskdump", "taskdump_every", "taskdump_base", "taskdump_stuck"};
 static char run_id[9];
-static char run_log[OMK_PATH_MAX];
 
 static int parse_level(const char *s)
 {
@@ -95,12 +96,35 @@ static void make_run_id(void)
     for (i = 0; i < 8; i++)
         run_id[i] = "0123456789ABCDEF"[(h >> (28 - 4 * i)) & 15];
     run_id[8] = 0;
-    {
-        char name[13];
+}
 
-        omk_name_ext(name, run_id, "LOG");  /* 8 hex digits: always valid */
-        omk_path(run_log, LOG_DIR, name);
+/* The run's header in CORE.LOG, which holds the runs one after another: the start's date and time by the camera's clock,
+ * the build, the run id. The modules' versions follow when they are loaded (modules_load) */
+static void log_header(void)
+{
+    drv_date_t d;
+    char when[20];
+    u32 v[6], i, k = 0;
+
+    drv_date(&d);
+    v[0] = d.year;
+    v[1] = d.month;
+    v[2] = d.day;
+    v[3] = d.hour;
+    v[4] = d.minute;
+    v[5] = d.second;
+    for (i = 0; i < 6; i++) {               /* yyyy-mm-dd hh:mm:ss */
+        u32 width = i ? 2 : 4, x = v[i], p = width;
+
+        while (p--) {
+            when[k + p] = '0' + x % 10;
+            x /= 10;
+        }
+        k += width;
+        when[k++] = i == 2 ? ' ' : i == 5 ? 0 : i < 2 ? '-' : ':';
     }
+    log_banner("======== OMKit core %s (%s), %s, run %s, started %s ========", CORE_VERSION, CORE_BUILD, drv_name(), run_id,
+               d.year >= 2000 && d.year < 2100 && d.month >= 1 && d.month <= 12 ? when : "?");
 }
 
 static void setup_log(int cfg_state)
@@ -111,8 +135,8 @@ static void setup_log(int cfg_state)
 
     if (bad_level)
         lvl = OMK_LOG_INFO;
-    log_setup(cfg_bool("core", "log", 1), lvl, cfg_bool("core", "run_logs", 0) ? run_log : 0);
-    log_printf(OMK_LOG_INFO, "OMKit core %s (%s), %s, run %s", CORE_VERSION, CORE_BUILD, drv_name(), run_id);
+    log_setup(cfg_bool("core", "log", 1), lvl);
+    log_header();
     log_printf(OMK_LOG_INFO, cfg_state > 0 ? "config OMKIT.INI" :
                cfg_state == 0 ? "config: no OMKIT.INI, template written, defaults used" :
                                 "config: no OMKIT.INI and cannot write template, defaults used");
@@ -193,8 +217,6 @@ static void count_boot(omk_store *s)
     store_set(s, KEY_RUN, run_id, 8, OMK_STORE_PERSIST);
     store_save_now(s);                      /* "not ended" on the card now: a crash while modules load or hooks go in counts */
     prev_ended = ended != 0;
-    if (!ended)
-        log_keep_previous();                /* before the first log write: CORE.LOG keeps the run that went down */
     log_printf(OMK_LOG_INFO, "boot %u since the store was created", boots);
     if (!ended)
         log_printf(OMK_LOG_WARN, "the previous run %s did not end with a power-off: a reboot, a crash or the battery taken out",
@@ -240,7 +262,7 @@ void core_main(void)
         log_printf(OMK_LOG_WARN, "cannot make the folders %s and %s", LOG_DIR, STORE_DIR);
     setup_memory();
     log_diagnostics();
-    count_boot(store_open("CORE", CORE_STORE_SIZE));    /* before the first log write (log_keep_previous) */
+    count_boot(store_open("CORE", CORE_STORE_SIZE));
     log_checkpoint("boot: config, log and store ready");
     if (drv_wait_init(cfg_bool("core", "core_events", 1)) > 0)
         log_printf(OMK_LOG_DEBUG, "boot: the core task waits on an event flag");
