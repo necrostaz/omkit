@@ -8,9 +8,9 @@
 
 void log_setup(int enabled, int level, const char *run_path);   /* run_path 0 - no per-power-on log */
 int log_level(void);                    /* the most detail anyone keeps: the card's level or the tee's */
-/* The debug service (core 1.40): fn gets every line up to lvl, without its line end, under the firmware lock (a copy into
- * RAM only); log_card(0) - nothing is written to the card from now on, nor kept for it */
-typedef void (*log_tee_fn)(int lvl, const char *text, u32 len);
+/* The debug service (core 1.40): fn gets every line up to lvl with its time, without its line end, under the firmware lock
+ * (a copy into RAM only: it must not take the lock again); log_card(0) - nothing is written to the card from now on, nor kept for it */
+typedef void (*log_tee_fn)(int lvl, u32 ms, const char *text, u32 len);
 void log_tee(log_tee_fn fn, int lvl);
 void log_card(int on);
 

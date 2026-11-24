@@ -73,22 +73,22 @@ int core_card_ok(void)
 /* ---- the ring ---- */
 static void put(u32 type, const void *a, u32 na, const void *b, u32 nb)
 {
-    u32 st;
+    u32 st, ms = omk_ms();                  /* before the lock: omk_ms takes it too */
 
     if (!cur)
         return;
     st = drv_lock();
-    dring_put(cur, type, omk_ms(), a, na, b, nb);
+    dring_put(cur, type, ms, a, na, b, nb);
     drv_unlock(st);
 }
 
-/* The log's tee: the firmware lock is held */
-static void tee(int lvl, const char *text, u32 len)
+/* The log's tee: the firmware lock is held (no omk_ms here: it takes the lock) */
+static void tee(int lvl, u32 ms, const char *text, u32 len)
 {
     u8 l = (u8)lvl;
 
     if (cur)
-        dring_put(cur, DR_LOG, omk_ms(), &l, 1, text, len);
+        dring_put(cur, DR_LOG, ms, &l, 1, text, len);
 }
 
 static void mark(const char *what, const char *arg)
@@ -176,7 +176,7 @@ static u32 bit_index(u32 w)
 static void snapshot(u32 trig, int dedupe)
 {
     drv_task t;
-    u32 i, n = 0, app = 0, keys = 0, len, st;
+    u32 i, n = 0, app = 0, keys = 0, len, st, ms;
     u8 *e;
     int r = drv_ui_probe(&app, &keys);
 
@@ -219,14 +219,15 @@ static void snapshot(u32 trig, int dedupe)
             return;
         }
     }
+    ms = omk_ms();                          /* before the lock: omk_ms takes it too */
     st32(snap_buf + 12, snap_same);
-    st32(snap_buf + 20, omk_ms());
+    st32(snap_buf + 20, ms);
     snap_same = 0;
     mem_copy(snap_prev, snap_buf, len);
     snap_prev_len = len;
     st = drv_lock();
-    dring_put(cur, DR_SNAP, omk_ms(), snap_buf, len, 0, 0);
-    cur->h[DH_SNAP_MS] = omk_ms();
+    dring_put(cur, DR_SNAP, ms, snap_buf, len, 0, 0);
+    cur->h[DH_SNAP_MS] = ms;
     drv_unlock(st);
 }
 

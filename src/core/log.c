@@ -172,7 +172,7 @@ void log_vprintf_from(int lvl, const char *who, const char *fmt, va_list ap)
     n = b.n;
     st = drv_lock();
     if (to_tee)
-        tee(lvl, text, n - 2);              /* without the line end */
+        tee(lvl, now, text, n - 2);         /* without the line end */
     if (!to_card) {
     } else if (head - tail + n > RING_SIZE) {   /* the card has not taken the older lines yet: drop this one whole */
         lost++;
