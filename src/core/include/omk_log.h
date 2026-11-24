@@ -7,7 +7,12 @@
 #include "omk_drv.h"
 
 void log_setup(int enabled, int level, const char *run_path);   /* run_path 0 - no per-power-on log */
-int log_level(void);
+int log_level(void);                    /* the most detail anyone keeps: the card's level or the tee's */
+/* The debug service (core 1.40): fn gets every line up to lvl, without its line end, under the firmware lock (a copy into
+ * RAM only); log_card(0) - nothing is written to the card from now on, nor kept for it */
+typedef void (*log_tee_fn)(int lvl, const char *text, u32 len);
+void log_tee(log_tee_fn fn, int lvl);
+void log_card(int on);
 
 /* Format: %s %c %d %u %x %X, zero-padded width for numbers: %08x. The line is terminated automatically */
 void log_printf(int level, const char *fmt, ...);

@@ -12,6 +12,9 @@
 #define UNCACHED DRV_UNCACHED
 #define ARENA_LO 0xa3470000                 /* resource gap: the arena never starts below this */
 #define ARENA_HI 0xa3780000
+#define ARENA_TAIL 0x20100                  /* the region's end is not the arena: the debug service's memory 0xa375ff00..
+                                               0xa377ff80 (ptp.c, drv_keep_area) and the optics layer's crumbs
+                                               0xa377ff80..0xa3780000; a reset must not find them overwritten by a block */
 #define GUARD_LO 0x60000200                 /* DbgSup protected range */
 #define GUARD_HI 0x60cbe800
 #define JMP_D32 0xdc
@@ -108,7 +111,7 @@ int drv_mem_region(u32 i, void **base, u32 *size)
     if (lo < ARENA_LO)
         lo = ARENA_LO;
     *base = (void *)lo;
-    *size = ARENA_HI - lo;
+    *size = ARENA_HI - ARENA_TAIL - lo;
     return 1;
 }
 

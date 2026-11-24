@@ -12,6 +12,7 @@ f_findnext = 0x606ab9b6;                  /* d0 handle, a0 entry -> d0 0, -1 the
 f_findclose = 0x606aba1c;                 /* d0 handle */
 f_fflush = 0x606aa4d2;
 f_remove = 0x606aa784;
+f_rename = 0x606aa6ba;                  /* a0 old path, a1 new path -> d0 0; request 0x10009 */
 f_mkdir = 0x606aa81f;
 f_exists = 0x606ab659;
 f_dcache_inv = 0x608442e6;              /* invalidate a data cache range, L1 and second level, this CPU */
@@ -70,6 +71,9 @@ vg_setf = 0x613da2f9;
 /* loading profiles from outside, import.c */
 imp_ptp_reg = 0x614c0156;               /* PTP vendor operation registration: d0 code, d1 phase, a0 handler, a1 0 */
 imp_reg_back = 0x614ba926;              /* past mov 0x970c,d0 at 0x614ba920 */
+ptp_send = 0x614c02d6;                  /* PTP data to the computer: d0 piece, d1 total, a0 buffer -> d0 (u16) 1 */
+ptp_recv_len = 0x614c0399;              /* PTP data from the computer: the container header -> d0 its data length */
+ptp_recv = 0x614c040f;                  /* PTP data from the computer: d0 length, a0 buffer -> d0 (u16) 1 */
 imp_parse_ret = 0x6160a850;             /* return address of the ID lookup in the value parse of a load (0x6160a84b) */
 imp_id_back = 0x6160a69a;               /* past mov 0x6160b888,a0 at the ID lookup's entry 0x6160a694 */
 imp_line_done = 0x6160a135;             /* the load's tail of a line */

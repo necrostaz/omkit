@@ -88,7 +88,12 @@ int drv_exists(const char *path)
 
 int drv_fseek(void *fp, u32 offset)
 {
-    return fseek(fp, (long)offset, SEEK_SET);
+    long end;
+
+    if (fseek(fp, 0, SEEK_END))
+        return -1;
+    end = ftell(fp);                        /* the firmware stops at the end of the file */
+    return fseek(fp, (long)offset < end ? (long)offset : end, SEEK_SET);
 }
 
 u32 drv_ftell(void *fp)
@@ -626,13 +631,134 @@ void grain_drop_module(struct omk_mod *m)
 }
 
 /* main.c is not in the host build: the tests call core's functions as firmware tasks would */
+int host_in_task;                           /* 1 - the test runs as the core task */
+
 int core_in_task(void)
 {
-    return 0;
+    return host_in_task;
 }
 
 u32 grain_list(struct omk_mod *m, char (*files)[13], u32 max)
 {
     (void)m, (void)files, (void)max;
     return 0;
+}
+
+/* ---- the debug service (core/debug.c) ---- */
+u8 host_keep[0x20080] __attribute__((aligned(16)));    /* the memory that outlives a reset: kept between "power-ons" */
+u32 host_keep_size = sizeof(host_keep);
+host_ptp_op host_ptp[8];
+u32 host_ptp_n;
+int host_ptp_installs;
+u8 host_ptp_out[1 << 17];                   /* what drv_ptp_send sent */
+u32 host_ptp_out_n, host_ptp_total, host_ptp_sends;
+const u8 *host_ptp_in;                      /* what the computer sends */
+u32 host_ptp_in_n;
+u8 host_mem[4096];                          /* stands for RAM at 0xa0001000 */
+drv_task host_tasks[4];
+u32 host_ntasks;
+u32 host_app = 0x5100;
+int host_ui = 0;
+
+int drv_keep_area(void **base, u32 *size)
+{
+    *base = host_keep;
+    *size = host_keep_size;
+    return 1;
+}
+
+int drv_ptp_add(u32 code, u32 phase, drv_ptp_fn fn)
+{
+    if (host_ptp_n >= 8)
+        return -1;
+    host_ptp[host_ptp_n].code = code;
+    host_ptp[host_ptp_n].phase = phase;
+    host_ptp[host_ptp_n++].fn = fn;
+    return 0;
+}
+
+int drv_ptp_install(void)
+{
+    host_ptp_installs++;
+    return 0;
+}
+
+int drv_ptp_buffer_ok(const void *buf)
+{
+    return !((uptr)buf & 1);
+}
+
+/* As the firmware: the first call of an operation takes the total; pieces of odd length only last */
+int drv_ptp_send(const void *buf, u32 len, u32 total)
+{
+    if (!drv_ptp_buffer_ok(buf) || host_ptp_out_n + len > sizeof(host_ptp_out) || (host_ptp_out_n & 1))
+        return 0;
+    if (!host_ptp_sends++)
+        host_ptp_total = total;
+    memcpy(host_ptp_out + host_ptp_out_n, buf, len);
+    host_ptp_out_n += len;
+    return 1;
+}
+
+u32 drv_ptp_recv_len(void)
+{
+    return host_ptp_in_n;
+}
+
+int drv_ptp_recv(void *buf, u32 len)
+{
+    if (len > host_ptp_in_n)
+        return 0;
+    memcpy(buf, host_ptp_in, len);
+    return 1;
+}
+
+u32 drv_ptp_history(void *out, u32 max)
+{
+    u32 n = max < 488 ? max : 488;
+
+    memset(out, 0x48, n);
+    return n;
+}
+
+const volatile u8 *drv_mem_readable(u32 addr, u32 len)
+{
+    if (addr >= 0x60000000 && addr < 0x70000000)
+        addr += 0x40000000;
+    if (!len || addr < 0xa0001000 || len > sizeof(host_mem) || addr - 0xa0001000 > sizeof(host_mem) - len)
+        return 0;
+    return host_mem + (addr - 0xa0001000);
+}
+
+int drv_rename(const char *from, const char *to)
+{
+    char a[512], b[512];
+
+    host_path(a, from);
+    host_path(b, to);
+    return rename(a, b);
+}
+
+int drv_task_read(u32 cpu, u32 slot, drv_task *t)
+{
+    if (cpu || slot >= host_ntasks)
+        return -1;
+    *t = host_tasks[slot];
+    return 1;
+}
+
+int drv_obj_read(u32 kind, u32 id, drv_obj *o)
+{
+    memset(o, 0, sizeof(*o));
+    o->id = id;
+    o->kind = kind;
+    o->a = 1;
+    return 0;
+}
+
+int drv_ui_probe(u32 *app, u32 *keys)
+{
+    *app = host_app;
+    *keys = 0;
+    return host_ui;
 }
