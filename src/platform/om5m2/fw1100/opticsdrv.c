@@ -198,6 +198,7 @@ typedef struct {
     op_slot_t slot[REC_SLOTS];
     u32 i_frame, i_small;                   /* the firmware's search: index, 48 - none */
     u32 loop_n, loop_us;                    /* the empty loop's iterations (2 instructions each) and time */
+    u32 sleep_ms;                           /* W1 with drv_optics_loop's sleep: the worker slept this long instead */
     u32 bus, len, kind, win, t_map, t_unmap, unmap_rc;
     u32 rd_bytes, rd_us, rd_sum;            /* rd_us without the ticks given away */
     u32 head[16];
@@ -213,6 +214,8 @@ typedef struct {
     u32 jobs;                               /* steps begun: the ring's writer index (drv_lock) */
     u32 listed, noroom;                     /* W: steps put into lists; lists with no room for it */
     u32 sub;                                /* the substage of new jobs (core: drv_optics_sub) */
+    u32 loop, loop_sleep;                   /* drv_optics_loop: the empty loop's iterations (0 - OPT_LOOP); W1 sleeps this
+                                               many ms instead of the loop (0 - no) */
     u32 wl;                                 /* W: jobs listed (the crumbs' job number) */
     struct {
         u32 h, sub, job;                    /* h 0 - free: W takes it (CPU 0), H3 frees it (any CPU, h last) */
@@ -461,17 +464,24 @@ static void op_work(volatile op_t *o, volatile op_rec_t *r)
     op_crumb(job, sub, P_WORK);
     if (sub == DRV_OPTICS_W0)
         goto out;                           /* nothing: the answer at once */
-    r->loop_n = OPT_LOOP;
+    r->loop_n = o->loop ? o->loop : OPT_LOOP;
     if (sub == DRV_OPTICS_W1) {             /* at once: the worker's priority 56 is below every task it could hold up */
         t = drv_ticks();
-        op_spin(OPT_LOOP);
+        if (o->loop_sleep) {                /* the job waits as long, the CPU is free: the wait from the CPU's work */
+            r->loop_n = 0;
+            r->sleep_ms = o->loop_sleep;
+            drv_sleep(o->loop_sleep);
+        } else {
+            op_spin(r->loop_n);
+        }
         r->loop_us = drv_ticks_since(t);
         op_crumb(job, sub, P_LOOP);
         goto out;
     }
     for (i = 0; i < LOOP_PARTS && !(o->ch.stop | o->ch.abandon); i++) {
         t = drv_ticks();
-        op_spin(OPT_LOOP / LOOP_PARTS);
+        if (r->loop_n >= LOOP_PARTS)
+            op_spin(r->loop_n / LOOP_PARTS);
         r->loop_us += drv_ticks_since(t);
         p.ty -= OPT_YIELD_US;
         op_pace(&p);
@@ -725,9 +735,9 @@ static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
     op_crumb(job, sub, P_SLEPT);
     op_low(r);
     if (sub == DRV_OPTICS_C2 || sub == DRV_OPTICS_C3) {
-        r->loop_n = sub == DRV_OPTICS_C2 ? LOOP_SHORT : OPT_LOOP;
+        r->loop_n = sub == DRV_OPTICS_C2 ? LOOP_SHORT : o->loop ? o->loop : OPT_LOOP;
         t = drv_ticks();
-        op_spin(r->loop_n);
+        op_spin(r->loop_n);                 /* never 0: op_spin(0) would run 2^32 times */
         r->loop_us = drv_ticks_since(t);
         op_crumb(job, sub, P_LOOP);
     }
@@ -960,6 +970,17 @@ void drv_optics_sub(u32 sub)
         o->sub = sub;
 }
 
+/* Core task, between presses (the jobs of the one before ended): the loop of C3, W1 and W2 for the jobs from now on */
+void drv_optics_loop(u32 n, u32 sleep_ms)
+{
+    volatile op_t *o = op();
+
+    if (o) {
+        o->loop = n;
+        o->loop_sleep = sleep_ms;
+    }
+}
+
 /* Core task, at start, before anything is listed: the crumbs of the run before into old[CR_N] (as they were: valid only
  * with the magic), then this run's start in their place. 1 - the magic was there */
 int drv_optics_crumb(u32 boot, u32 *old)
@@ -1161,6 +1182,9 @@ static void op_report(volatile op_rec_t *r, u32 n)
     log_printf(OMK_LOG_INFO, "optics: job %u: %u buffers in use (%u listed); search: 0x1000 slot %u, 0x1060 %s; loop "
                "%u x 2 instructions in %u us", n, r->used, r->nslots, r->i_frame, r->i_small < SLOTS ? "present" :
                "none (as expected)", r->loop_n, r->loop_us);
+    if (r->sleep_ms)
+        log_printf(OMK_LOG_INFO, "optics: job %u: the worker slept %u ms instead of the loop (%u us)", n, r->sleep_ms,
+                   r->loop_us);
     if (!r->kind)
         return;
     log_printf(OMK_LOG_INFO, "optics: job %u: picture %08x (%u bytes) %s %08x, map %u us; uncached read %u bytes in %u us "

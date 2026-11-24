@@ -45,6 +45,23 @@ class Formats(unittest.TestCase):
         gap = data + record(1, 11, 13, b"\x03 out of order")
         self.assertEqual(len(list(omkdebug.parse_records(gap))), 2)
 
+    def test_records_version_2_past_damage(self):
+        def rec2(typ, seq, ms, payload):
+            h = struct.pack("<BBHII", 0xA5, typ, len(payload), seq, ms)
+            b = h + struct.pack("<I", binascii.crc32(payload, binascii.crc32(h))) + payload
+            return b + bytes(-len(b) % 4)
+        good = [rec2(1, 100 + i, 10 * i, b"\x03 line %d" % i) for i in range(6)]
+        bad = bytearray(b"".join(good))
+        o2 = len(good[0]) + len(good[1])
+        bad[o2 + 20] ^= 1                   # a data bit of the third: its CRC
+        o4 = o2 + len(good[2]) + len(good[3])
+        bad[o4:o4 + len(good[4])] = bytes(len(good[4]))     # the fifth: zeros
+        recs = list(omkdebug.parse_records(bytes(bad) + b"\xa5\x01", 0, 2))
+        kinds = [(r[1], r[2] if r[1] != omkdebug.GAP else r[4]) for r in recs]
+        self.assertEqual(kinds, [(1, 100), (1, 101), (omkdebug.GAP, len(good[2])), (1, 103),
+                                 (omkdebug.GAP, len(good[4])), (1, 105), (omkdebug.GAP, 2)])
+        self.assertIn("not whole records", omkdebug.format_record(*recs[2][1:], {}))
+
     def test_snapshot_with_names(self):
         names = {}
         m = struct.pack("<HH", 0x51, 0) + b"FILECLBK".ljust(20, b"\0") + struct.pack("<HH", 0x9F, 0) + b"OMK_LOAD".ljust(20, b"\0")

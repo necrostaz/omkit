@@ -92,10 +92,23 @@ static u32 put_bytes(dring_bank *b, u32 pos, const u8 *s, u32 n, u32 *acc, u32 *
     return pos;
 }
 
+/* The record's CRC-32: its first 12 bytes (sync, type, length, number, ms), then its data */
+static u32 rec_crc(u32 w0, u32 seq, u32 ms, const void *a, u32 na, const void *p, u32 np)
+{
+    u32 w[3];
+
+    w[0] = w0;
+    w[1] = seq;
+    w[2] = ms;
+    return crc32_update(crc32_update(crc32_update(0, w, sizeof(w)), a, na), p, np);
+}
+
+/* Under the caller's lock. The CRC costs about as much as the copy into the ring (a table, a byte at a time: some 2000
+ * instructions for a line of 192 bytes) */
 int dring_put(dring_bank *b, u32 type, u32 ms, const void *a, u32 na, const void *p, u32 np)
 {
     u32 n = na + np, need = DRING_REC + ALIGN4(n), head = b->h[DH_HEAD], tail = b->h[DH_TAIL], pos, acc = 0, fill = 0;
-    u32 rec, len;
+    u32 rec, len, w0, seq;
 
     if (n > 0xffff || need > b->size / 4) {
         b->h[DH_LOST]++;
@@ -111,9 +124,12 @@ int dring_put(dring_bank *b, u32 type, u32 ms, const void *a, u32 na, const void
         tail += DRING_REC + ALIGN4(len);
     }
     b->h[DH_TAIL] = tail;                   /* 1: before the bytes of the old records are overwritten */
-    put_word(b, head, DRING_SYNC | (type & 0xff) << 8 | n << 16);
-    put_word(b, head + 4, b->h[DH_SEQ]);
+    w0 = DRING_SYNC | (type & 0xff) << 8 | n << 16;
+    seq = b->h[DH_SEQ];
+    put_word(b, head, w0);
+    put_word(b, head + 4, seq);
     put_word(b, head + 8, ms);
+    put_word(b, head + 12, rec_crc(w0, seq, ms, a, na, p, np));
     pos = put_bytes(b, head + DRING_REC, a, na, &acc, &fill);
     pos = put_bytes(b, pos, p, np, &acc, &fill);
     if (fill)
@@ -134,25 +150,40 @@ void dring_copy(const dring_bank *b, u32 pos, void *out, u32 n)
         o[i] = b->d[i - first];
 }
 
-u32 dring_walk(const dring_bank *b, u8 *buf, u32 max, dring_fn fn, void *ctx)
+u32 dring_walk(const dring_bank *b, u8 *buf, u32 max, dring_fn fn, void *ctx, u32 *gaps, u32 *skipped)
 {
-    u32 tail = b->h[DH_TAIL], head = b->h[DH_HEAD], pos, rec, len, seq, ms, count = 0, want = 0;
-    int first = 1;
+    u32 tail = b->h[DH_TAIL], head = b->h[DH_HEAD], pos, rec, len, seq, ms, count = 0, last = 0, ng = 0, ns = 0;
+    int first = 1, in_gap = 0;
 
-    if (head - tail > b->size)
-        return 0;
-    for (pos = tail; head - pos >= DRING_REC && head - pos <= b->size; count++) {
-        rec = word_at(b, pos);
-        len = rec >> 16;
-        seq = word_at(b, pos + 4);
-        ms = word_at(b, pos + 8);
-        if ((rec & 0xff) != DRING_SYNC || head - pos < DRING_REC + ALIGN4(len) || len > max || (!first && seq != want))
-            break;                          /* a torn or foreign end */
-        dring_copy(b, pos + DRING_REC, buf, len);
-        fn(rec >> 8 & 0xff, seq, ms, buf, len, ctx);
-        first = 0;
-        want = seq + 1;
-        pos += DRING_REC + ALIGN4(len);
+    if (head - tail <= b->size) {
+        for (pos = tail; head - pos >= DRING_REC && head - pos <= b->size;) {
+            rec = word_at(b, pos);
+            len = rec >> 16;
+            seq = word_at(b, pos + 4);
+            ms = word_at(b, pos + 8);
+            if ((rec & 0xff) == DRING_SYNC && head - pos >= DRING_REC + ALIGN4(len) && len <= max &&
+                (first || seq - last - 1 < 0x80000000u)) {
+                dring_copy(b, pos + DRING_REC, buf, len);
+                if (rec_crc(rec, seq, ms, buf, len, 0, 0) == word_at(b, pos + 12)) {
+                    fn(rec >> 8 & 0xff, seq, ms, buf, len, ctx);
+                    count++;
+                    first = in_gap = 0;
+                    last = seq;
+                    pos += DRING_REC + ALIGN4(len);
+                    continue;
+                }
+            }
+            ng += !in_gap;                  /* not a whole record here: the next one is looked for a word further */
+            in_gap = 1;
+            ns += 4;
+            pos += 4;
+        }
+        if (head - pos <= b->size)
+            ns += head - pos;               /* a torn last bit shorter than a header */
     }
+    if (gaps)
+        *gaps = ng;
+    if (skipped)
+        *skipped = ns;
     return count;
 }

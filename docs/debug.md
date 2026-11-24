@@ -32,6 +32,7 @@ enabled = on
 | `window_ms` | number, ms | `1000` | 0..10000: after each write of `core` to the card, and after an event of another service of `core` (the optics layer's probe: a substage armed or passed, its worker task made, a job of its own listed or ended - a mark with the event's text first), snapshots for this long ... |
 | `window_every` | number, ms | `50` | 10..1000: ... this often (only changes are kept) |
 | `stuck_ms` | number, ms | `1000` | the camera's application in a state that normally lasts a moment (half-press, a transition) for longer than this: snapshots every 500 ms, at most 20 |
+| `stuck_mem` | text | empty | `ADDR:LEN, ...`: up to 6 ranges of RAM (4-aligned, at most 256 bytes each, as `mem` may read them) whose words go into the log once when the application gets stuck as above - the firmware's state at that moment, kept on the card even if the RAM is lost afterwards (the battery taken out) |
 
 The first lines of `CORE.LOG` (or of the RAM log) say what the service found:
 
@@ -113,7 +114,9 @@ differs, 5 CRC differs, 6 rename failed, 7 wrong state (a file open, a power-off
 card, 10 restart not available (core 1.40-1.42), 11 a step not understood, 12 busy (a scenario runs or shoots).
 
 The formats of the RAM banks, records and snapshots are described in `src/core/include/omk_dring.h` and `omk_debug.h`;
-`tools/omkdebug.py` reads them all.
+`tools/omkdebug.py` reads them all. Since ring version 2 every record carries a CRC-32: a reader skips a damaged place
+(RAM that lost bits, words overwritten) and goes on with the next whole record, and says how many bytes it skipped;
+version 1 rings (core 1.40-1.44) are read as before, up to the first damaged record.
 
 ## 6. A test session
 
@@ -131,7 +134,7 @@ python tools/omkdebug.py session --put build/CORE.BIN --put OMKIT.INI --scenario
 | `--scenario` | with `--restart`: the file `OMKIT\SHOOT.RUN` ([config.md](config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)), which runs once at the next start (`--shots`, `--start-delay` go into it); without: the scenario starts now over USB | the steps are checked by the camera |
 | `--restart` | the camera restarts and comes back | it left USB, then answers with a new run; the build that runs is the one of the `CORE.BIN` put |
 | `--wait` | the scenario runs once the camera shoots: the tool asks you to take the cable out and to put it back when the pictures are made (or `--usb-off CMD --usb-on CMD` switch a hub's port off and on, for `--offline` seconds) | the camera comes back in the same run; the scenario's result |
-| `--pull-log`, `--pull-pictures N` | the RAM logs of this power-on (`ramlog.txt`) and of the one before (`ramlog_prev.txt`), `CORE.LOG` and the last N pictures into the output folder; `--crumbs` adds the optics layer's crumbs (`crumbs.txt`), `--pull-mem ADDR:LEN` memory (`mem_ADDR.bin`, repeatable) | each piece's CRC-32 |
+| `--pull-log`, `--pull-pictures N` | the RAM logs of this power-on (`ramlog.txt`) and of the one before (`ramlog_prev.txt`; each also as read, `ramlog.bin`, `ramlog_prev.bin`), `CORE.LOG` and the last N pictures into the output folder; `--crumbs` adds the optics layer's crumbs (`crumbs.txt`), `--pull-mem ADDR:LEN` memory (`mem_ADDR.bin`, repeatable) | each piece's CRC-32 |
 
 Every step has a time limit (`--connect-timeout`, `--restart-timeout`, `--scenario-timeout`); the first step that fails
 ends the session with its reason and the exit status 1. With `--pull-log` the logs are pulled after a failed step too,

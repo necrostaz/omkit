@@ -38,6 +38,16 @@
  * The crumbs (drv_optics_crumb): the step's last phase, kept past the cache in memory outside the arena - logged at the
  * next start when the memory outlived the reset.
  *
+ * The schedule (core feature/optics-layer, after card159: [optics] schedule, without a bisection): a list of substages,
+ * one a press - what the jobs of each press get - with the empty loop's length or a sleep instead of it:
+ *   schedule = W0, W0, W1/s20, W0, W1/100000, W0, W1, W0
+ * NAME - a substage (as bisect_from), NAME/N - with the loop of N iterations (C3, W1, W2), W1/sMS - the worker sleeps MS
+ * instead of the loop (the job waits as long, the CPU is free). The first entry is given when the worker task runs (if an
+ * entry needs it) and its tests are done; the next one when a job of the press ended, the camera is not busy with the card
+ * and the application is in a lasting state - as a substage passes in the bisection, but nothing is armed or stored: the
+ * debug service's RAM log is the record. After the last entry the jobs keep it. A hang or a reset on a press is the
+ * one before it or its own: the log says which entry each press got.
+ *
  * With the debug service on ([debug] enabled), the moments of the layer - a substage or the cached read armed, a
  * substage passed, the worker task made, a job of ours listed or ended (as the core task sees them) - are events of its
  * RAM log (dbg_event): a mark, the watched tasks' states and the window of snapshots after it. */
@@ -54,6 +64,9 @@
 #define LEVEL_MAX 3
 #define SUBS DRV_OPTICS_SUBS
 #define BIS_DONE SUBS                       /* bis.index after the last substage */
+#define SCHED_MAX 24                        /* entries of [optics] schedule */
+#define LOOP_MAX 100000000u                 /* iterations of a schedule's loop: ~2 s at ~10 ns an instruction */
+#define SLEEP_MAX 2000                      /* ms of a schedule's sleep (the step gives up on the worker after 10 s) */
 
 /* The cached read's state on the card (store OPTICS, key 1) */
 typedef struct {
@@ -97,6 +110,15 @@ static struct {
     u32 ended0;                             /* the driver's count of jobs ended at b.index when it was given */
     u32 retry_ms;
 } bis;
+
+/* [optics] schedule */
+static struct {
+    u32 n, k;                               /* entries; the one given now */
+    u8 sub[SCHED_MAX];
+    u32 loop[SCHED_MAX], sleep[SCHED_MAX];
+    u32 ended0;                             /* the driver's jobs ended (all substages) when entry k was given */
+    int on, given, worker;                  /* worker: an entry needs the worker task */
+} sch;
 
 /* A state to the card now: 0, or -1 (not written) */
 static int opt_put(u16 key, void *b, u32 len, u32 *saves)
@@ -229,6 +251,59 @@ static u32 bis_start(u32 run, u32 from)
     return bis.b.index == BIS_DONE ? DRV_OPTICS_FULL : bis_safe();
 }
 
+/* [optics] schedule: the entries, the bad ones left out (logged). Words separated by commas or spaces */
+static void sch_parse(const char *s)
+{
+    char word[24];
+    u32 n, k, v, i, slash, sleep;
+    int bad;
+
+    while (*s) {
+        while (*s == ',' || *s == ' ' || *s == '\t')
+            s++;
+        for (n = 0; *s && *s != ',' && *s != ' ' && *s != '\t'; s++)
+            if (n < sizeof(word) - 1)
+                word[n++] = *s;
+        word[n] = 0;
+        if (!n)
+            break;
+        for (i = 0; word[i] && word[i] != '/'; i++)
+            ;
+        slash = word[i] == '/';
+        sleep = slash && (word[i + 1] == 's' || word[i + 1] == 'S');
+        bad = 0;
+        v = 0;
+        if (slash) {                        /* /N or /sMS */
+            word[i] = 0;
+            k = i + 1 + sleep;
+            bad = !word[k];
+            for (; word[k] && !bad; k++)
+                if (word[k] < '0' || word[k] > '9' || v > LOOP_MAX / 10)
+                    bad = 1;
+                else
+                    v = v * 10 + (u32)(word[k] - '0');
+        }
+        for (k = 0; k < SUBS && !str_ieq(word, drv_optics_sub_name(k)); k++)
+            ;
+        if (sleep)
+            bad |= k != DRV_OPTICS_W1 || !v || v > SLEEP_MAX;
+        else if (slash)
+            bad |= (k != DRV_OPTICS_C3 && k != DRV_OPTICS_W1 && k != DRV_OPTICS_W2) || v < 10 || v > LOOP_MAX;
+        if (k == SUBS || bad || sch.n == SCHED_MAX) {
+            if (slash)
+                word[i] = '/';
+            log_printf(OMK_LOG_WARN, "optics: schedule: '%s' %s - left out", word, sch.n == SCHED_MAX ? "is one too many" :
+                       "is not a substage, NAME/N (C3, W1, W2; N 10..100000000) or W1/sMS (1..2000)");
+            continue;
+        }
+        sch.sub[sch.n] = (u8)k;
+        sch.loop[sch.n] = sleep ? 0 : v;
+        sch.sleep[sch.n] = sleep ? v : 0;
+        sch.worker |= k >= DRV_OPTICS_WORKER;
+        sch.n++;
+    }
+}
+
 /* At start: what the crumbs of the run before say */
 static void crumbs(void)
 {
@@ -279,6 +354,14 @@ void optics_setup(void)
     }
     if (run)
         sub = bis_start((u32)run, bis_named(cfg_str("optics", "bisect_from", "N")));
+    else
+        sch_parse(cfg_str("optics", "schedule", ""));
+    if (sch.n) {                            /* the jobs get nothing of ours until the first entry is given */
+        sch.on = 1;
+        sub = DRV_OPTICS_N;
+        log_printf(OMK_LOG_INFO, "optics: schedule of %u entries, one a press%s", sch.n, sch.worker ?
+                   "; the worker task first" : "");
+    }
     if (lv == 2)
         opt_store_start((u32)cfg_int("optics", "run", 1));
     rc = drv_optics_install(op.level);
@@ -309,6 +392,47 @@ static int opt_worker(void)
     else
         log_printf(OMK_LOG_INFO, "optics: the worker task runs: id %u, CPU 0, priority 56", tid);
     return op.worker;
+}
+
+/* The schedule, core loop: the first entry once the worker runs (if needed); then one entry a press */
+static void sch_service(u32 now, int busy, u32 ended)
+{
+    u32 app, keys;
+
+    (void)now;
+    if (busy)
+        return;
+    if (!sch.given) {
+        if (sch.worker && opt_worker() < 0) {
+            sch.on = 0;                     /* the jobs stay at N */
+            log_printf(OMK_LOG_ERROR, "optics: schedule stopped: no worker task");
+            return;
+        }
+        if (op.worker_test)
+            return;                         /* its tests first */
+    } else {
+        if (ended == sch.ended0 || drv_ui_probe(&app, &keys) > 0)
+            return;                         /* no job of the press ended yet, or the application not settled */
+        if (sch.k + 1 == sch.n) {
+            sch.ended0 = ended;
+            return;                         /* the last entry: kept */
+        }
+        sch.k++;
+    }
+    sch.given = 1;
+    sch.ended0 = ended;
+    drv_optics_loop(sch.loop[sch.k], sch.sleep[sch.k]);
+    drv_optics_sub(sch.sub[sch.k]);
+    if (sch.sleep[sch.k])
+        log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s with a sleep of %u ms instead of the loop, given to the next "
+                   "press", sch.k + 1, sch.n, drv_optics_sub_name(sch.sub[sch.k]), sch.sleep[sch.k]);
+    else if (sch.loop[sch.k])
+        log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s with a loop of %u iterations, given to the next press",
+                   sch.k + 1, sch.n, drv_optics_sub_name(sch.sub[sch.k]), sch.loop[sch.k]);
+    else
+        log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s given to the next press%s", sch.k + 1, sch.n,
+                   drv_optics_sub_name(sch.sub[sch.k]), sch.k + 1 == sch.n ? " (the last entry: kept)" : "");
+    dbg_event("optics: schedule", drv_optics_sub_name(sch.sub[sch.k]));
 }
 
 /* The bisection, core loop: the substage under test armed; passed - the next one saved, then armed */
@@ -453,6 +577,10 @@ void optics_service(u32 now)
     if (bis.on) {
         bis_service(&st, now, busy);
         return;                             /* the cached read only after the bisection */
+    }
+    if (sch.on) {
+        sch_service(now, busy, ended);
+        return;                             /* no cached read with a schedule */
     }
     if (!op.worker && !busy && (!bis.b.run || bis.b.index == BIS_DONE))
         opt_worker();                       /* without a bisection the stills get the level's work: it needs the worker */

@@ -819,6 +819,14 @@ void drv_optics_sub(u32 sub)
     host_opt_sub = sub;
 }
 
+u32 host_opt_loop, host_opt_sleep;
+
+void drv_optics_loop(u32 n, u32 sleep_ms)
+{
+    host_opt_loop = n;
+    host_opt_sleep = sleep_ms;
+}
+
 int drv_optics_crumb(u32 boot, u32 *old)
 {
     u32 i;

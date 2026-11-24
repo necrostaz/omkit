@@ -27,6 +27,8 @@
 #define RESOLVE_TRIES 10                    /* ... this many times: a full walk of the tasks takes tens of ms */
 #define STUCK_EVERY_MS 500
 #define STUCK_SNAPS 20                      /* snapshots per stay in a passing state */
+#define STUCK_MEM_MAX 6                     /* [debug] stuck_mem: ranges logged when the application gets stuck ... */
+#define STUCK_MEM_LEN 256                   /* ... each at most this long */
 #define WRITE_IDLE_MS 30000                 /* an open file with no data for this long is dropped */
 #define LIST_SCAN_MAX 1024                  /* entries a LIST job walks (findnext reads the folder from its start) */
 #define SNAP_OBJS 64
@@ -58,6 +60,7 @@ static watch_t watch[WATCH_MAX];
 static u32 n_watch, resolve_ms, resolve_tries, core_id;
 static u8 snap_buf[24 + 20 * WATCH_MAX], snap_prev[24 + 20 * WATCH_MAX];
 static u32 snap_same, snap_prev_len;
+static u32 stuck_mem[STUCK_MEM_MAX][2], n_stuck_mem;   /* [debug] stuck_mem: address, length */
 
 /* The job: started by a handler (state QUEUED), done by the core task */
 static struct {
@@ -270,6 +273,65 @@ void dbg_event(const char *what, const char *arg)
     }
 }
 
+/* [debug] stuck_mem: the words of the ranges given, into the log (the card's and the RAM's) once a stay - what the firmware's
+ * state was when the application got stuck, for a camera whose RAM may not outlive what comes next (the battery out).
+ * Only memory a read cannot fault on (drv_mem_readable, as GET MEM) */
+static void stuck_dump(void)
+{
+    const volatile u8 *m;
+    u32 i, k, a, n;
+
+    for (i = 0; i < n_stuck_mem; i++) {
+        a = stuck_mem[i][0];
+        n = stuck_mem[i][1];
+        m = drv_mem_readable(a, n);
+        if (!m) {
+            log_printf(OMK_LOG_WARN, "debug: stuck_mem %08x + %u: not readable memory", a, n);
+            continue;
+        }
+        for (k = 0; k + 4 <= n; k += 16)
+            log_printf(OMK_LOG_INFO, "debug: mem %08x: %08x %08x %08x %08x", a + k, ((const volatile u32 *)m)[k / 4],
+                       k + 8 <= n ? ((const volatile u32 *)m)[k / 4 + 1] : 0, k + 12 <= n ? ((const volatile u32 *)m)[k / 4 + 2] : 0,
+                       k + 16 <= n ? ((const volatile u32 *)m)[k / 4 + 3] : 0);
+    }
+}
+
+/* [debug] stuck_mem = ADDR:LEN, ...: up to STUCK_MEM_MAX ranges, 4-aligned, up to STUCK_MEM_LEN bytes each */
+static void stuck_mem_parse(const char *s)
+{
+    u32 v[2], j, d;
+
+    while (*s && n_stuck_mem < STUCK_MEM_MAX) {
+        while (*s == ',' || *s == ' ')
+            s++;
+        if (!*s)
+            break;
+        for (j = 0; j < 2; j++) {           /* hex with 0x, or decimal */
+            v[j] = 0;
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+                for (s += 2; (d = *s >= '0' && *s <= '9' ? (u32)(*s - '0') : (*s | 0x20) >= 'a' && (*s | 0x20) <= 'f' ?
+                              (u32)((*s | 0x20) - 'a' + 10) : 16) < 16; s++)
+                    v[j] = v[j] << 4 | d;
+            else
+                for (; *s >= '0' && *s <= '9'; s++)
+                    v[j] = v[j] * 10 + (u32)(*s - '0');
+            if (!j && *s == ':')
+                s++;
+            else
+                break;
+        }
+        if (j != 1 || (v[0] & 3) || !v[1] || v[1] > STUCK_MEM_LEN || !drv_mem_readable(v[0], v[1])) {
+            log_printf(OMK_LOG_WARN, "debug: stuck_mem: a range not ADDR:LEN of readable memory (4-aligned, at most %u "
+                       "bytes) - the rest left out", STUCK_MEM_LEN);
+            return;
+        }
+        stuck_mem[n_stuck_mem][0] = v[0];
+        stuck_mem[n_stuck_mem++][1] = v[1];
+        while (*s && *s != ',')
+            s++;
+    }
+}
+
 /* The application in a passing state (half-press, a transition) longer than stuck_ms: snapshots while it stays */
 static void ui_check(u32 now)
 {
@@ -287,8 +349,10 @@ static void ui_check(u32 now)
     }
     if (!r || !stuck_ms || now - ui_since < stuck_ms || ui_snaps >= STUCK_SNAPS || now - ui_last < STUCK_EVERY_MS)
         return;
-    if (!ui_snaps)
+    if (!ui_snaps) {
         log_printf(OMK_LOG_WARN, "debug: application state %x for %u ms, snapshots to the RAM log", app, now - ui_since);
+        stuck_dump();
+    }
     ui_snaps++;
     ui_last = now;
     snapshot(T_STUCK, 0);
@@ -1104,7 +1168,7 @@ void dbg_setup(const char *run)
 
 /* The run before, from its bank: counts and the last line of its log */
 typedef struct {
-    u32 records, lines, snaps, last_ms;
+    u32 records, lines, snaps, last_ms, gaps, skipped;
     char last[100];
 } walk_t;
 
@@ -1138,14 +1202,15 @@ static void report_prev(void)
         return;
     }
     mem_set(&w, 0, sizeof(w));
-    dring_walk(b, xfer, b->size / 4, walk_fn, &w);
+    dring_walk(b, xfer, b->size / 4, walk_fn, &w, &w.gaps, &w.skipped);
     for (i = 0; i < 8; i++)
         run[i] = b->h[DH_RUN0 + i / 4] >> (8 * (i % 4));
     run[8] = 0;
     log_printf(prev_valid && !(b->h[DH_FLAGS] & DF_ENDED) ? OMK_LOG_WARN : OMK_LOG_INFO,
                "debug: the run before (%s, power-on %u) %s; heartbeat %u ms, %u records (%u lines, %u snapshots), the last "
-               "at %u ms, %u lost", run, b->h[DH_BOOT], b->h[DH_FLAGS] & DF_ENDED ? "ended with a power-off" :
-               "did NOT end with a power-off", b->h[DH_BEAT], w.records, w.lines, w.snaps, w.last_ms, b->h[DH_LOST]);
+               "at %u ms, %u lost; %u damaged places, %u bytes skipped", run, b->h[DH_BOOT], b->h[DH_FLAGS] & DF_ENDED ?
+               "ended with a power-off" : "did NOT end with a power-off", b->h[DH_BEAT], w.records, w.lines, w.snaps,
+               w.last_ms, b->h[DH_LOST], w.gaps, w.skipped);
     if (w.lines)
         log_printf(OMK_LOG_INFO, "debug: its last line: %s", w.last);
 }
@@ -1160,7 +1225,7 @@ static u8 *alloc_aligned(u32 size)
 void dbg_start(void)
 {
     static const char *const keys[] = {"enabled", "write", "card_writes", "ring_level", "tasks", "window_ms",
-                                       "window_every", "stuck_ms", "emu_restart"};
+                                       "window_every", "stuck_ms", "stuck_mem", "emu_restart"};
     const char *sec, *key, *val;
     u32 i, k, n;
     int rc = -1;
@@ -1181,6 +1246,7 @@ void dbg_start(void)
     if (window_every < 10)
         window_every = 10;
     stuck_ms = cfg_ms("stuck_ms", 1000, 600000);
+    stuck_mem_parse(cfg_str("debug", "stuck_mem", ""));
 #ifdef OMK_EMU
     emu_restart_ms = write_on ? cfg_ms("emu_restart", 0, 600000) : 0;
 #endif

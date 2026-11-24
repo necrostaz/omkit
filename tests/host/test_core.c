@@ -1032,6 +1032,59 @@ static void test_bisect(int phase)
     }
 }
 
+/* The optics schedule ([optics] schedule, no bisection): nothing of ours until the worker runs and its test is done;
+ * then one entry a press - the next one only when a job ended and the application is in a lasting state; the loop's
+ * length or W1's sleep given with each; bad entries left out; the last entry kept */
+static void test_schedule(void)
+{
+    long n;
+    char *t;
+    u32 k;
+    static const u32 want_sub[] = {DRV_OPTICS_W0, DRV_OPTICS_W1, DRV_OPTICS_W0, DRV_OPTICS_W1, DRV_OPTICS_C3};
+    static const u32 want_loop[] = {0, 0, 0, 100000, 20000};
+    static const u32 want_sleep[] = {0, 20, 0, 0, 0};
+
+    omk_dir(LOG_DIR);
+    write_file("OMKIT.INI", "[optics]\nprobe = 1\nworker_test = 1\n"
+                            "schedule = W0, W1/s20, w0 bogus W1/5 W2/s5, W1/100000,C3/20000\n");
+    CHECK(cfg_load() == 1);
+    log_setup(1, OMK_LOG_INFO);
+    host_prev_ended = 1;
+    host_opt_worker_rc = 0;
+    host_opt_workers = 0;
+    host_ui_state = 0;
+    memset(&host_opt, 0, sizeof(host_opt));
+    optics_setup();
+    CHECK(host_opt_level == 1 && host_opt_sub == DRV_OPTICS_N && host_opt_workers == 0);
+    optics_service(1000);                   /* the worker made; its test still to do: nothing given */
+    CHECK(host_opt_workers == 1 && host_opt_sub == DRV_OPTICS_N);
+    optics_service(1250);                   /* the test (no worker in the host driver: "no worker") */
+    optics_service(1500);
+    CHECK(host_opt_sub == want_sub[0] && host_opt_loop == 0 && host_opt_sleep == 0);
+    for (k = 1; k < 5; k++) {
+        optics_service(2000 * k);
+        CHECK(host_opt_sub == want_sub[k - 1]);  /* no job ended: no move */
+        host_opt.ended[want_sub[k - 1]]++;
+        host_ui_state = DRV_UI_HALF;        /* ended, the application still in its half-press state: no move */
+        optics_service(2000 * k + 100);
+        CHECK(host_opt_sub == want_sub[k - 1]);
+        host_ui_state = 0;
+        optics_service(2000 * k + 200);
+        CHECK(host_opt_sub == want_sub[k] && host_opt_loop == want_loop[k] && host_opt_sleep == want_sleep[k]);
+    }
+    host_opt.ended[DRV_OPTICS_C3]++;
+    optics_service(11000);
+    CHECK(host_opt_sub == DRV_OPTICS_C3 && host_opt_loop == 20000);   /* the last one kept */
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &n);
+    CHECK(t && strstr(t, "optics: schedule of 5 entries, one a press; the worker task first"));
+    CHECK(t && strstr(t, "'bogus' is not a substage") && strstr(t, "'W1/5' is not") && strstr(t, "'W2/s5' is not"));
+    CHECK(t && strstr(t, "schedule 2 of 5: W1 with a sleep of 20 ms instead of the loop, given to the next press"));
+    CHECK(t && strstr(t, "schedule 4 of 5: W1 with a loop of 100000 iterations"));
+    CHECK(t && strstr(t, "schedule 5 of 5: C3 with a loop of 20000 iterations"));
+    free(t);
+}
+
 int main(int argc, char **argv)
 {
     host_dir = argc > 1 ? argv[1] : ".";
@@ -1046,6 +1099,8 @@ int main(int argc, char **argv)
         test_optics(atoi(argv[3]));
     else if (argc > 3 && !strcmp(argv[2], "bisect"))
         test_bisect(atoi(argv[3]));
+    else if (argc > 2 && !strcmp(argv[2], "schedule"))
+        test_schedule();
     else {
         test_cfg_template();
         test_log();

@@ -275,6 +275,7 @@ class SessionSteps(unittest.TestCase):
             rc = self.make(w, user=False, on_say=on_say).run(Args(scenario="keep", wait=True, pull_log=True, crumbs=True,
                                                                   pull_mem=["0xa3700000:32"], out=d))
             prev = (Path(d) / "ramlog_prev.txt").read_text()
+            raw = (Path(d) / "ramlog_prev.bin").read_bytes()
             cr = (Path(d) / "crumbs.txt").read_text()
             mem = (Path(d) / "mem_a3700000.bin").read_bytes()
         self.assertEqual(rc, 1)
@@ -283,6 +284,7 @@ class SessionSteps(unittest.TestCase):
         self.assertIn("run RUN00001", prev)
         self.assertIn("did NOT end with a power-off", prev)
         self.assertIn("the last line of RUN00001", prev)
+        self.assertEqual(raw[:4], struct.pack("<I", omkdebug.MAGIC))     # the bank's header, then its bytes
         self.assertIn("job 4 at W1: last phase 'job ended'", cr)
         self.assertEqual(mem, bytes(32))
 

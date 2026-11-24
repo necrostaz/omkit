@@ -266,6 +266,9 @@ void drv_optics_service(drv_optics_info *st);
  * place: 1 - they were there (the memory outlived the reset or power-off); drv_optics_beat - core's heartbeat (ms);
  * names of substages and phases for the log */
 void drv_optics_sub(u32 sub);
+/* The empty loop of C3, W1 and W2 for the jobs listed from now on: n iterations (0 - the default, 1 000 000; at least 10
+ * for W2), or for W1 a sleep of sleep_ms in the worker instead (0 - no) - the job waits as long with the CPU free */
+void drv_optics_loop(u32 n, u32 sleep_ms);
 int drv_optics_crumb(u32 boot, u32 *old);
 void drv_optics_beat(u32 ms);
 /* The worker task (core 1.37): made once by the core task, CPU 0, priority 56, its stack from the arena; it does the

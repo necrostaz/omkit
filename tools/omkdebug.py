@@ -85,7 +85,7 @@ def parse_header(b: bytes) -> dict:
     h = dict(zip(HEAD_WORDS, w))
     h["run"] = struct.pack("<II", h["run0"], h["run1"]).rstrip(b"\0").decode("ascii", "replace")
     fixed = struct.pack("<6I", *w[0:4], h["run0"], h["run1"])
-    h["valid"] = (h["magic"] == MAGIC and h["version"] == 1 and h["boot"] != 0 and h["size"] and
+    h["valid"] = (h["magic"] == MAGIC and h["version"] in (1, 2) and h["boot"] != 0 and h["size"] and
                   (h["head"] - h["tail"]) % 2**32 <= h["size"] and binascii.crc32(fixed) == h["crc"])
     h["ended"] = bool(h["flags"] & 1)
     return h
@@ -97,17 +97,45 @@ def parse_banks(b: bytes) -> dict:
     return out
 
 
-def parse_records(data: bytes, start: int = 0):
-    """Records {u8 0xA5, u8 type, u16 len, u32 seq, u32 ms} + data padded to 4, from data[0:] at ring position start.
-    Stops at the first record that is not whole (a torn end). Yields (pos, type, seq, ms, payload)"""
-    at, want = 0, None
-    while at + 12 <= len(data):
+GAP = -1                                    # parse_records: a place of the ring that is not a whole record
+
+
+def rec_size(version: int) -> int:
+    return 16 if version >= 2 else 12
+
+
+def parse_records(data: bytes, start: int = 0, version: int = 1):
+    """Records from data[0:] at ring position start. Version 1 (core 1.40-1.44): {u8 0xA5, u8 type, u16 len, u32 seq,
+    u32 ms} + data padded to 4; stops at the first record that is not whole. Version 2: the header has a CRC-32 of its first
+    12 bytes and the data; a place that is not a whole record (its CRC wrong, its number not above the one before: RAM
+    damaged, a torn end) is skipped word by word to the next whole one and yielded as (pos, GAP, 0, 0, its bytes).
+    Yields (pos, type, seq, ms, payload)"""
+    at, last, gap = 0, None, None
+    hs = rec_size(version)
+    while at + hs <= len(data):
         sync, typ, n, seq, ms = struct.unpack_from("<BBHII", data, at)
-        if sync != 0xA5 or at + 12 + n > len(data) or (want is not None and seq != want):
-            return
-        yield start + at, typ, seq, ms, data[at + 12:at + 12 + n]
-        want = seq + 1
-        at += 12 + ((n + 3) & ~3)
+        good = sync == 0xA5 and at + hs + n <= len(data)
+        if good and version >= 2:
+            good = ((last is None or 0 < (seq - last) % 2**32 < 2**31) and
+                    binascii.crc32(data[at + hs:at + hs + n], binascii.crc32(data[at:at + 12])) ==
+                    struct.unpack_from("<I", data, at + 12)[0])
+        elif good:
+            good = last is None or seq == (last + 1) % 2**32
+        if not good:
+            if version < 2:
+                return
+            gap = at if gap is None else gap
+            at += 4
+            continue
+        if gap is not None:
+            yield start + gap, GAP, 0, 0, at - gap
+            gap = None
+        yield start + at, typ, seq, ms, data[at + hs:at + hs + n]
+        last = seq
+        at += hs + ((n + 3) & ~3)
+    if version >= 2 and (gap is not None or at < len(data)):
+        g = at if gap is None else gap
+        yield start + g, GAP, 0, 0, len(data) - g
 
 
 def parse_map(p: bytes) -> dict:
@@ -171,7 +199,9 @@ def wait_name(bit: int) -> str:
     return WAITS[bit] if bit < len(WAITS) else f"W{bit}"
 
 
-def format_record(typ: int, seq: int, ms: int, p: bytes, names: dict) -> str:
+def format_record(typ: int, seq: int, ms: int, p, names: dict) -> str:
+    if typ == GAP:
+        return f"# {p} bytes here are not whole records (RAM damaged or overwritten, or the torn end)"
     if typ == 1:                            # a log line: its level byte, then the line as the log has it
         return p[1:].decode("ascii", "replace")
     if typ == 3:
@@ -452,11 +482,17 @@ def read_bank(cam, which: int, banks: dict, start=None) -> tuple[bytes, int, int
     return bytes(data), first, pos
 
 
-def show_records(data: bytes, start: int, names: dict):
+def show_records(data: bytes, start: int, names: dict, version: int = 1):
     last = start
-    for pos, typ, seq, ms, p in parse_records(data, start):
+    for pos, typ, seq, ms, p in parse_records(data, start, version):
+        if typ == GAP:
+            if pos + p == start + len(data):
+                break                       # a torn end, while following: read again next time
+            print(format_record(typ, seq, ms, p, names))
+            last = pos + p
+            continue
         print(format_record(typ, seq, ms, p, names))
-        last = pos + 12 + ((len(p) + 3) & ~3)
+        last = pos + rec_size(version) + ((len(p) + 3) & ~3)
     return last
 
 
@@ -662,14 +698,15 @@ def run(cam, a) -> int:
         if which and banks["prev"] == 0xFF:
             raise Refused("no RAM log of a power-on before (a power-off or the battery cleared the memory)")
         names: dict = {}
+        ver = banks["banks"][banks["cur"] if which == 0 else banks["prev"]]["version"]
         data, start, end = read_bank(cam, which, banks)
-        pos = show_records(data, start, names)
+        pos = show_records(data, start, names, ver)
         while a.cmd == "tail" and a.follow:
             time.sleep(a.interval)
             code, _, raw = cam.get(BANKS)
             ok(code, "BANKS")
             data, start, end = read_bank(cam, 0, parse_banks(raw), pos)
-            pos = show_records(data, start, names)
+            pos = show_records(data, start, names, ver)
         return 0
     if a.cmd == "snap":
         st = job(cam, SNAP)
@@ -1024,18 +1061,25 @@ class Session:
         ok(code, "BANKS")
         banks = parse_banks(raw)
         counts = []
-        for which, name in ((0, "ramlog.txt"), (1, "ramlog_prev.txt")):
+        for which, name in ((0, "ramlog"), (1, "ramlog_prev")):
             if which and banks["prev"] == 0xFF:
                 counts.append("no RAM log of a power-on before")
                 continue
-            h = banks["banks"][banks["cur"] if which == 0 else banks["prev"]]
+            idx = banks["cur"] if which == 0 else banks["prev"]
+            h = banks["banks"][idx]
             data, start, _ = read_bank(self.cam, which, banks)
+            # the bank as read (its header, then its records from the tail): what a damaged ring looked like
+            (out / f"{name}.bin").write_bytes(raw[64 * idx:64 * idx + 64] + data)
             names: dict = {}
+            recs = list(parse_records(data, start, h["version"]))
+            gaps = [r for r in recs if r[1] == GAP]
             lines = [f"# power-on {h['boot']} run {h['run']}: heartbeat {h['beat']} ms, "
-                     f"{'ended with a power-off' if h['ended'] else 'did NOT end with a power-off'}, lost {h['lost']}"]
-            lines += [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in parse_records(data, start)]
-            (out / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
-            counts.append(f"{name} {len(lines) - 1} records (run {h['run']})")
+                     f"{'ended with a power-off' if h['ended'] else 'did NOT end with a power-off'}, lost {h['lost']}, "
+                     f"ring version {h['version']}, {len(data)} bytes from the tail, {len(gaps)} damaged places "
+                     f"({sum(r[4] for r in gaps)} bytes)"]
+            lines += [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in recs]
+            (out / f"{name}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            counts.append(f"{name}.txt {len(recs) - len(gaps)} records, {len(gaps)} damaged places (run {h['run']})")
         log = read_file(self.cam, "OMKIT\\LOG\\CORE.LOG")
         (out / "CORE.LOG").write_bytes(log)
         self.say(f"log: {', '.join(counts)}, CORE.LOG {len(log)} bytes")

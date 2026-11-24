@@ -46,6 +46,11 @@ for phase in 1 2 3 4 5 6 7; do
     if [ "$out" = ok ]; then pass "core: optics bisection, power-on $phase"; else fail "core: optics bisection, power-on $phase"; echo "$out" | sed 's/^/        /'; fi
 done
 
+# The optics schedule: one entry a press, the loop or the sleep with it, bad entries left out
+mkdir "$tmp/schedule"
+out=$("$BIN/test_core" "$tmp/schedule" schedule 2>&1)
+if [ "$out" = ok ]; then pass "core: optics schedule"; else fail "core: optics schedule"; echo "$out" | sed 's/^/        /'; fi
+
 # The test scenario (tests/host/test_shoot.c): its state machine against a simulated camera, by keys and by wifi events
 for path in keys wifi; do
     mkdir "$tmp/shoot_$path"
@@ -63,7 +68,7 @@ fi
 
 # The debug service (tests/host/test_debug.c): the RAM ring over power-ons (a torn end, wrap, a damaged header), the
 # memory the computer may read, the USB operations and their jobs, no card writes; each on its own empty "card"
-for group in ring memread proto write nocard; do
+for group in ring memread proto write nocard stuck; do
     mkdir "$tmp/debug_$group"
     out=$("$BIN/test_debug" "$tmp/debug_$group" $group 2>&1)
     if [ "$out" = ok ]; then pass "debug: $group"; else fail "debug: $group"; echo "$out" | sed 's/^/        /'; fi
