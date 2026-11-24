@@ -10,6 +10,7 @@
 #include "omk_log.h"
 #include "omk_store.h"
 #include "omk_mod.h"
+#include "omk_debug.h"
 
 #define SERVICE_MS 250
 #define CORE_STORE_SIZE 256
@@ -211,6 +212,7 @@ void core_mark_ended(void)
 
     if (core_store)
         store_set(core_store, KEY_ENDED, &one, sizeof(one), OMK_STORE_PERSIST);
+    dbg_ended();
 }
 
 /* Entry from the loader, in the OMK_LOAD task. Does not return: continues as the low-priority service loop */
@@ -230,7 +232,8 @@ void core_main(void)
     mem_init();
     make_run_id();
     cfg_state = cfg_load();
-    dirs_ok = !omk_dir(LOG_DIR) & !omk_dir(STORE_DIR);   /* before the first log write and the first store */
+    dbg_setup(run_id);                      /* before the log's first line: its RAM ring gets the start too */
+    dirs_ok = !core_card_ok() || (!omk_dir(LOG_DIR) & !omk_dir(STORE_DIR));   /* before the first log write and store */
     setup_log(cfg_state);
     if (!dirs_ok)
         log_printf(OMK_LOG_WARN, "cannot make the folders %s and %s", LOG_DIR, STORE_DIR);
@@ -245,6 +248,7 @@ void core_main(void)
     log_checkpoint("boot: installing power hooks");
     power_install();
     taskdump_setup(omk_ms());               /* before the modules: its buffer is taken from the arena first */
+    dbg_start();                            /* its buffers too; the run before; the USB operations */
 #ifdef OMK_EMU
     {
         /* OMK_EMU: a build for running core in an emulator, never for a camera - a check of the thunks to the
@@ -304,6 +308,8 @@ void core_main(void)
         grain_service(now);
         modules_tick(now);
         taskdump_service(now);
+        dbg_service(now);
+        tick = dbg_tick(tick);
         if (!busy)
             log_service(now);
     }

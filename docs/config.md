@@ -120,6 +120,15 @@ The keys below are **diagnostics**, not in the sample:
 A number out of range is replaced by the default with the warning `grain: KEY = N out of LO..HI, DEF taken`. How the mask
 and the colour grain work in the camera: [platform/om5m2/grain.md](platform/om5m2/grain.md).
 
+### 5.1. `[debug]`
+
+The debug service of `core` 1.40 for developers: a log in RAM that survives a reset, read over USB in the MTP mode,
+optionally no card writes by `core` and file updates over USB. **Off by default**, not in the sample and not in a
+release's `OMKIT.INI`. With `enabled = on`, anyone who connects the camera by USB can read its RAM and the files of the
+`OMKIT` and `DCIM` folders; with `write = on` also replace the files of `OMKIT`. The keys (`enabled`, `card_writes`,
+`write`, `ring_level`, `tasks`, `window_ms`, `window_every`, `stuck_ms`), the security notes and the computer's tool:
+[debug.md](debug.md). An unknown key in `[debug]` gets the warning `config: [debug] KEY unknown`.
+
 ## 6. Keys `core` reads in every module's section
 
 A module's section is named after the module: `[CREATPRF]`, `[FILMLOOK]`. Besides the module's own keys, `core` reads two

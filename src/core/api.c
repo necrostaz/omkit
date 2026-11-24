@@ -1,5 +1,6 @@
 /* Public API for modules (omk_api.h). The module handle selects the config section, memory owner, store and folder */
 #include "omk_core.h"
+#include "omk_debug.h"
 #include "omk_ev.h"
 #include "omk_power.h"
 #include "omk_prof.h"
@@ -103,6 +104,10 @@ static omk_file *api_file_open(omk_mod *m, const char *name, const char *mode)
     }
     if (!power_running()) {
         log_printf(OMK_LOG_WARN, "%s: file_open(%s): the card is not available now (power-off or sleep)", m->name, n);
+        return 0;
+    }
+    if (mode[0] == 'w' && !core_card_ok()) {
+        log_printf(OMK_LOG_INFO, "%s: file_open(%s, w): no card writes ([debug] card_writes = off)", m->name, n);
         return 0;
     }
     mod_dir(m);

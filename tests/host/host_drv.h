@@ -21,4 +21,25 @@ extern int host_wakes;                   /* drv_wake calls */
 extern int host_isp_ok, host_isp_busy;   /* drv_isp_install works; drv_isp_set answers -2 this many times */
 extern u32 host_isp_stock;               /* drv_isp_set(0, 0) calls */
 
+/* The debug service */
+typedef struct {
+    u32 code, phase;
+    drv_ptp_fn fn;
+} host_ptp_op;
+extern unsigned char host_keep[0x20080];
+extern u32 host_keep_size;
+extern host_ptp_op host_ptp[8];
+extern u32 host_ptp_n;
+extern int host_ptp_installs;
+extern unsigned char host_ptp_out[1 << 17];
+extern u32 host_ptp_out_n, host_ptp_total, host_ptp_sends;
+extern const unsigned char *host_ptp_in;
+extern u32 host_ptp_in_n;
+extern unsigned char host_mem[4096];
+extern drv_task host_tasks[4];
+extern u32 host_ntasks, host_app;
+extern int host_ui;
+extern int host_in_task;
+extern int host_find;                   /* 1 - drv_findfirst lists the host folder */
+
 #endif

@@ -38,6 +38,14 @@ else
     fail "sdk: no driver in the module API"
 fi
 
+# The debug service (tests/host/test_debug.c): the RAM ring over power-ons (a torn end, wrap, a damaged header), the
+# memory the computer may read, the USB operations and their jobs, no card writes; each on its own empty "card"
+for group in ring memread proto write nocard; do
+    mkdir "$tmp/debug_$group"
+    out=$("$BIN/test_debug" "$tmp/debug_$group" $group 2>&1)
+    if [ "$out" = ok ]; then pass "debug: $group"; else fail "debug: $group"; echo "$out" | sed 's/^/        /'; fi
+done
+
 # The black-and-white rule of an ISP block (omk_ispb_mono) and FILMLOOK's use of it after its filter (edits_mono):
 # a line is the parts present, Cb, Cr, the nine matrix numbers, the filter 0..8 and its level; the answer is
 # "omk_ispb_mono edits_mono". Present bits: 0x1f all, 0x1 the matrix, 0x8 the gains.
