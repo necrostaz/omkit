@@ -276,7 +276,8 @@ typedef struct {
     u32 sig[4];                             /* the Gaussians, layer pixels Q8: Bloom 1, 2, Halation 1, 2 */
     u32 f_rows, f_passes, f_us, f_cells, f_maps, f_err;   /* the picture's read: rows, passes, us, rows of cells reached */
     u32 lanes[1 + 4 * OL_LANES];            /* L1: ol_lanes_t */
-    u32 blend_set;                          /* the blend hook made the blend additive (any CPU sets it, the core reads) */
+    u32 blend_set;                          /* the blend hook made the blend additive (any CPU; after the report: the
+                                               blend's pass comes after the step - the service's count is the one logged) */
 } op_rec_t;
 
 typedef struct {
@@ -1867,9 +1868,8 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                "to the outputs" : "");
     if (r->sub >= DRV_OPTICS_L1 && r->w_task)
         log_printf(OMK_LOG_INFO, "optics: job %u: layer read %u us, sources and Gaussians %u us, written %u us; window maps "
-                   "%u (%u not released); bytes Y %u Cb %u Cr %u; blend made additive %u time(s)", n, r->t_lread, r->t_calc,
-                   r->t_lwrite, r->maps, r->unmaps_bad, r->order & 0xff, r->order >> 8 & 0xff, r->order >> 16 & 0xff,
-                   r->blend_set);
+                   "%u (%u not released); bytes Y %u Cb %u Cr %u", n, r->t_lread, r->t_calc, r->t_lwrite, r->maps,
+                   r->unmaps_bad, r->order & 0xff, r->order >> 8 & 0xff, r->order >> 16 & 0xff);
     if (r->sub == DRV_OPTICS_L4 && r->w_task) {
         log_printf(OMK_LOG_INFO, "optics: job %u: Gaussians in layer pixels: Bloom %u.%02u + %u.%02u, Halation %u.%02u + "
                    "%u.%02u (after the transport's own)", n, op_q8i(r->sig[0]), op_q8f(r->sig[0]), op_q8i(r->sig[1]),
