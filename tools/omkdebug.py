@@ -1,10 +1,11 @@
 """OMKit DEBUG over USB: read the camera's RAM log and state, read files of the card, update OMKit files.
 
-The camera must run OMKit core 1.40 or later with `[debug] enabled = on` in OMKIT.INI (docs/debug.md) and be connected
-by USB in the MTP mode (choose MTP in the camera's USB dialog). The tool talks to it through Windows Portable Devices
-(WPD) - the camera's own driver, no driver change; it sends only the vendor operations 0x9E00-0x9E02 of core's debug
-service. Windows only; needs the comtypes package (`pip install comtypes`). The parsing functions are plain Python and
-run anywhere (tests/test_omkdebug.py).
+The camera must run OMKit core 1.40 or later with `[debug] enabled = on` in OMKIT.INI (docs/debug.md; restart, shoot, info
+and session need a core that has them) and be connected by USB in the MTP mode (choose MTP in the camera's USB dialog).
+The tool talks to it through Windows Portable Devices (WPD) - the camera's own driver, no driver change; it sends only the
+vendor operations 0x9E00-0x9E02 of core's debug service, and the firmware's own reboot request 0x970A for `restart --ptp`.
+Windows only; needs the comtypes package (`pip install comtypes`). The parsing and the session's steps are plain Python and
+run anywhere (tests/test_omkdebug.py, tests/test_omkdebug_session.py).
 
     python tools/omkdebug.py hello                    the service, its flags, the power-on number
     python tools/omkdebug.py tail [--follow]          the RAM log of this power-on (lines and snapshots)
@@ -22,8 +23,9 @@ run anywhere (tests/test_omkdebug.py).
     python tools/omkdebug.py info                     the build of core (branch@commit), the run, the scenario
     python tools/omkdebug.py shoot status|stop        the test scenario ([shoot] in docs/config.md)
     python tools/omkdebug.py shoot start [STEPS]      ... started: it waits until the camera shoots (cable out)
-    python tools/omkdebug.py restart [--wait S]       restart the camera over USB (a manual one where core cannot)
-                                                      and wait for it to come back with a new run
+    python tools/omkdebug.py restart [--ptp] [--wait S]   restart the camera over USB (core's RESTART; --ptp: the
+                                                      firmware's own 0x970A; by hand where neither) and wait for it
+                                                      to come back with a new run
     python tools/omkdebug.py session [options]        a whole test session: files, scenario, restart, the
                                                       scenario's pictures and logs (session --help)
 
