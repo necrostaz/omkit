@@ -245,7 +245,10 @@ first waits until the camera is in its shooting state (the cable out, or the USB
 
 A number out of range is taken at the nearest end. Every press is released on every way out - the end, a time limit,
 power-off or sleep, a stop - and a half-press the camera still shows 3 s after the release is released once more. The log
-has a line per step and per picture and the result: `shoot: done: N of M pictures made`.
+has a line per step and per picture and the result: `shoot: done: N of M pictures made`. A power-off or sleep does not
+end the scenario: the camera begins a power-off also when the USB cable is taken out in the MTP mode, and cancels it
+because the power lever is on. The scenario releases the keys, waits until the camera shoots again and goes on; a
+picture that was under way is taken again.
 
 ### 10.1. One scenario at the next power-on: `OMKIT\SHOOT.RUN`
 
