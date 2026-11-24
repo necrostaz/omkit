@@ -112,7 +112,7 @@ static void setup_log(int cfg_state)
     if (bad_level)
         lvl = OMK_LOG_INFO;
     log_setup(cfg_bool("core", "log", 1), lvl, cfg_bool("core", "run_logs", 0) ? run_log : 0);
-    log_printf(OMK_LOG_INFO, "OMKit core %s, %s, run %s", CORE_VERSION, drv_name(), run_id);
+    log_printf(OMK_LOG_INFO, "OMKit core %s (%s), %s, run %s", CORE_VERSION, CORE_BUILD, drv_name(), run_id);
     log_printf(OMK_LOG_INFO, cfg_state > 0 ? "config OMKIT.INI" :
                cfg_state == 0 ? "config: no OMKIT.INI, template written, defaults used" :
                                 "config: no OMKIT.INI and cannot write template, defaults used");

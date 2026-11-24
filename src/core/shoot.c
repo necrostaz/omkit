@@ -2,7 +2,11 @@
  * A queue of steps and a state machine with a time limit on every state. The shutter button is pressed by the button's
  * own firmware path (drv_shutter); every way out of a state that pressed a key - done, a time limit, a stop, power-off -
  * goes through release_all, which releases what this code pressed (never a press of the user's). Waits are not loops: the
- * core loop calls shoot_service at once, and sooner while a scenario runs. */
+ * core loop calls shoot_service at once, and sooner while a scenario runs.
+ * Every start first waits until the camera shoots (ARMED): with USB in the MTP mode (or its dialog) it does not, so a
+ * scenario started over USB, or one of a start with the cable in, runs once the cable is out (or "charge only" chosen).
+ * The one-shot file OMKIT\SHOOT.RUN ([shoot] keys) starts one at the next power-on: removed from the card before it starts,
+ * so that it runs at most once - a scenario that brings the camera down does not do it again at every start. */
 #include "omk_core.h"
 #include "omk_log.h"
 #include "omk_prof.h"
@@ -16,6 +20,9 @@
 #define WAIT_MAX 30000                      /* the camera not ready this long at the start of a picture: it stops */
 #define NO_COUNTER_MS 1500                  /* without the picture counter: the least time a picture takes */
 #define STEP_NAME 24
+#define ARM_SETTLE 2000                     /* ms in the shooting state before the start's delay counts: the application
+                                               settles after it left the PC mode of USB */
+#define ONCE_FILE "SHOOT.RUN"
 
 enum { K_KEEP, K_STOCK, K_LOOK_NUM, K_LOOK_NAME, K_PROF };
 typedef struct {
@@ -23,17 +30,18 @@ typedef struct {
     char name[STEP_NAME];
 } step_t;
 
-enum { S_IDLE, S_WAIT, S_STEP, S_SETTLE, S_READY, S_HALF, S_FULL, S_FULL_UP, S_WRITE, S_INTERVAL };
-static const char *const state_names[] = {"idle", "wait", "step", "settle", "ready", "half", "full", "full_up", "write",
-                                          "interval"};
+enum { S_IDLE, S_ARMED, S_WAIT, S_STEP, S_SETTLE, S_READY, S_HALF, S_FULL, S_FULL_UP, S_WRITE, S_INTERVAL };
+static const char *const state_names[] = {"idle", "armed", "wait", "step", "settle", "ready", "half", "full", "full_up",
+                                          "write", "interval"};
 
 static struct {
     step_t steps[SHOOT_STEPS];
-    u32 nsteps, shots, interval, settle, half, hold, write, path;
+    u32 nsteps, shots, interval, settle, half, hold, write, path, arm_wait;
     u32 state, result;                      /* S_*, SHOOT_* */
     u32 t0, delay;                          /* entry time of the state; the start's delay */
     u32 step, shot, taken, failed, fails_row, total;
     u32 takes0, counter, half_seen, half_ms, full_at, write_t, stuck_t, stuck_sent, started;
+    u32 shooting_since, arm_told;           /* ARMED: since when the camera shoots (0 - it does not); the wait was logged */
     u8 down[2];                             /* our presses: half, full */
 } s;
 
@@ -160,6 +168,7 @@ static void read_keys(void)
     s.half = clamp(cfg_int(SEC, "half", 1500), 100, 10000);
     s.hold = clamp(cfg_int(SEC, "hold", 150), 50, 2000);
     s.write = clamp(cfg_int(SEC, "write", 20000), 2000, 120000);
+    s.arm_wait = clamp(cfg_int(SEC, "arm_wait", 600000), 1000, 86400000);
     s.path = str_ieq(tr, "wifi") ? DRV_SHUTTER_WIFI : DRV_SHUTTER_KEYS;
     if (!str_ieq(tr, "wifi") && !str_ieq(tr, "keys"))
         log_printf(OMK_LOG_WARN, "shoot: trigger '%s' unknown, keys used", tr);
@@ -286,12 +295,13 @@ int shoot_start(const char *steps, u32 delay_ms)
     s.delay = delay_ms;
     s.started = now;
     s.result = SHOOT_RUNNING;
-    log_printf(OMK_LOG_INFO, "shoot: %u steps, %u pictures each, every %u ms, by %s; starts in %u ms", s.nsteps, s.shots,
-               s.interval, s.path == DRV_SHUTTER_WIFI ? "wifi events" : "keys", delay_ms);
+    s.shooting_since = s.arm_told = 0;
+    log_printf(OMK_LOG_INFO, "shoot: %u steps, %u pictures each, every %u ms, by %s; starts %u ms after the camera shoots",
+               s.nsteps, s.shots, s.interval, s.path == DRV_SHUTTER_WIFI ? "wifi events" : "keys", delay_ms);
     for (i = 0; i < s.nsteps; i++)
         if (s.steps[i].kind == K_LOOK_NAME)
             log_printf(OMK_LOG_DEBUG, "shoot: step %u: look '%s'", i + 1, s.steps[i].name);
-    go(S_WAIT, now);
+    go(S_ARMED, now);
     return 0;
 }
 
@@ -315,15 +325,38 @@ void shoot_status(shoot_info *out)
     out->failed = s.failed;
     out->step = s.step;
     out->steps = s.nsteps;
+    out->waiting = s.state == S_ARMED;
+}
+
+/* OMKIT\SHOOT.RUN: read with OMKIT.INI's keys under it, then removed; 1 - a scenario to start now */
+static int take_once(void)
+{
+    char path[OMK_PATH_MAX];
+    u32 wrong;
+    int r = cfg_once(ONCE_FILE, SEC, &wrong);
+
+    if (r < 0)
+        log_printf(OMK_LOG_ERROR, "shoot: %s longer than 1 KB, not used", ONCE_FILE);
+    if (r <= 0)
+        return 0;
+    if (omk_path(path, 0, ONCE_FILE) || drv_remove(path) || drv_exists(path)) {
+        cfg_once_drop();                    /* run at every start otherwise */
+        log_printf(OMK_LOG_ERROR, "shoot: %s cannot be removed from the card, the scenario in it does not run", ONCE_FILE);
+        return 0;
+    }
+    log_printf(wrong ? OMK_LOG_WARN : OMK_LOG_INFO, "shoot: one-shot scenario from %s (removed from the card)%s", ONCE_FILE,
+               wrong ? ", lines not understood in it" : "");
+    return 1;
 }
 
 void shoot_setup(u32 now)
 {
     const char *run = cfg_str(SEC, "run", "off");
     static const char *const keys[] = {"run", "start_delay", "steps", "shots", "interval", "settle", "trigger", "half",
-                                       "hold", "write"};
+                                       "hold", "write", "arm_wait"};
     const char *sec, *key, *val;
     u32 i, k;
+    int once = take_once();
 
     (void)now;
     for (i = 0; i < cfg_count(); i++) {
@@ -335,7 +368,7 @@ void shoot_setup(u32 now)
         if (k == sizeof(keys) / sizeof(keys[0]))
             log_printf(OMK_LOG_WARN, "config: [shoot] %s unknown", key);
     }
-    if (str_ieq(run, "boot"))
+    if (once || str_ieq(run, "boot"))
         shoot_start(0, clamp(cfg_int(SEC, "start_delay", 5000), 0, 600000));
     else if (!str_ieq(run, "off"))
         log_printf(OMK_LOG_WARN, "config: [shoot] run '%s' unknown (off, boot)", run);
@@ -381,6 +414,25 @@ u32 shoot_service(u32 now, u32 most)
         return most;
     ui = app_state(&app);
     switch (s.state) {
+    case S_ARMED:                           /* the camera shoots for ARM_SETTLE ms: not in a mode of USB, not in a menu */
+        if (ui != 0 || app != DRV_APP_SHOOTING) {
+            s.shooting_since = 0;
+            if (!s.arm_told) {
+                s.arm_told = 1;
+                log_printf(OMK_LOG_INFO, "shoot: waiting for the camera to shoot (USB: take the cable out or choose charge "
+                           "only), at most %u s, app %04x", s.arm_wait / 1000, app);
+            }
+        } else if (!s.shooting_since) {
+            s.shooting_since = now | 1;     /* 0 is "not shooting" */
+        } else if (now - s.shooting_since >= ARM_SETTLE) {
+            if (s.arm_told)
+                log_printf(OMK_LOG_INFO, "shoot: the camera shoots after %u s", dt / 1000);
+            go(S_WAIT, now);
+            return most;
+        }
+        if (dt >= s.arm_wait)
+            finish(SHOOT_FAILED, "the camera did not come to shooting in time", now);
+        return 100 < most ? 100 : most;
     case S_WAIT:                            /* the start's delay */
         if (dt < s.delay)
             return most;

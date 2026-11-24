@@ -7,6 +7,7 @@
 #include "omk_debug.h"
 #include "omk_dring.h"
 #include "omk_log.h"
+#include "omk_shoot.h"
 #include "omk_store.h"
 #include "memread.h"
 #include "host_drv.h"
@@ -254,6 +255,21 @@ static void test_proto(void)
     CHECK(call(DBG_OP_CMD, DBG_WBEGIN, 10, 0, 0).code == 0x200f);        /* no write key */
     CHECK(call(DBG_OP_CMD, DBG_RESTART, DBG_RESTART_KEY, 0, 0).code == 0x200f);
     CHECK(put(DBG_WDATA, 0, "x", 1).code == 0x200f);
+    /* the test scenario: its state for anyone, a start or a stop only with the write key; the build and the run */
+    r = call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_STATUS, 0, 0);
+    CHECK(r.code == 0x2001 && r.n == 5 && r.p[0] == SHOOT_IDLE);
+    CHECK(call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_START, 0, 0).code == 0x200f);
+    CHECK(call(DBG_OP_CMD, DBG_SHOOT, 7, 0, 0).code == 0x201d);
+    CHECK(call(DBG_OP_CMD, DBG_HELLO, 0, 0, 0).p[3] & (DBG_F_SHOOT | DBG_F_INFO));
+    r = call(DBG_OP_GET, DBG_INFO, 0, 0, 0);
+    host_ptp_out[host_ptp_out_n] = 0;
+    CHECK(r.code == 0x2001 && r.p[0] == host_ptp_out_n && host_ptp_out_n < DBG_INFO_MAX);
+    {
+        static const char want[] = "core=" CORE_VERSION "\nbuild=" CORE_BUILD "\nrun=RUN00001\npower-on=1\n";
+
+        CHECK(!strncmp((char *)host_ptp_out, want, sizeof(want) - 1));
+    }
+    CHECK(strstr((char *)host_ptp_out, "\nrestart=no\nshoot=idle\n") != 0);
 
     /* the log reaches the ring; the snapshots name the watched tasks; the core task's write of the log is marked */
     log_printf(OMK_LOG_INFO, "hello ring");
@@ -386,11 +402,45 @@ static void test_write(void)
     CHECK(call(DBG_OP_CMD, DBG_WCOMMIT, 0, 0, 0).code == 0x2001 && job_wait() == (0x100 | DBG_E_SIZE));
     CHECK(call(DBG_OP_CMD, DBG_WBEGIN, 10, 0, 0).code == 0x2001 && job_wait() == 0);
     CHECK(call(DBG_OP_CMD, DBG_WABORT, 0, 0, 0).code == 0x2001 && job_wait() == 0 && file_size("MODULES/OMKDBG.TMP") == -1);
-    /* the restart is not done in this version: a clear answer */
+    /* the restart: the key word; refused while a file is open; else the job ends first, the firmware's reboot request
+     * follows half a second later, once; no power-off in 5 s - a warning, and a new restart may be asked for */
+    CHECK(call(DBG_OP_CMD, DBG_HELLO, 0, 0, 0).p[3] & DBG_F_RESTART);
     CHECK(call(DBG_OP_CMD, DBG_RESTART, 1, 0, 0).code == 0x201d);
-    CHECK(call(DBG_OP_CMD, DBG_RESTART, DBG_RESTART_KEY, 0, 0).code == 0x2001 && job_wait() == (0x100 | DBG_E_RESTART));
-    r = call(DBG_OP_CMD, DBG_HELLO, 0, 0, 0);
-    CHECK(!(r.p[3] & DBG_F_RESTART));
+    CHECK(put(DBG_PATH, 0, "OMKIT/A.TXT", 11).code == 0x2001);
+    CHECK(call(DBG_OP_CMD, DBG_WBEGIN, 10, 0, 0).code == 0x2001 && job_wait() == 0);
+    CHECK(call(DBG_OP_CMD, DBG_RESTART, DBG_RESTART_KEY, 0, 0).code == 0x2001 && job_wait() == (0x100 | DBG_E_STATE));
+    CHECK(call(DBG_OP_CMD, DBG_WABORT, 0, 0, 0).code == 0x2001 && job_wait() == 0);
+    host_restarts = 0;
+    CHECK(call(DBG_OP_CMD, DBG_RESTART, DBG_RESTART_KEY, 0, 0).code == 0x2001 && job_wait() == 0);
+    CHECK(call(DBG_OP_CMD, DBG_STATUS, 0, 0, 0).p[4] == 500 && host_restarts == 0);
+    CHECK(call(DBG_OP_CMD, DBG_RESTART, DBG_RESTART_KEY, 0, 0).code == 0x2001 && job_wait() == (0x100 | DBG_E_STATE));
+    {
+        u32 i;
+
+        for (i = 0; i < 12; i++)                /* 600 ms */
+            service();
+        CHECK(host_restarts == 1);
+        for (i = 0; i < 100; i++)               /* 5 s more: not taken */
+            service();
+        CHECK(host_restarts == 1);
+    }
+    CHECK(call(DBG_OP_CMD, DBG_RESTART, DBG_RESTART_KEY, 0, 0).code == 0x2001 && job_wait() == 0);
+
+    /* the test scenario over USB: the steps of PUT TEXT; it waits while the camera does not shoot (host_app 0: not the
+     * shooting state, as in the MTP mode), one at a time, stopped; a step not understood */
+    CHECK(put(DBG_TEXT, 0, "keep\x01", 5).code == 0x201d);
+    CHECK(put(DBG_TEXT, 0, "keep", 4).code == 0x2001);
+    CHECK(call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_START, 0, 0).code == 0x2001 && job_wait() == 0);
+    r = call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_STATUS, 0, 0);
+    CHECK(r.p[0] == (SHOOT_RUNNING | 1 << 8) && r.p[2] == 0 && r.p[4] >> 16 == 1);
+    CHECK(call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_START, 0, 0).code == 0x2001 && job_wait() == (0x100 | DBG_E_BUSY));
+    CHECK(call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_STOP, 0, 0).code == 0x2001 && job_wait() == 0);
+    CHECK(call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_STATUS, 0, 0).p[0] == SHOOT_STOPPED);
+    CHECK(put(DBG_TEXT, 0, "look:", 5).code == 0x2001);
+    CHECK(call(DBG_OP_CMD, DBG_SHOOT, DBG_SHOOT_START, 0, 0).code == 0x2001 && job_wait() == (0x100 | DBG_E_STEPS));
+    r = call(DBG_OP_GET, DBG_INFO, 0, 0, 0);
+    host_ptp_out[host_ptp_out_n] = 0;
+    CHECK(strstr((char *)host_ptp_out, "\nshoot=stopped\n") != 0);
 }
 
 static void test_nocard(void)

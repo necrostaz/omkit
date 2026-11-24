@@ -19,8 +19,13 @@ run anywhere (tests/test_omkdebug.py).
     python tools/omkdebug.py get PATH [-o FILE]       a file of the card
     python tools/omkdebug.py pictures [-n N] [-o DIR] the last N pictures of DCIM (JPEG and ORF)
     python tools/omkdebug.py put FILE PATH            write a file into the OMKit folder ([debug] write = on)
-    python tools/omkdebug.py restart [--wait S]       the restart: not available yet - asks for a manual one and
-                                                      waits for the camera to come back
+    python tools/omkdebug.py info                     the build of core (branch@commit), the run, the scenario
+    python tools/omkdebug.py shoot status|stop        the test scenario ([shoot] in docs/config.md)
+    python tools/omkdebug.py shoot start [STEPS]      ... started: it waits until the camera shoots (cable out)
+    python tools/omkdebug.py restart [--wait S]       restart the camera over USB (a manual one where core cannot)
+                                                      and wait for it to come back with a new run
+    python tools/omkdebug.py session [options]        a whole test session: files, scenario, restart, the
+                                                      scenario's pictures and logs (session --help)
 
 Exit status: 0 done, 1 the camera refused or failed, 2 bad use, 3 no camera.
 """
@@ -34,16 +39,22 @@ import time
 from pathlib import Path
 
 OP_CMD, OP_GET, OP_PUT = 0x9E00, 0x9E01, 0x9E02
-HELLO, STATUS, LEVEL, MARK, SNAP, READ, LIST, WBEGIN, WCOMMIT, WABORT, RESTART = 1, 2, 3, 4, 5, 0x10, 0x11, 0x20, 0x22, 0x23, 0x30
-BANKS, BANK, MEM, HIST, XFER = 1, 2, 3, 4, 5
-PATH, WDATA = 1, 0x21
+OP_FW_REBOOT = 0x970A                       # the firmware's own reboot request (core's RESTART posts the same event)
+HELLO, STATUS, LEVEL, MARK, SNAP, READ, LIST, WBEGIN, WCOMMIT, WABORT, RESTART, SHOOT = (1, 2, 3, 4, 5, 0x10, 0x11, 0x20,
+                                                                                   0x22, 0x23, 0x30, 0x31)
+SHOOT_STATUS, SHOOT_START, SHOOT_STOP = 0, 1, 2
+BANKS, BANK, MEM, HIST, XFER, INFO = 1, 2, 3, 4, 5, 6
+PATH, TEXT, WDATA = 1, 2, 0x21
+F_RESTART, F_SHOOT, F_INFO = 64, 128, 256
+SHOOT_STATES = ["idle", "running", "done", "failed", "stopped"]
 MAGIC = 0x444B4D4F
 RESTART_KEY = 0x21544252
 STAGE, XFER_SIZE = 16384, 65536
 J_DONE, J_FAILED = 3, 4
-FLAGS = {1: "ring", 2: "run-before", 4: "write", 8: "no-card-writes", 16: "usb-ops", 32: "buffers", 64: "restart"}
+FLAGS = {1: "ring", 2: "run-before", 4: "write", 8: "no-card-writes", 16: "usb-ops", 32: "buffers", 64: "restart",
+         128: "shoot", 256: "info"}
 RESULTS = ["ok", "bad path", "cannot open", "card i/o", "size differs", "CRC differs", "rename failed", "wrong state",
-           "timeout", "card", "restart not available"]
+           "timeout", "card", "restart not available", "a step not understood", "a scenario runs already"]
 RESPONSES = {0x2001: "OK", 0x2002: "GeneralError", 0x2005: "OperationNotSupported", 0x200F: "AccessDenied (no write key)",
              0x2019: "DeviceBusy", 0x201D: "InvalidParameter"}
 LEVELS = "-EWID"
@@ -273,6 +284,10 @@ class Camera:
     def cmd(self, *params):
         return self._resp(self._command(12, OP_CMD, params))
 
+    def op(self, opcode: int, *params):
+        """Any operation without data (the firmware's own, e.g. 0x970A)"""
+        return self._resp(self._command(12, opcode, params))
+
     def get(self, *params):
         r = self._command(13, OP_GET, params)
         ctx = r.GetStringValue(self._key(self.MTP_EXT, 1006))
@@ -391,6 +406,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("hello")
+    sub.add_parser("info")
     sub.add_parser("banks")
     t = sub.add_parser("tail")
     t.add_argument("--follow", action="store_true")
@@ -418,9 +434,36 @@ def main(argv=None) -> int:
     pt = sub.add_parser("put")
     pt.add_argument("file")
     pt.add_argument("path")
+    sh = sub.add_parser("shoot")
+    sh.add_argument("action", choices=["status", "start", "stop"])
+    sh.add_argument("steps", nargs="?", default="", help="the steps (as [shoot] steps =); none: those of OMKIT.INI")
     rs = sub.add_parser("restart")
-    rs.add_argument("--wait", type=float, default=120.0)
+    rs.add_argument("--wait", type=float, default=180.0)
+    rs.add_argument("--ptp", action="store_true", help="the firmware's own operation 0x970A, without core's checks")
+    se = sub.add_parser("session", description=SESSION_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+    se.add_argument("--put", action="append", default=[], metavar="FILE[=CARDPATH]",
+                    help="a file for the OMKit folder (default place: OMKIT\\NAME, a .OMM in OMKIT\\MODULES); repeatable")
+    se.add_argument("--scenario", metavar="STEPS", help="the test scenario's steps, as [shoot] steps = (\"keep\": one "
+                    "step without a change of preset)")
+    se.add_argument("--shots", type=int, help="pictures per step (default: OMKIT.INI's [shoot] shots)")
+    se.add_argument("--start-delay", type=int, metavar="MS", help="ms after the camera shoots before the first step")
+    se.add_argument("--restart", action="store_true", help="restart the camera after the files (new CORE.BIN, modules "
+                    "and OMKIT.INI run); the scenario then runs once from OMKIT\\SHOOT.RUN")
+    se.add_argument("--wait", action="store_true", help="wait for the scenario to end (the cable must go out meanwhile)")
+    se.add_argument("--pull-log", action="store_true", help="the RAM log and OMKIT\\LOG\\CORE.LOG into the output folder")
+    se.add_argument("--pull-pictures", type=int, default=0, metavar="N", help="the last N pictures into the output folder")
+    se.add_argument("-o", "--out", default="session", help="the output folder (default: session)")
+    se.add_argument("--connect-timeout", type=float, default=120.0, metavar="S")
+    se.add_argument("--restart-timeout", type=float, default=180.0, metavar="S")
+    se.add_argument("--scenario-timeout", type=float, default=1800.0, metavar="S")
+    se.add_argument("--usb-off", metavar="CMD", help="a command that cuts the camera's USB port (a hub with port power "
+                    "switching): the scenario then runs without hands")
+    se.add_argument("--usb-on", metavar="CMD", help="the command that powers the port again")
+    se.add_argument("--offline", type=float, metavar="S", help="how long the port stays off (default: estimated from "
+                    "the scenario)")
     a = ap.parse_args(argv)
+    if a.cmd == "session":
+        return session(a, Camera)
     try:
         cam = Camera()
     except (ImportError, OSError, LookupError) as e:
@@ -459,12 +502,85 @@ def read_file(cam, path: str) -> bytes:
             return bytes(data)
 
 
+def put_file(cam, data: bytes, target: str) -> list[int]:
+    """A file of the OMKit folder: written to a temporary file, checked by its CRC-32 read back, then renamed"""
+    target = target.replace("/", "\\").strip("\\").upper()
+    if not target.startswith("OMKIT\\"):
+        raise Refused("put: only files of the OMKit folder (OMKIT\\...)")
+    set_path(cam, target)
+    job(cam, WBEGIN, len(data), binascii.crc32(data))
+    try:
+        for at in range(0, len(data), XFER_SIZE):
+            code, _ = cam.put(data[at:at + XFER_SIZE], WDATA, at)
+            ok(code, f"WDATA at {at}")
+            job_wait(cam)
+        return job(cam, WCOMMIT, timeout=120.0)
+    except Refused:
+        try:
+            cam.cmd(WABORT)
+        except Refused:
+            pass
+        raise
+
+
+def parse_info(text: str) -> dict:
+    """GET INFO: key=value lines"""
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+def info(cam, p: list[int] | None = None) -> dict:
+    """The build and the run: GET INFO, or what HELLO tells (a core without INFO: no build, the power-on as the run)"""
+    p = p or hello(cam)
+    if p[3] & F_INFO:
+        code, _, data = cam.get(INFO)
+        ok(code, "INFO")
+        d = parse_info(data.decode("ascii", "replace"))
+    else:
+        d = {"core": f"{p[2] >> 16}.{p[2] & 0xFFFF:02d}", "build": "?", "run": f"power-on {p[4]}"}
+    d["flags"], d["power-on"] = p[3], str(p[4])
+    return d
+
+
+def shoot_status(cam) -> dict:
+    code, p = cam.cmd(SHOOT, SHOOT_STATUS)
+    ok(code, "SHOOT status")
+    st = p[0] & 0xFF
+    return {"state": SHOOT_STATES[st] if st < len(SHOOT_STATES) else str(st), "waiting": bool(p[0] >> 8 & 1),
+            "total": p[1], "taken": p[2], "failed": p[3], "step": p[4] & 0xFFFF, "steps": p[4] >> 16}
+
+
+def shoot_text(s: dict) -> str:
+    w = ", waiting for the camera to shoot" if s["waiting"] else ""
+    step = f", step {s['step']} of {s['steps']}" if s["step"] else ""
+    return f"{s['state']}{w}: {s['taken']} of {s['total']} pictures made, {s['failed']} not seen made{step}"
+
+
+def shoot_start(cam, steps: str):
+    code, _ = cam.put(steps.encode("ascii"), TEXT)
+    ok(code, "TEXT")
+    job(cam, SHOOT, SHOOT_START)
+
+
+def build_of(data: bytes) -> str | None:
+    """The build name a CORE.BIN carries (the text of its INFO: build=branch@commit)"""
+    i = data.find(b"\nbuild=")
+    if i < 0:
+        return None
+    end = data.find(b"\n", i + 7)
+    return data[i + 7:end].decode("ascii", "replace") if end > 0 else None
+
+
 def run(cam, a) -> int:
     p = hello(cam)
     flags = [n for b, n in FLAGS.items() if p[3] & b]
     if a.cmd == "hello":
-        print(f"{cam.name}: OMKit debug protocol {p[1]}, core {p[2] >> 16}.{p[2] & 0xFFFF:02d}, power-on {p[4]}, "
-              f"flags {' '.join(flags)}")
+        d = info(cam, p)
+        print(f"{cam.name}: OMKit debug protocol {p[1]}, core {p[2] >> 16}.{p[2] & 0xFFFF:02d} ({d['build']}), "
+              f"run {d['run']}, power-on {p[4]}, flags {' '.join(flags)}")
+        return 0
+    if a.cmd == "info":
+        for k, v in info(cam, p).items():
+            print(f"{k}: {v:#x}" if k == "flags" else f"{k}: {v}")
         return 0
     if a.cmd in ("banks", "tail", "postmortem"):
         code, _, raw = cam.get(BANKS)
@@ -552,69 +668,57 @@ def run(cam, a) -> int:
         print(f"{out}: {len(data)} bytes")
         return 0
     if a.cmd == "pictures":
-        folders = sorted(e["name"] for e in list_dir(cam, "DCIM") if e["dir"] and e["name"][:1].isdigit())
-        files = []
-        for f in reversed(folders):
-            names = sorted(e["name"] for e in list_dir(cam, "DCIM\\" + f) if not e["dir"])
-            files = [f"DCIM\\{f}\\{n}" for n in names if n.upper().endswith((".JPG", ".ORF"))] + files
-            stems = {Path(x).stem for x in files}
-            if len(stems) >= a.n:
-                break
-        stems = sorted({Path(x.replace("\\", "/")).stem for x in files})[-a.n:]
-        for x in files:
-            if Path(x.replace("\\", "/")).stem in stems:
-                data = read_file(cam, x)
-                out = Path(a.o) / x.split("\\")[-1]
-                out.write_bytes(data)
-                print(f"{out}: {len(data)} bytes")
+        for out, n in pull_pictures(cam, a.n, Path(a.o)):
+            print(f"{out}: {n} bytes")
         return 0
     if a.cmd == "put":
-        data = Path(a.file).read_bytes()
         target = a.path.replace("/", "\\").strip("\\").upper()
         if not target.startswith("OMKIT\\"):
             print("put: only files of the OMKit folder (OMKIT\\...)", file=sys.stderr)
             return 2
-        set_path(cam, target)
-        job(cam, WBEGIN, len(data), binascii.crc32(data))
-        try:
-            for at in range(0, len(data), XFER_SIZE):
-                piece = data[at:at + XFER_SIZE]
-                code, _ = cam.put(piece, WDATA, at)
-                ok(code, f"WDATA at {at}")
-                job_wait(cam)
-            st = job(cam, WCOMMIT, timeout=120.0)
-        except Refused:
-            try:
-                cam.cmd(WABORT)
-            except Refused:
-                pass
-            raise
+        st = put_file(cam, Path(a.file).read_bytes(), target)
         print(f"{target}: {st[2]} bytes written and checked, CRC-32 {st[3]:08x}")
         return 0
+    if a.cmd == "shoot":
+        if not p[3] & F_SHOOT:
+            raise Refused("this core has no test scenario over USB")
+        if a.action == "start":
+            shoot_start(cam, a.steps)
+            print("started: it waits until the camera shoots - take the USB cable out (or choose charge only in the "
+                  "camera's USB dialog); plug it back in when it is done")
+        elif a.action == "stop":
+            job(cam, SHOOT, SHOOT_STOP)
+        print(shoot_text(shoot_status(cam)))
+        return 0
     if a.cmd == "restart":
-        print("restart over USB is not available in this core: switch the camera off and on with its lever "
-              "(waiting for it to come back)", file=sys.stderr)
-        cam.close()
-        t0 = time.time()
-        while time.time() - t0 < a.wait:
-            time.sleep(2)
-            try:
-                again = Camera()
-            except (OSError, LookupError):
-                continue
-            try:
-                p2 = hello(again)
-                if p2[4] != p[4]:
-                    print(f"back: power-on {p2[4]}")
-                    cam.dev = again.dev
-                    return 0
-            except Refused:
-                pass
-            again.close()
-        print("the camera did not come back", file=sys.stderr)
-        cam.dev = None
-        return 1
+        ses = Session(Camera, print)
+        ses.cam = cam
+        done = ses.restart(info(cam, p), a.wait, ptp=a.ptp)
+        cam.dev = None                      # closed by the session, or gone with the restart
+        ses.drop()
+        return 0 if done else 1
     return 2
+
+
+def pull_pictures(cam, n: int, folder: Path) -> list[tuple[Path, int]]:
+    """The last n pictures of DCIM (JPEG and ORF of each)"""
+    dirs = sorted(e["name"] for e in list_dir(cam, "DCIM") if e["dir"] and e["name"][:1].isdigit())
+    files: list[str] = []
+    for f in reversed(dirs):
+        names = sorted(e["name"] for e in list_dir(cam, "DCIM\\" + f) if not e["dir"])
+        files = [f"DCIM\\{f}\\{x}" for x in names if x.upper().endswith((".JPG", ".ORF"))] + files
+        if len({Path(x.replace("\\", "/")).stem for x in files}) >= n:
+            break
+    stems = sorted({Path(x.replace("\\", "/")).stem for x in files})[-n:] if n > 0 else []
+    out = []
+    folder.mkdir(parents=True, exist_ok=True)
+    for x in files:
+        if Path(x.replace("\\", "/")).stem in stems:
+            data = read_file(cam, x)
+            path = folder / x.split("\\")[-1]
+            path.write_bytes(data)
+            out.append((path, len(data)))
+    return out
 
 
 def job_wait(cam, timeout: float = 30.0):
@@ -630,6 +734,288 @@ def job_wait(cam, timeout: float = 30.0):
         if time.time() - t0 > timeout:
             raise Refused("no answer")
         time.sleep(0.02)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# A test session
+SESSION_HELP = """A whole test session, step by step, each with its checks and time limit:
+
+  1. connect: wait for the camera in the MTP mode (choose MTP in its USB dialog), HELLO and INFO;
+  2. --put: the files of the OMKit folder, each checked by its CRC-32 read back from the card;
+  3. --scenario: with --restart it goes to OMKIT\\SHOOT.RUN and runs once at the next start; without, it is started
+     now over USB. Either way it waits until the camera shoots: in the MTP mode it does not;
+  4. --restart: the camera restarts (over USB where core can, else by hand: the tool says what to do) and comes back
+     with a new run; when a CORE.BIN was put, its build must be the one that runs now;
+  5. --wait: the scenario runs once the cable is out (by hand, or --usb-off / --usb-on with a hub that switches its
+     ports' power); the tool waits for the camera to come back and for the scenario's end;
+  6. --pull-log, --pull-pictures N: the RAM log, CORE.LOG and the last N pictures into the output folder.
+
+The camera comes back in the MTP mode by itself only when its USB mode is set to MTP; otherwise choose MTP in its USB
+dialog each time it asks. Exit status: 0 done, 1 a step failed, 2 bad use, 3 no camera.
+
+  python tools/omkdebug.py session --put build/CORE.BIN --put OMKIT.INI --scenario "look:Kodak Portra 400, stock"
+      --restart --wait --pull-log --pull-pictures 2 -o run1
+"""
+
+
+class StepFailed(Exception):
+    pass
+
+
+def default_target(spec: str) -> tuple[Path, str]:
+    """FILE[=CARDPATH]: the card path, by default OMKIT\\NAME (a module: OMKIT\\MODULES\\NAME)"""
+    if "=" in spec:
+        f, t = spec.split("=", 1)
+        return Path(f), t.replace("/", "\\").strip("\\").upper()
+    f = Path(spec)
+    name = f.name.upper()
+    return f, ("OMKIT\\MODULES\\" if name.endswith(".OMM") else "OMKIT\\") + name
+
+
+def shoot_run_text(steps: str, shots: int | None, start_delay: int | None) -> bytes:
+    """OMKIT\\SHOOT.RUN: [shoot] keys over those of OMKIT.INI, for one start"""
+    lines = ["; one test scenario, written by omkdebug.py session; core removes this file before it runs", "[shoot]",
+             f"steps = {steps}"]
+    if shots is not None:
+        lines.append(f"shots = {shots}")
+    if start_delay is not None:
+        lines.append(f"start_delay = {start_delay}")
+    return ("\r\n".join(lines) + "\r\n").encode("ascii")
+
+
+def scenario_seconds(steps: str, shots: int | None) -> float:
+    """A generous guess of a scenario's length with the defaults of [shoot]: how long the USB port stays off"""
+    n = max(1, len([x for x in steps.split(",") if x.strip()])) * (shots or 1)
+    return 60.0 + n * 30.0
+
+
+class Session:
+    """The steps of a session against camera objects made by connect() (Camera, or a test's fake)"""
+
+    def __init__(self, connect, say, clock=time.monotonic, sleep=time.sleep, shell=None):
+        self.connect, self.say, self.clock, self.sleep = connect, say, clock, sleep
+        self.shell = shell or (lambda cmd: __import__("subprocess").run(cmd, shell=True).returncode)
+        self.cam = None
+        self.after: dict = {}
+
+    def drop(self):
+        if self.cam is not None:
+            try:
+                self.cam.close()
+            except Exception:               # the device may be gone already
+                pass
+        self.cam = None
+
+    def try_connect(self):
+        """A camera with the debug service, or None"""
+        try:
+            cam = self.connect()
+        except Exception:                   # no device, another device, or a COM error of one going away
+            return None
+        try:
+            hello(cam)
+            return cam
+        except Exception:
+            try:
+                cam.close()
+            except Exception:
+                pass
+            return None
+
+    def wait_camera(self, timeout: float, what: str, hint: str | None = None, other_than: str | None = None) -> dict:
+        """Until a camera answers (with other_than: in another run than that one); its INFO"""
+        t0, told = self.clock(), False
+        self.drop()
+        while self.clock() - t0 < timeout:
+            cam = self.try_connect()
+            if cam is not None:
+                try:
+                    d = info(cam)
+                except Exception:
+                    d = None
+                if d is not None and (other_than is None or d["run"] != other_than):
+                    self.cam = cam
+                    return d
+                cam.close()
+            if hint and not told and self.clock() - t0 > 10:
+                self.say(hint)
+                told = True
+            self.sleep(2.0)
+        raise StepFailed(f"{what}: no camera in {timeout:.0f} s")
+
+    def wait_gone(self, timeout: float) -> bool:
+        """Until the camera no longer answers"""
+        t0 = self.clock()
+        while self.clock() - t0 < timeout:
+            try:
+                hello(self.cam)
+            except Exception:
+                self.drop()
+                return True
+            self.sleep(1.0)
+        return False
+
+    def restart(self, before: dict, timeout: float, ptp: bool = False) -> bool:
+        """core's RESTART (the firmware's reboot request after core's checks), the firmware's 0x970A, or by hand"""
+        run_before = before["run"]
+        hint = ("restart: no camera yet - if it shows its USB dialog, choose MTP; if it stays off, switch it on with "
+                "the lever")
+        if ptp:
+            code, _ = self.cam.op(OP_FW_REBOOT)
+            ok(code, "0x970A")
+            self.say("restart: the firmware's reboot request (0x970A) accepted; waiting for the camera to come back")
+        elif before["flags"] & F_RESTART:
+            st = job(self.cam, RESTART, RESTART_KEY, timeout=30.0)
+            self.say(f"restart: accepted by core, the request follows in {st[4]} ms; waiting for the camera to come back")
+        else:
+            self.say("restart: this core cannot restart the camera - switch it off with the lever, take the cable and "
+                     "the battery out (with the cable in, the lever only charges: no new start), put them back, switch "
+                     "it on and choose MTP in its USB dialog")
+            hint = None
+        if not self.wait_gone(30.0 if hint else timeout):
+            self.say("restart: the camera stayed on USB - the request was not taken (see the RAM log: tail)")
+            return False
+        try:
+            d = self.wait_camera(timeout, "restart", hint, other_than=run_before)
+        except StepFailed as e:
+            self.say(str(e))
+            return False
+        self.say(f"restart: back, run {d['run']} (was {run_before}), core {d['core']} ({d['build']})")
+        self.after = d
+        return True
+
+    def wait_scenario(self, a, run: str) -> dict:
+        s = shoot_status(self.cam)
+        self.say("scenario: " + shoot_text(s))
+        if s["state"] == "running" and s["waiting"]:
+            if a.usb_off:
+                off = a.offline or scenario_seconds(a.scenario or "keep", a.shots)
+                self.say(f"scenario: the USB port off for {off:.0f} s")
+                self.drop()
+                if self.shell(a.usb_off):
+                    raise StepFailed("scenario: the --usb-off command failed")
+                self.sleep(off)
+                if self.shell(a.usb_on):
+                    raise StepFailed("scenario: the --usb-on command failed")
+            else:
+                self.say("scenario: take the USB cable out now - the camera shoots only without it (or choose charge "
+                         "only in its USB dialog); plug it back in once it has made the pictures")
+                if not self.wait_gone(600.0):
+                    raise StepFailed("scenario: the cable was not taken out in 10 minutes")
+        t0 = self.clock()
+        while True:
+            if self.cam is None:
+                d = self.wait_camera(a.scenario_timeout, "scenario",
+                                     "scenario: waiting for the camera (plug the cable in; choose MTP if it asks)")
+                if d["run"] != run:
+                    raise StepFailed(f"scenario: the camera came back with another run ({d['run']}, was {run}): "
+                                     "it restarted, the scenario is lost")
+            try:
+                s = shoot_status(self.cam)
+            except Exception:
+                self.drop()
+                continue
+            if s["state"] != "running":
+                self.say("scenario: " + shoot_text(s))
+                return s
+            if self.clock() - t0 > a.scenario_timeout:
+                raise StepFailed("scenario: not finished in time: " + shoot_text(s))
+            self.sleep(2.0)
+
+    def pull_log(self, out: Path):
+        code, _, raw = self.cam.get(BANKS)
+        ok(code, "BANKS")
+        data, start, _ = read_bank(self.cam, 0, parse_banks(raw))
+        names: dict = {}
+        lines = [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in parse_records(data, start)]
+        (out / "ramlog.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        log = read_file(self.cam, "OMKIT\\LOG\\CORE.LOG")
+        (out / "CORE.LOG").write_bytes(log)
+        self.say(f"log: {len(lines)} records of the RAM log, CORE.LOG {len(log)} bytes")
+
+    def run(self, a) -> int:
+        out = Path(a.out)
+        done: list[str] = []
+
+        def step(name):
+            done.append(name)
+            self.say(f"--- {name}")
+
+        try:
+            step("connect")
+            before = self.wait_camera(a.connect_timeout, "connect", "connect: no camera yet - connect it and choose "
+                                      "MTP in its USB dialog")
+            self.say(f"connect: core {before['core']} ({before['build']}), run {before['run']}")
+            if (a.put or (a.scenario is not None and a.restart)) and not before["flags"] & 4:
+                raise StepFailed("connect: [debug] write = on is needed to write files")
+            if a.scenario is not None and not a.restart and not before["flags"] & F_SHOOT:
+                raise StepFailed("connect: this core has no test scenario over USB")
+            expect = None
+            for spec in a.put:
+                f, target = default_target(spec)
+                step(f"put {f} -> {target}")
+                data = f.read_bytes()
+                st = put_file(self.cam, data, target)
+                if st[2] != len(data) or st[3] != binascii.crc32(data):
+                    raise StepFailed(f"put: {target} reported {st[2]} bytes, CRC-32 {st[3]:08x}")
+                self.say(f"put: {target}: {len(data)} bytes, CRC-32 {st[3]:08x} checked on the card")
+                if target == "OMKIT\\CORE.BIN":
+                    expect = build_of(data)
+            run = before["run"]
+            if a.scenario is not None:
+                step("scenario")
+                if a.restart:
+                    put_file(self.cam, shoot_run_text(a.scenario, a.shots, a.start_delay), "OMKIT\\SHOOT.RUN")
+                    self.say("scenario: OMKIT\\SHOOT.RUN written, it runs once at the next start")
+                else:
+                    if a.shots is not None or a.start_delay is not None:
+                        self.say("scenario: --shots and --start-delay need --restart (SHOOT.RUN); OMKIT.INI's are used")
+                    shoot_start(self.cam, a.scenario)
+                    self.say("scenario: started")
+            if a.restart:
+                step("restart")
+                if not self.restart(before, a.restart_timeout):
+                    raise StepFailed("restart: the camera did not come back")
+                run = self.after["run"]
+                if expect and self.after["build"] != expect:
+                    raise StepFailed(f"restart: the camera runs {self.after['build']}, the CORE.BIN put is {expect}")
+            if a.scenario is not None and a.wait:
+                step("wait for the scenario")
+                s = self.wait_scenario(a, run)
+                if s["state"] != "done":
+                    raise StepFailed("scenario: " + shoot_text(s))
+            if a.pull_log or a.pull_pictures:
+                out.mkdir(parents=True, exist_ok=True)
+            if a.pull_log:
+                step("pull the log")
+                self.pull_log(out)
+            if a.pull_pictures:
+                step("pull the pictures")
+                for path, n in pull_pictures(self.cam, a.pull_pictures, out):
+                    self.say(f"pictures: {path}: {n} bytes")
+            self.say("session: done (" + ", ".join(done) + ")")
+            return 0
+        except (StepFailed, Refused, OSError) as e:
+            self.say(f"session: FAILED at '{done[-1] if done else '?'}': {e}")
+            return 1
+        finally:
+            self.drop()
+
+
+def session(a, connect) -> int:
+    if a.usb_off and not a.usb_on:
+        print("session: --usb-off needs --usb-on", file=sys.stderr)
+        return 2
+    if not (a.put or a.scenario is not None or a.restart or a.pull_log or a.pull_pictures):
+        print("session: nothing to do (session --help)", file=sys.stderr)
+        return 2
+    if connect is Camera:
+        try:
+            __import__("comtypes")
+        except ImportError as e:
+            print("no camera:", e, file=sys.stderr)
+            return 3
+    return Session(connect, lambda m: print(m, flush=True)).run(a)
 
 
 if __name__ == "__main__":
