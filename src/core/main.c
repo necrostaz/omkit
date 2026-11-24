@@ -11,6 +11,7 @@
 #include "omk_store.h"
 #include "omk_mod.h"
 #include "omk_debug.h"
+#include "omk_shoot.h"
 
 #define SERVICE_MS 250
 #define CORE_STORE_SIZE 256
@@ -270,6 +271,8 @@ void core_main(void)
     else
         loaded = 0;                         /* power-off already under way: load only if it does not happen */
     log_printf(OMK_LOG_INFO, "ready, api %u", omk_api_get()->version);
+    if (loaded)
+        shoot_setup(omk_ms());              /* the test scenario after the modules: its presets are theirs */
     log_checkpoint("boot: entering the service loop");
     if (power_running())
         log_flush();
@@ -283,12 +286,18 @@ void core_main(void)
             wait_told = 1;
             log_printf(OMK_LOG_WARN, "core: the event flag wait fails or returns at once again and again, plain sleep from now on");
         }
-        if (!power_service(now))
+        if (!power_service(now)) {
+            shoot_power_lost();             /* keys released, the scenario ends */
             continue;                       /* power-off or sleep: no card, no module work */
-        if (!loaded)
+        }
+        if (!loaded) {
             loaded = modules_load();
+            if (loaded)
+                shoot_setup(now);
+        }
         prof_service(now);                  /* first: a new profile's live view block is published right after a wake-up by
                                                the profile change, before the store's writes */
+        tick = shoot_service(now, SERVICE_MS);   /* sooner while a test scenario runs */
         busy = drv_card_busy() || drv_prof_take_recent();
         if (busy && !deferred)
             deferred_ms = now;

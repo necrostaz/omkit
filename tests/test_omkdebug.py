@@ -36,7 +36,7 @@ class Formats(unittest.TestCase):
         self.assertFalse(omkdebug.parse_banks(bytes(bad))["banks"][0]["valid"])
 
     def test_records_and_torn_end(self):
-        data = record(1, 7, 10, b"\x03     10 I hello") + record(3, 8, 11, b"card+ C:\OMKIT\LOG\CORE.LOG")
+        data = record(1, 7, 10, b"\x03     10 I hello") + record(3, 8, 11, rb"card+ C:\OMKIT\LOG\CORE.LOG")
         torn = record(1, 9, 12, b"\x03 never finished")[:-6]
         recs = list(omkdebug.parse_records(data + torn, 4096))
         self.assertEqual([r[2] for r in recs], [7, 8])

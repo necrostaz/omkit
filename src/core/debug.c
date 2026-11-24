@@ -662,7 +662,7 @@ static int start_job(u32 kind, u32 a0, u32 a1)
     return ok;
 }
 
-/* CORE_VERSION "1.40" -> 1 << 16 | 40 */
+/* CORE_VERSION "1.42" -> 1 << 16 | 42 */
 static u32 version(void)
 {
     const char *v = CORE_VERSION;

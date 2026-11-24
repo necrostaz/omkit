@@ -246,7 +246,7 @@ static void test_proto(void)
     CHECK(host_ptp_n == 3 && host_ptp_installs == 1);
     CHECK(host_ptp[0].phase == 0 && host_ptp[1].phase == 1 && host_ptp[2].phase == 2);
     r = call(DBG_OP_CMD, DBG_HELLO, 0, 0, 0);
-    CHECK(r.code == 0x2001 && r.n == 5 && r.p[0] == DBG_MAGIC && r.p[1] == DBG_PROTOCOL && r.p[2] == (1 << 16 | 40));
+    CHECK(r.code == 0x2001 && r.n == 5 && r.p[0] == DBG_MAGIC && r.p[1] == DBG_PROTOCOL && r.p[2] == ((u32)atoi(CORE_VERSION) << 16 | (u32)atoi(strchr(CORE_VERSION, '.') + 1)));
     CHECK((r.p[3] & (DBG_F_RING | DBG_F_PTP | DBG_F_BUFFERS)) == (DBG_F_RING | DBG_F_PTP | DBG_F_BUFFERS));
     CHECK(!(r.p[3] & (DBG_F_WRITE | DBG_F_NO_CARD)) && r.p[4] == 1);
     CHECK(call(DBG_OP_CMD, 0x41, 0, 0, 0).code == 0x2005);              /* camera control: kept free */

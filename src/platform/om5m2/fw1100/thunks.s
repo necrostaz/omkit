@@ -6,6 +6,7 @@
 	.global	_drv_fopen_long
 	.global	_start, _drv_fopen, _drv_fread, _drv_fwrite, _drv_fclose, _drv_sleep, _drv_ticks, _drv_setting_read
 	.global	_drv_ev_create, _drv_ev_wait, _drv_ev_set, _drv_ev_clear
+	.global	_drv_key_api, _drv_app_event
 	.global	_drv_mkdir, _drv_exists, _drv_dcache_inv_fw, _drv_fflush, _drv_remove, _drv_fseek, _drv_ftell, _drv_cpu, _drv_lock, _drv_unlock, _drv_fwheap_alloc, _drv_fwheap_free
 	.global	_drv_tramp_pm, _drv_orig_pm, _drv_tramp_s1
 	.global	_drv_tramp_off, _drv_tramp_card, _drv_tramp_sleep, _drv_tramp_gate, _drv_tramp_wake
@@ -229,6 +230,21 @@ _drv_fwheap_free:
 _drv_setting_read:
 	add	-4,sp
 	call	f_setting_read,[],4
+	add	4,sp
+	rets
+
+# API 0xD0002 (0x6032b57f): d0 the key's application event, d1 state (0 pressed, 1 released) -> d0 the API's answer (u16).
+# Its callers use call ...,[d2,d3],16 (0x602f4b4a, 0x6085b565); it ends with ret [d2,d3],16
+_drv_key_api:
+	add	-4,sp
+	call	f_key_api,[d2,d3],16
+	add	4,sp
+	rets
+
+# 0x60046624: d0 an event, d1 its argument, into the application's event queue (call ...,[d2],8 as 0x61430813)
+_drv_app_event:
+	add	-4,sp
+	call	f_app_event,[d2],8
 	add	4,sp
 	rets
 

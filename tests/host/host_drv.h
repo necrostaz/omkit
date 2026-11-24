@@ -9,6 +9,7 @@ extern u32 host_fw_total[3], host_fw_out[3];   /* firmware heap: blocks per clas
 extern const char *host_dir;
 extern int host_canvas_ok;               /* 0 - no screen */
 extern u32 host_prof, host_prof_seq, host_prof_ui, host_prof_base, host_prof_installs;   /* drv_prof_* */
+extern u32 host_prof_takes;              /* drv_prof_stats: the pictures counted */
 extern int host_prof_install_rc;
 extern int host_power_pending;            /* 1 - the firmware lever flag is set */
 extern int host_canvas_evf;              /* 1 - viewfinder: canvas 639 x 479 in the same buffers */

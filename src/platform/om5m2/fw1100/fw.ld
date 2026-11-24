@@ -24,6 +24,10 @@ f_fseek = 0x606aa646;
 f_ftell = 0x606aa5dc;
 f_sleep = 0x60051a2b;
 f_setting_read = 0x602f4c5b;
+/* the test scenario (drv.c drv_shutter): API 0xD0002, a key of the key task's image (d0 the key's event, d1 state 0 pressed,
+ * 1 released; the shell's "ui key skey" -> 0x601310b8); posting an event to the application's queue (d0 event, d1 0) */
+f_key_api = 0x6032b57f;
+f_app_event = 0x60046624;
 f_lock = 0x6006e645;
 f_unlock = 0x6006e68e;
 f_phyalloc = 0x60023818;                /* scheap_phyalloc: uncached heap, one for all CPUs */

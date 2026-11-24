@@ -65,8 +65,10 @@ execution addresses in the cached view unless they start with `0xa`/`0xb` (uncac
 | Tested part | `0xa3470000..0xa3780000` | Pattern-tested word by word on the camera | camera |
 | Loader buffer | `0xa345a000` | `CORE.BIN` is read here (at most 3 MiB) | `gen.py` |
 | `core` entry | `0x6345a010` | Cached view of buffer + 16 | `gen.py`, `core.ld` |
-| `core` ceiling | `0x63490000` | Image with stack must end below it (linker assertion) | `core.ld` |
-| Arena | from the end of the `core` image rounded up to 4 KiB (uncached, at least `0xa3470000`) to `0xa3780000` | Modules and data | `drv.c` (`drv_mem_region`) |
+| `core` ceiling | `0x634a0000` | Image with stack must end below it (linker assertion); a budget only, the arena starts at the image's real end | `core.ld` |
+| Arena | from the end of the `core` image rounded up to 4 KiB (uncached, at least `0xa3470000`) to `0xa375ff00` | Modules and data | `drv.c` (`drv_mem_region`, `ARENA_TAIL`) |
+| Debug service memory | `0xa375ff00..0xa377ff80` | Two banks of the RAM log that outlives a reset; cut from the arena even with the service off | `ptp.c` (`drv_keep_area`) |
+| Reserved | `0xa377ff80..0xa3780000` | 128 bytes kept out of the arena for the optics layer's records | `drv.c` |
 | Second gap | `0xa3cb88f8..0xa3f25540` | Also silent in the emulator; its role is not understood; not used | emulator |
 
 ## 2. Memory protection

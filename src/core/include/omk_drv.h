@@ -330,4 +330,17 @@ u32 drv_ptp_history(void *out, u32 max);
 const volatile u8 *drv_mem_readable(u32 addr, u32 len);
 int drv_rename(const char *from, const char *to);
 
+/* The test scenario (core/shoot.c), core task only, never under drv_lock.
+ * drv_shutter: the shutter button half (DRV_SHUTTER_HALF) or fully (DRV_SHUTTER_FULL) pressed (down 1) or released (0) -
+ * by the button's own path (DRV_SHUTTER_KEYS: the key image of the key task, as a real press) or by the events of the
+ * Wi-Fi remote (DRV_SHUTTER_WIFI); the firmware's answer (keys), 0 (wifi), -1 bad arguments.
+ * drv_look_choose: as the user in the picture mode screen - entry `index` and the look on (on 1), or the look off (on 0);
+ * core's look service tells the owner at its next loop. 0; -1 no look or a bad index; -4 the stored picture mode is not
+ * the base one (as look_set). drv_look_find: the index of the entry of that name (case not minded), -1 none */
+enum { DRV_SHUTTER_HALF = 0, DRV_SHUTTER_FULL = 1 };
+enum { DRV_SHUTTER_KEYS = 0, DRV_SHUTTER_WIFI = 1 };
+int drv_shutter(u32 key, int down, u32 path);
+int drv_look_choose(int on, u32 index);
+int drv_look_find(const char *name);
+
 #endif
