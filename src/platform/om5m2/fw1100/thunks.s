@@ -6,6 +6,7 @@
 	.global	_drv_fopen_long
 	.global	_start, _drv_fopen, _drv_fread, _drv_fwrite, _drv_fclose, _drv_sleep, _drv_ticks, _drv_setting_read
 	.global	_drv_ev_create, _drv_ev_wait, _drv_ev_set, _drv_ev_clear
+	.global	_drv_key_api, _drv_app_event
 	.global	_drv_mkdir, _drv_exists, _drv_dcache_inv_fw, _drv_fflush, _drv_remove, _drv_fseek, _drv_ftell, _drv_cpu, _drv_lock, _drv_unlock, _drv_fwheap_alloc, _drv_fwheap_free
 	.global	_drv_tramp_pm, _drv_orig_pm, _drv_tramp_s1
 	.global	_drv_tramp_off, _drv_tramp_card, _drv_tramp_sleep, _drv_tramp_gate, _drv_tramp_wake
@@ -229,6 +230,21 @@ _drv_fwheap_free:
 _drv_setting_read:
 	add	-4,sp
 	call	f_setting_read,[],4
+	add	4,sp
+	rets
+
+# API 0xD0002 (0x6032b57f): d0 the key's application event, d1 state (0 pressed, 1 released) -> d0 the API's answer (u16).
+# Its callers use call ...,[d2,d3],16 (0x602f4b4a, 0x6085b565); it ends with ret [d2,d3],16
+_drv_key_api:
+	add	-4,sp
+	call	f_key_api,[d2,d3],16
+	add	4,sp
+	rets
+
+# 0x60046624: d0 an event, d1 its argument, into the application's event queue (call ...,[d2],8 as 0x61430813)
+_drv_app_event:
+	add	-4,sp
+	call	f_app_event,[d2],8
 	add	4,sp
 	rets
 
@@ -939,18 +955,7 @@ _drv_c3d_swap:					# the renderer's eglSwapBuffers of its display and surface (0
 # parse), where the C code and the ID search below may use core variables (cached memory of CPU 0). On another CPU
 # they are not touched: the stock path (the check in _drv_tramp_imp_id, drv_cpu() in drv_imp_name and drv_imp_apply).
 	.equ	IMP_N, 88
-	.global	_drv_tramp_imp_reg, _drv_h970b, _drv_tramp_imp_id, _drv_tramp_imp_name, _drv_tramp_imp_apply, _drv_imp_put
-
-# The vendor operation registration, at mov 0x970c,d0 (0x614ba920): register 0x970B first, as 0x614c0156(d0 code, d1 phase,
-# a0 handler, a1 0) is called around here; then the displaced instruction. (0,sp) is free: the firmware calls from here too
-_drv_tramp_imp_reg:
-	mov	0x970b,d0
-	clr	d1
-	mov	0,a1
-	mov	_drv_h970b,a0
-	call	imp_ptp_reg,[d2,d3,a2,a3],20
-	mov	0x970c,d0
-	jmp	imp_reg_back
+	.global	_drv_h970b, _drv_tramp_imp_id, _drv_tramp_imp_name, _drv_tramp_imp_apply, _drv_imp_put
 
 # PTP 0x970B GetSupportedMySetFunction, answered with p1 = 3, as by a camera that supports the profile load: a0 the
 # request, a1 the response, as the stock handler of 0x9701 (0x614be879). Workspace offers the profile load only with p1 & 3
@@ -1431,3 +1436,73 @@ _drv_ui_selectable:
 	mov	1,d0
 2:	rets
 9:	jmp	orig_ui_selectable
+
+# ---------------------------------------------------------------------------------------------------------------
+# PTP vendor operations (ptp.c) and the file rename of the debug service.
+	.global	_drv_tramp_ptp_reg, _drv_ptp_entry, _drv_ptp_reg_fw, _drv_ptp_send_fw, _drv_ptp_recv_len_fw, _drv_ptp_recv_fw
+	.global	_drv_rename
+
+# The registration tail of the USB classes, at mov 0x970c,d0 (0x614ba920, task 0x28): drv_ptp_reg_all registers the
+# table, then the displaced instruction. The code after the site sets d1, a0 and a1 itself (mov 1,d1; mov 0,a1; mov ..,a0
+# at 0x614ba926); d2, d3, a2, a3 the C code keeps
+_drv_tramp_ptp_reg:
+	add	-12,sp
+	call	_drv_ptp_reg_all,[],0
+	add	12,sp
+	mov	0x970c,d0
+	jmp	imp_reg_back
+
+# A C operation, called by the dispatcher 0x614c050f with calls (a2): a0 the request, a1 the response, the return
+# address at (sp) and in mdr. drv_ptp_call(request, response) with every register kept (the dispatcher reads d2, d3
+# after the call), then rets - as the optics step's entry, which the camera runs
+_drv_ptp_entry:
+	movm	[d2,d3,a2,a3,other],(sp)
+	add	-12,sp
+	mov	a0,d0
+	mov	a1,d1
+	call	_drv_ptp_call,[],0
+	add	12,sp
+	movm	(sp),[d2,d3,a2,a3,other]
+	rets
+
+# 0x614c0156(d0 code, d1 phase, a0 handler, a1 flag) -> d0 (u16). C: code, phase, handler, flag
+_drv_ptp_reg_fw:
+	mov	(12,sp),a0
+	mov	(16,sp),a1
+	add	-4,sp
+	call	imp_ptp_reg,[d2,d3,a2,a3],20
+	add	4,sp
+	rets
+
+# Data to the computer 0x614c02d6(d0 piece, d1 total, a0 buffer) -> d0 (u16) 1 sent, as 0x614b9c84 calls it
+_drv_ptp_send_fw:
+	mov	(12,sp),a0
+	add	-4,sp
+	call	ptp_send,[d2,d3,a2,a3],24
+	add	4,sp
+	rets
+
+# Data from the computer: 0x614c0399() takes the container header -> d0 the length of the data (as 0x614b9b29 calls it);
+# 0x614c040f(d0 length, a0 buffer) -> d0 1 taken (as 0x614b9b4f). C: length, buffer
+_drv_ptp_recv_len_fw:
+	add	-4,sp
+	call	ptp_recv_len,[d2,a2],16
+	add	4,sp
+	rets
+
+_drv_ptp_recv_fw:
+	mov	d1,a0
+	add	-4,sp
+	call	ptp_recv,[d2,d3,a2],20
+	add	4,sp
+	rets
+
+# rename 0x606aa6ba(a0 old path, a1 new path) -> d0 0, as the firmware's file test 0x606acf48 calls it (after it removed
+# the target): request 0x10009 of the file server
+_drv_rename:
+	mov	d0,a0
+	mov	d1,a1
+	add	-4,sp
+	call	f_rename,[d2,d3,a2,a3],36
+	add	4,sp
+	rets

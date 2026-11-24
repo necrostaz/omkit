@@ -40,6 +40,9 @@ static u32 head, tail, lost, lost_told, last_change, last_flush;
 static u32 retry_ms, retries;               /* the pause before log_service tries again (0 - the last append was taken);
                                                failed tries in a row */
 static int dirty, enabled = 1, level = OMK_LOG_INFO;
+static int card = 1;                        /* 0 - nothing goes to the card (log_card); the tee may still keep lines */
+static log_tee_fn tee;                      /* the debug service's RAM ring: lines up to tee_level, under the lock */
+static int tee_level = OMK_LOG_OFF;
 static char log_path[OMK_PATH_MAX];
 static log_file core_file, run_file;
 
@@ -56,7 +59,20 @@ void log_setup(int on, int lvl, const char *path)
 
 int log_level(void)
 {
-    return enabled ? level : OMK_LOG_OFF;
+    int card_level = enabled && card ? level : OMK_LOG_OFF;
+
+    return tee && tee_level > card_level ? tee_level : card_level;
+}
+
+void log_tee(log_tee_fn fn, int lvl)
+{
+    tee = fn;
+    tee_level = lvl;
+}
+
+void log_card(int on)
+{
+    card = on;
 }
 
 static void put(line_buf *b, char c)
@@ -94,9 +110,9 @@ void log_vprintf_from(int lvl, const char *who, const char *fmt, va_list ap)
     char text[LINE_MAX];
     line_buf b = {text, 0, 0};
     u32 now, st, i, n;
-    int width, zero;
+    int width, zero, to_card = enabled && card && lvl <= level, to_tee = tee && lvl <= tee_level;
 
-    if (!enabled || lvl <= OMK_LOG_OFF || lvl > level)
+    if (lvl <= OMK_LOG_OFF || (!to_card && !to_tee))
         return;
     now = omk_ms();
     put_num(&b, now, 10, 8, 0, 0);
@@ -155,7 +171,10 @@ void log_vprintf_from(int lvl, const char *who, const char *fmt, va_list ap)
     text[b.n++] = '\n';
     n = b.n;
     st = drv_lock();
-    if (head - tail + n > RING_SIZE) {      /* the card has not taken the older lines yet: drop this one whole */
+    if (to_tee)
+        tee(lvl, now, text, n - 2);         /* without the line end */
+    if (!to_card) {
+    } else if (head - tail + n > RING_SIZE) {   /* the card has not taken the older lines yet: drop this one whole */
         lost++;
     } else {
         for (i = 0; i < n; i++)
@@ -217,14 +236,17 @@ static int append(log_file *f, u32 h)
 
     if (f->state == FILE_STOPPED || !n)
         return 1;
+    core_card_write(1, f->path);
     if (f->state == FILE_NEW) {
         omk_dir(LOG_DIR);                   /* the card may have been formatted since boot */
         if (!f->keep)
             drv_remove(f->path);            /* a new power-on: the file starts empty ("w" does not truncate here) */
     }
     fp = drv_fopen(f->path, "ab");          /* opens or creates, at the end */
-    if (!fp)
+    if (!fp) {
+        core_card_write(0, f->path);
         return 0;
+    }
     w = write_ring(fp, f->done, n);
     if (f->state == FILE_NEW && f->keep && w == n) {
         kept = drv_ftell(fp);               /* after a write: the file's length */
@@ -232,13 +254,16 @@ static int append(log_file *f, u32 h)
             drv_fclose(fp);
             drv_remove(f->path);
             fp = drv_fopen(f->path, "ab");
-            if (!fp)
+            if (!fp) {
+                core_card_write(0, f->path);
                 return 0;
+            }
             w = write_ring(fp, f->done, n);
         }
     }
     f->state = FILE_OPEN;
     drv_fclose(fp);                         /* no fflush: suspected of blocking power-off */
+    core_card_write(0, f->path);
     f->done += w;
     if (w < n) {                            /* card full or failing: stop rather than retry forever */
         f->state = FILE_STOPPED;
@@ -258,7 +283,7 @@ void log_flush(void)
     u32 st, h, free_to;
     int ok;
 
-    if (!enabled)
+    if (!enabled || !card)
         return;
     st = drv_lock();
     h = head;

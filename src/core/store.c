@@ -36,6 +36,12 @@ struct omk_store {
 
 static omk_store stores[STORE_MAX];
 static u32 nstores;
+static int card = 1;                        /* 0 - changes stay in memory (store_card, the debug service) */
+
+void store_card(int on)
+{
+    card = on;
+}
 
 /* Store mutex. Callers are tasks on CPU 0 (modules, the core task, the card-off gate), never interrupts. The firmware lock
  * (interrupts off) guards only the flag; the work - copies up to the store size, file writes - runs with interrupts on.
@@ -229,6 +235,8 @@ static void save(omk_store *s)
     u8 *r;
     void *fp;
 
+    if (!card)
+        return;
     enter(s);
     for (r = s->mem; r < s->mem + s->used; r += rec_size(r))
         if (r[2] & OMK_STORE_PERSIST) {
@@ -244,10 +252,12 @@ static void save(omk_store *s)
     head[3] = out;
     head[4] = crc32(s->image + FILE_HEAD, out);
     make_path(path, s, seq);
+    core_card_write(1, path);
     omk_dir(STORE_DIR);                     /* the card may have been formatted since boot */
     drv_remove(path);                       /* "w" does not truncate here: a shorter version would keep an old tail */
     fp = drv_fopen(path, "wb");
     if (!fp) {
+        core_card_write(0, path);
         if (!s->failing)                    /* once: without a card it fails on every try */
             log_printf(OMK_LOG_WARN, "store %s: cannot open %s", s->name, path);
         save_failed(s);
@@ -255,6 +265,7 @@ static void save(omk_store *s)
     }
     w = drv_fwrite(s->image, 1, FILE_HEAD + out, fp);
     drv_fclose(fp);                         /* no fflush: suspected of blocking power-off */
+    core_card_write(0, path);
     if (w != FILE_HEAD + out) {             /* card full or failing: the other slot still has the last good version */
         if (!s->failing)
             log_printf(OMK_LOG_WARN, "store %s: %s took %u of %u bytes", s->name, path, w, FILE_HEAD + out);
@@ -385,6 +396,8 @@ void store_service(u32 now)
 {
     u32 i;
 
+    if (!card)
+        return;
     for (i = 0; i < nstores; i++)
         if (stores[i].mem && stores[i].dirty &&
             (now - stores[i].dirty_ms >= STORE_DELAY_MS || now - stores[i].first_ms >= STORE_LATEST_MS) &&

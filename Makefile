@@ -14,7 +14,7 @@ PYTHON ?= python3
 # as u16/u32 words, structures over arena blocks), as embedded code usually does; the type-based alias rule must not
 # let the optimizer reorder such reads and writes
 CFLAGS := -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-strict-aliasing -nostdlib -Wall -Wextra -Isrc/core/include -Isrc/sdk/include $(EXTRA)
-OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o taskdump.o drv.o pictprof.o editor.o import.o ispdrv.o graindrv.o kernel.o thunks.o)
+OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o taskdump.o dring.o debug.o shoot.o drv.o pictprof.o editor.o import.o ptp.o ispdrv.o graindrv.o kernel.o thunks.o)
 LD_SCRIPTS := src/core/core.ld src/platform/$(PLATFORM)/fw.ld
 
 all: $(OUT)/CORE.BIN
@@ -43,6 +43,10 @@ $(OUT)/editor.o: src/platform/$(PLATFORM)/editor.c src/platform/$(PLATFORM)/edtr
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
 $(OUT)/import.o: src/platform/$(PLATFORM)/import.c src/core/include/*.h src/sdk/include/*.h
+	@mkdir -p $(OUT)
+	$(TC)gcc $(CFLAGS) -c $< -o $@
+
+$(OUT)/ptp.o: src/platform/$(PLATFORM)/ptp.c src/platform/$(PLATFORM)/memread.h src/core/include/*.h src/sdk/include/*.h
 	@mkdir -p $(OUT)
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
@@ -101,7 +105,7 @@ HOST_CC ?= gcc
 TEST := $(OUT)/test
 HOST_CFLAGS := -std=gnu99 -Wall -Wextra -Werror
 HOST_INC := -Isrc/core/include -Isrc/sdk/include -Itests/host
-HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c)
+HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c dring.c debug.c)
 HOST_DEPS := src/core/include/*.h src/sdk/include/*.h tests/host/host_drv.h tests/host/host_drv.c
 HAVE_TC = $(shell command -v $(TC)gcc 2>/dev/null)
 HAVE_NUMPY = $(shell $(PYTHON) -c "import numpy" 2>/dev/null && echo yes)
@@ -110,6 +114,10 @@ HAVE_PIL = $(shell $(PYTHON) -c "import numpy, PIL" 2>/dev/null && echo yes)
 $(TEST)/test_core: $(HOST_CORE) tests/host/test_core.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) tests/host/host_drv.c tests/host/test_core.c -o $@
+
+$(TEST)/test_shoot: $(HOST_CORE) src/core/shoot.c tests/host/test_shoot.c $(HOST_DEPS)
+	@mkdir -p $(TEST)
+	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) src/core/shoot.c tests/host/host_drv.c tests/host/test_shoot.c -o $@
 
 $(TEST)/test_mod: $(HOST_CORE) src/core/module.c src/core/api.c src/core/event.c tests/host/test_mod.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
@@ -134,6 +142,10 @@ $(TEST)/test_texfill: src/platform/$(PLATFORM)/texfill.h tests/host/test_texfill
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -O1 -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_texfill.c -o $@
 
+$(TEST)/test_debug: $(HOST_CORE) src/platform/$(PLATFORM)/memread.h tests/host/test_debug.c $(HOST_DEPS)
+	@mkdir -p $(TEST)
+	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) -Isrc/platform/$(PLATFORM) $(HOST_CORE) tests/host/host_drv.c tests/host/test_debug.c -o $@
+
 $(TEST)/test_edtrig: src/platform/$(PLATFORM)/edtrig.h tests/host/test_edtrig.c src/sdk/include/omk_types.h
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_edtrig.c -o $@
@@ -146,7 +158,7 @@ $(TEST)/test_rowsw: src/platform/$(PLATFORM)/rowsw.h tests/host/test_rowsw.c src
 test-hello:
 	$(if $(HAVE_TC),@$(MAKE) -s -C src/modules MOD=hello OUT=$(abspath $(TEST))/modules >/dev/null)
 
-test-host: $(TEST)/test_core $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_rowsw test-hello
+test-host: $(TEST)/test_core $(TEST)/test_shoot $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_debug $(TEST)/test_rowsw test-hello
 	@echo "host tests:"
 	@sh tests/host/run.sh $(TEST) $(HOST_CC) $(if $(HAVE_TC),$(abspath $(TEST))/modules $(TC) "$(PYTHON)")
 

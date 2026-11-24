@@ -12,6 +12,9 @@
 #define UNCACHED DRV_UNCACHED
 #define ARENA_LO 0xa3470000                 /* resource gap: the arena never starts below this */
 #define ARENA_HI 0xa3780000
+#define ARENA_TAIL 0x20100                  /* the region's end is not the arena: the debug service's memory 0xa375ff00..
+                                               0xa377ff80 (ptp.c, drv_keep_area) and the optics layer's crumbs
+                                               0xa377ff80..0xa3780000; a reset must not find them overwritten by a block */
 #define GUARD_LO 0x60000200                 /* DbgSup protected range */
 #define GUARD_HI 0x60cbe800
 #define JMP_D32 0xdc
@@ -108,7 +111,7 @@ int drv_mem_region(u32 i, void **base, u32 *size)
     if (lo < ARENA_LO)
         lo = ARENA_LO;
     *base = (void *)lo;
-    *size = ARENA_HI - lo;
+    *size = ARENA_HI - ARENA_TAIL - lo;
     return 1;
 }
 
@@ -428,6 +431,29 @@ int drv_ui_probe(u32 *app, u32 *keys)
     *app = w[5];
     *keys = w[3];
     return w[5] == APP_HALF_PRESS ? DRV_UI_HALF : w[5] == APP_TRANSITION ? DRV_UI_TRANSIENT : 0;
+}
+
+/* The test scenario's shutter button (core/shoot.c). Keys: API 0xD0002 (0x6032b57f -> 0x601310b8), the path of the
+ * shell's "ui key skey": a snapshot of the key image with the key's bit goes into the key task's ring (10 entries) and the
+ * key task (UI_IN, priority 44, above core) is woken, so everything after it - a lone full press preceded by the
+ * half-press, the application's queue - is the button's. State 0 is pressed, 1 released (the firmware's own callers and
+ * the key decoder 0x60131840; static reading of E148 1.1). The keys' events: 0x2000100 Trg1 (half), 0x2000101 Trg2.
+ * Wifi: the events the Wi-Fi remote's exec_shutter.cgi posts (0x61430767): 0x041B0024 / 25 half-press down / up, 26 / 27
+ * the full press; past the key task. Core task only, never under drv_lock: the key task runs at once on CPU 0 */
+int drv_key_api(u32 event, u32 state);     /* thunks.s */
+void drv_app_event(u32 event, u32 arg);
+
+int drv_shutter(u32 key, int down, u32 path)
+{
+    if (key > DRV_SHUTTER_FULL)
+        return -1;
+    if (path == DRV_SHUTTER_WIFI) {
+        drv_app_event(0x041B0024 + 2 * key + (down ? 0 : 1), 0);
+        return 0;
+    }
+    if (path != DRV_SHUTTER_KEYS)
+        return -1;
+    return drv_key_api(0x2000100 + key, down ? 0 : 1) & 0xffff;
 }
 
 /* Media busy flags: the camera's power code waits while (0x61e418f0) = 1 or (0x61e418f4) != 0

@@ -6,6 +6,23 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Debug service (core 1.40), off by default.** With `[debug] enabled = on` in `OMKIT.INI`, the log and snapshots of
+  the camera's tasks also go to RAM that survives a reset, and `tools/omkdebug.py` reads them over USB in the MTP mode,
+  also after a crash; it reads files of the card, and with `write = on` updates files of the `OMKIT` folder, each
+  checked by a CRC-32 read back from the card. `card_writes = off` keeps the log and the stores in RAM only.
+  See [docs/debug.md](docs/debug.md), including its security notes.
+- **Test scenario (core 1.41), off by default.** `[shoot]` in `OMKIT.INI` takes a series of pictures without the user:
+  `core` presses the shutter button by its own path in the camera and chooses a preset of the film look or a profile
+  before each step, as the user would. For testing presets
+  ([docs/config.md](docs/config.md#10-shoot-the-test-scenario)).
+
+### Changed
+
+- **core 1.42** has both the debug service and the test scenario. Its image with the stack may now end at `0x634a0000`
+  (was `0x63490000`); the module arena still starts at the image's real end.
+
 ## [0.1.0] - 2026-11-20
 
 First public release, for the OM SYSTEM OM-5 Mark II on firmware 1.1.

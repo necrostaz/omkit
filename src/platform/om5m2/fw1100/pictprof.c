@@ -3678,6 +3678,66 @@ int drv_look_list(const char *const *names, u32 count, u32 current)
     return 0;
 }
 
+/* The test scenario (core/shoot.c), core task: the look's entry chosen as the user chooses it in the picture mode screen.
+ * The look on: OMK_LOOK_ON with the entry for the owner at core's next loop (look_changed_ui, as the UI's own choice);
+ * already on: the entry as a dial step (look_pick, OMK_LOOK_ENTRY); off: OMK_LOOK_OFF */
+int drv_look_choose(int on, u32 index)
+{
+    volatile shared_t *sh = shared();
+    u32 st;
+
+    if (!sh || !look_installed)
+        return -1;
+    if (!on) {
+        if (sh->look)
+            look_changed_ui(sh, 0);
+        return 0;
+    }
+    if (index >= sh->look_count)
+        return -1;
+    if (!drv_prof_base())
+        return -4;
+    if (sh->prof)
+        ui_changed(sh, OMK_PROF_NONE);
+    st = drv_lock();
+    if (sh->look_index != index) {
+        sh->look_index = index;
+        if (sh->look) {
+            sh->look_pick++;
+            sh->ed.stale = 1;               /* the editors' values are the entry's before until the module's next */
+            sh->ed.g_stale = 1;
+        }
+        drv_edp_look(sh->look_names, index, sh->look_count);
+    }
+    drv_unlock(st);
+    if (!sh->look)
+        look_changed_ui(sh, 1);
+    return 0;
+}
+
+static char lower_c(char c)
+{
+    return c >= 'A' && c <= 'Z' ? c + 32 : c;
+}
+
+int drv_look_find(const char *name)
+{
+    volatile shared_t *sh = shared();
+    const char *n;
+    u32 i, k;
+
+    if (!sh || !look_installed || !sh->look_names || !name || !name[0])
+        return -1;
+    for (i = 0; i < sh->look_count; i++) {
+        n = (const char *)(sh->look_names + i * LOOK_NAME);
+        for (k = 0; k < LOOK_NAME && name[k] && n[k] && lower_c(name[k]) == lower_c(n[k]); k++)
+            ;
+        if (k < LOOK_NAME && !name[k] && !n[k])
+            return (int)i;
+    }
+    return -1;
+}
+
 /* An entry's cassette drawing (a CANI section core has checked): copied into a new arena block (the renderer may still
  * read the old one: not freed) and published in the table. 0, -1 bad index, -2 no memory */
 int drv_look_art(u32 index, const void *data, u32 size)

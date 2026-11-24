@@ -1,15 +1,17 @@
 /* core image: the loader header precedes the body in the file, so the body starts at 0x6345a010.
  * The image together with the stack must not go past CORE_CEIL: the module arena starts above it (the driver puts its start
  * right after the end of the image, rounded up to 4 KB). The core 0.53 stack ran into the arena and corrupted a module on the
- * camera, causing a reboot loop. The linker refuses an image that does not fit. CORE_CEIL is 0x63490000: the arena's region
- * 0xa3470000..0xa3780000 was checked word by word on the camera, so the image may grow into its first 64 KB (the film look's
- * editors, core 1.03: 32 KB; its grain item, core 1.15: 32 KB more) and the arena starts after it */
+ * camera, causing a reboot loop. The linker refuses an image that does not fit. CORE_CEIL is 0x634a0000: the arena's region
+ * 0xa3470000..0xa3780000 was checked word by word on the camera, so the image may grow into its first 192 KB (the film look's
+ * editors, core 1.03: 32 KB; its grain item, core 1.15: 32 KB more; the debug service, the test scenario and the optics
+ * layer, core 1.42: 64 KB more) and the arena starts after it. The ceiling is a budget, not a reservation: the arena starts
+ * at the image's real end, and it is 2.8 MB, of which the bundled modules use less than 1 MB */
 OUTPUT_ARCH(mn10300)
 ENTRY(_start)
 
 MEMORY
 {
-    ram (rwx) : ORIGIN = 0x6345a010, LENGTH = 0x63490000 - 0x6345a010
+    ram (rwx) : ORIGIN = 0x6345a010, LENGTH = 0x634a0000 - 0x6345a010
 }
 
 SECTIONS
@@ -32,4 +34,4 @@ SECTIONS
     } > ram
     /DISCARD/ : { *(.comment) *(.note*) }
 }
-ASSERT(___image_end <= 0x63490000, "core: image with stack does not fit below the module arena")
+ASSERT(___image_end <= 0x634a0000, "core: image with stack does not fit below the module arena")
