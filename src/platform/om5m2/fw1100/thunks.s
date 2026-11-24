@@ -1311,6 +1311,58 @@ _drv_fw_cache_flush:
 	rets
 
 
+# The optics layer (opticsdrv.c, Bloom and Halation): the reduction, the pass to the outputs, our last step, the size hook.
+	.global	_drv_fw_sf_down, _drv_fw_xfer, _drv_tramp_optics_final, _drv_tramp_optics_size
+
+# The reduction 0x603937f8 as 0x603938fe calls it: a0 = h -> d0 (u16) the slot of 0x1060, 48 or more - none. d0 h
+_drv_fw_sf_down:
+	mov	d0,a0
+	add	-4,sp
+	call	fw_sf_down,[d2,d3,a2,a3],24
+	add	4,sp
+	rets
+
+# The pass to the outputs 0x6038c50f as 0x603934ba calls it: a0 = h, d0 the input's slot, d1 the callback, a1 the
+# dependency word (the pass before in, the new pass out) -> d0 (u16) 0 or a code. C: h, slot, callback, &dependency
+_drv_fw_xfer:
+	mov	d0,a0
+	mov	d1,d0
+	mov	(12,sp),d1
+	mov	(16,sp),a1
+	add	-4,sp
+	call	fw_xfer,[d2,a2],12
+	add	4,sp
+	rets
+
+# Our last step (route 403), called by the step executor with calls (a1), a0 = h, as _drv_tramp_optics_step, but d0 is
+# drv_optics_final's: 0 - the next step, else the job ends with it. Every other register kept: d0 goes into the slot movm
+# saved it in (above the 48 bytes, as the grain's W trampoline does)
+_drv_tramp_optics_final:
+	add	-4,sp
+	movm	[d2,d3,a2,a3,other],(sp)
+	add	-12,sp
+	mov	a0,d0
+	call	_drv_optics_final,[],0
+	add	12,sp
+	mov	d0,(48,sp)
+	movm	(sp),[d2,d3,a2,a3,other]
+	mov	(sp),d0
+	add	4,sp
+	rets
+
+# The size hook in the reduction 0x603937f8 at 0x60393879 (a0 -> {u16 w, u16 h} of the small frame, d3 = h, a2 = its
+# descriptor R+340; d0, d1, a1 free, the flags not read after): for the job in drv_optics_hook[0] (its uncached address)
+# a0 points at our {w, h} in drv_optics_hook[1]; then the displaced mov 773,d0; movhu d0,(8,a2)
+_drv_tramp_optics_size:
+	mov	(_drv_optics_hook+0x40000000),d0
+	cmp	d0,d3
+	bne	1f
+	mov	_drv_optics_hook+0x40000004,a0
+1:
+	mov	773,d0
+	movhu	d0,(8,a2)
+	jmp	optics_size_back
+
 # The worker task of the optics probe (opticsdrv.c). Its entry, as the kernel starts a task made by acre_Task (the
 # loader's OMK_LOAD task is entered the same way): a frame for the C call, drv_optics_worker_main (it does not return;
 # if it ever does, the task ends itself as the loader's does, ext_tsk)

@@ -845,7 +845,8 @@ void drv_optics_beat(u32 ms)
 
 const char *drv_optics_sub_name(u32 sub)
 {
-    static const char *const name[DRV_OPTICS_SUBS] = {"N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full"};
+    static const char *const name[DRV_OPTICS_SUBS] = {"N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full",
+                                                      "L0", "L1", "L2", "L3", "L4"};
 
     return sub < DRV_OPTICS_SUBS ? name[sub] : "?";
 }
@@ -868,6 +869,22 @@ int drv_optics_worker(u32 *tid)
     host_opt_workers++;
     *tid = host_opt_worker_rc ? 0 : 0x77;
     return host_opt_worker_rc;
+}
+
+/* The optics layer: the settings kept for the test to look at */
+drv_optics_layer_cfg host_opt_layer;
+int host_opt_layer_rc;
+
+int drv_optics_layer(const drv_optics_layer_cfg *c)
+{
+    host_opt_layer = *c;
+    return host_opt_layer_rc;
+}
+
+u32 drv_optics_layer_floor(u32 W, u32 *wsize)
+{
+    *wsize = 0;
+    return host_opt_layer.width ? (216 * W + 50 * host_opt_layer.width) / (100 * host_opt_layer.width) : 0;
 }
 
 int drv_optics_worker_test(u32 *us, u32 *work, u32 *state)

@@ -76,8 +76,9 @@ $(OUT)/graindrv.o: src/platform/$(PLATFORM)/graindrv.c src/platform/$(PLATFORM)/
 	@mkdir -p $(OUT)
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
-# optprobe.h, optwork.h: the plain C parts of the optics probe's step, run as they are by the host tests (tests/host)
-$(OUT)/opticsdrv.o: src/platform/$(PLATFORM)/opticsdrv.c src/platform/$(PLATFORM)/optprobe.h src/platform/$(PLATFORM)/optwork.h src/core/include/*.h src/sdk/include/*.h
+# optprobe.h, optwork.h, optlayer.h: the plain C parts of the optics probe's step and of the layer, run as they are by the host
+# tests (tests/host)
+$(OUT)/opticsdrv.o: src/platform/$(PLATFORM)/opticsdrv.c src/platform/$(PLATFORM)/optprobe.h src/platform/$(PLATFORM)/optwork.h src/platform/$(PLATFORM)/optlayer.h src/core/include/*.h src/sdk/include/*.h
 	@mkdir -p $(OUT)
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
@@ -173,6 +174,10 @@ $(TEST)/test_optwork: src/platform/$(PLATFORM)/optwork.h tests/host/test_optwork
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_optwork.c -o $@
 
+$(TEST)/test_optlayer: src/platform/$(PLATFORM)/optlayer.h tests/host/test_optlayer.c src/sdk/include/omk_types.h
+	@mkdir -p $(TEST)
+	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_optlayer.c -o $@
+
 $(TEST)/test_debug: $(HOST_CORE) src/platform/$(PLATFORM)/memread.h tests/host/test_debug.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) -Isrc/platform/$(PLATFORM) $(HOST_CORE) tests/host/host_drv.c tests/host/test_debug.c -o $@
@@ -185,7 +190,7 @@ $(TEST)/test_edtrig: src/platform/$(PLATFORM)/edtrig.h tests/host/test_edtrig.c 
 test-hello:
 	$(if $(HAVE_TC),@$(MAKE) -s -C src/modules MOD=hello OUT=$(abspath $(TEST))/modules >/dev/null)
 
-test-host: $(TEST)/test_core $(TEST)/test_shoot $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_debug $(TEST)/test_optprobe $(TEST)/test_optwork test-hello
+test-host: $(TEST)/test_core $(TEST)/test_shoot $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_debug $(TEST)/test_optprobe $(TEST)/test_optwork $(TEST)/test_optlayer test-hello
 	@echo "host tests:"
 	@sh tests/host/run.sh $(TEST) $(HOST_CC) $(if $(HAVE_TC),$(abspath $(TEST))/modules $(TC) "$(PYTHON)")
 

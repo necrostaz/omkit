@@ -75,15 +75,41 @@
  * next start where the step was (drv_optics_crumb). core writes a heartbeat there too, so a start can tell "memory kept,
  * the step not reached" from "memory lost".
  *
+ * The layer (feature/optics-layer: Bloom and Halation; core/optics.c, [optics] bloom, halation and the rest). The
+ * firmware's Soft Focus chain is the transport: the ISP reduces the picture 0x1000 into the small frame 0x1060 (pass
+ * 0x400, format 0x305, 4 bytes a pixel), the worker draws the glow into it, and the ISP enlarges it and adds it to the
+ * picture. Our step runs the reduction itself (0x603937f8, synchronous, in the job task) with the layer's size of ours
+ * (the hook at 0x60393879 gives the reduction our {w, h} for the job whose h is in drv_optics_hook[0]), then hands the
+ * layer to the worker. Two ways on (route, [optics] route):
+ *   PAIR - the firmware's own steps after ours: 0x603932cb (enlarge 0x401 into the picture-sized 0x1061, 40 MB) and
+ *          0x603934ba (the pass to the outputs, whose callback 0x6039374d blends 0x1000 and 0x1061: case 11);
+ *   403  - our last step (drv_optics_final) instead of the pass to the outputs: 0x6038c50f with the small frame as the
+ *          input and the callback 0x6039379e - one pass that enlarges and blends (case 12), no 0x1061.
+ * The blend hook (graindrv.c's A, drv_optics_blend) makes the blend additive for our jobs from L2 on: the picture's gain
+ * 1024, the layer's 1024 in Y and chroma (the chroma centred at 128 by the blend's own offsets) - the strength is in the
+ * layer. If the reduction or the worker fails, the step puts the plain pass to the outputs (and the firmware's CPU step
+ * that does nothing but wait, for PAIR's 0x603932cb) into the list in their place: the job ends as without the layer.
+ * The substages (as the probe's, in [optics] schedule; without one the jobs get L4):
+ *   L0 - the chain with the firmware's weights and size (PAIR: nothing in our step; 403: the reduction in our step) - a
+ *        soft focus look: the chain itself on our route, its time and memory;
+ *   L1 - and our size, the layer read by the worker: its first words and the bytes' statistics in the log (the order of
+ *        Y, Cb, Cr in a word - [optics] layer_bytes = auto takes it from here); the firmware's weights;
+ *   L2 - the layer written neutral (nothing added) and the blend additive: the picture as without the layer;
+ *   L3 - a pattern in the layer (bands with one byte changed each): which byte is which, on the picture;
+ *   L4 - the effect (optlayer.h): the picture's rows read past the cache (or through the cached view), the layer read,
+ *        the sources, the Gaussians, the layer written.
+ *
  * Memory: the step touches the arena block below (its uncached address), the job's handle (through the cache, on the job's
  * CPU, as the firmware's steps do), the picture through the window, and the stack; the firmware only through the thunks of
- * thunks.s. No core variables, no tables in .rodata. The core task reports (drv_optics_service). */
+ * thunks.s. No core variables, no tables in .rodata. The worker also has its work buffer (an arena block of its own
+ * lines, used through the cache of CPU 0 only, as its stack). The core task reports (drv_optics_service). */
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
 #include "omk_mem.h"
 #include "optprobe.h"
 #include "optwork.h"
+#include "optlayer.h"
 
 #define CPUS 3
 #define H_REQ 8                             /* P+4: the record's request C (0x6041e8dc) */
@@ -108,7 +134,38 @@
 #define SL_B81 81
 #define SL_B84 84                           /* u8: the slot's release takes another way when it is not 0 (0x603867d8) */
 #define BUF_FRAME 0x1000                    /* the picture after the development (0x603902a0 writes it) */
-#define BUF_SMALL 0x1060                    /* the Soft Focus chain's small frame: not expected on this route */
+#define BUF_SMALL 0x1060                    /* the Soft Focus chain's small frame: the layer (made by our step, L0 on) */
+#define FMT_LAYER 0x305                     /* the small frame's format: 4 bytes a pixel, the row's length in pixels */
+#define STEP_SF_UP 0x603932cb               /* PAIR: the firmware's enlarging step (0x401 into 0x1061) */
+#define STEP_SF_OUT 0x603934ba              /* PAIR: the pass to the outputs blending 0x1000 and 0x1061 (case 11) */
+#define STEP_OUT 0x60391b23                 /* the plain pass to the job's outputs (graindrv.c's) */
+#define CB_403 0x6039379e                   /* 403: the callback that blends the small frame into the picture (0x403) */
+#define CB_PLAIN 0x60391516                 /* the plain pass's callback (does nothing) */
+#define E_NO_BUFFER 0x9ece                  /* the stock steps' "no buffer" (0x603934cf) */
+#define LAYER_MIN 42                        /* the reduction at most 16 x after the input's 1/8 (in the emulator even
+                                               20 x 15 passed: a margin) */
+#define LAYER_MAX 400
+#define LAYER_LEN_MAX 0x233000u             /* the allocator's "small" buffers (0x604265ef) */
+#define H_B 11364                           /* request B = R of the passes (0x6038b214) */
+#define R_STAGE 12
+#define R_KIND 16
+#define R_CODE 656                          /* u16 the effect code of kind 3 (0x402 / 0x403 by the callbacks) */
+#define STAGE_F005 0xf005
+#define CODE_402 0x402
+#define CODE_403 0x403
+#define CASE_402 11                         /* the blend cases of the codes (selector 0x603ecda1, hash 0x605769a8) */
+#define CASE_403 12
+#define CTX_B 4
+#define CTX_IMAGE 8
+#define IMG_BLEND 7364                      /* the blend block's image in the register image (0x603d80ec) */
+#define BL_GAIN_A 92                        /* input A: Y | chroma << 16; +96 the second chroma */
+#define BL_GAIN_A2 96
+#define BL_GAIN_B 136                       /* input B: the same */
+#define BL_GAIN_B2 140
+#define GAIN_ONE 0x04000400u
+#define LAYER_GAIN 1024                     /* the layer's gain in the blend: the strength is in the layer */
+#define GUARD_LO 0x60000200u
+#define GUARD_HI 0x60cbe800u
 #define FMT_YC 0x302                        /* the picture's format on the mask route: 2 bytes a pixel */
 #define C_MODE 194                          /* C: u16 Mode, u8 RawJpeg, u8 FileType (as graindrv.c logs them) */
 #define C_RAWJPEG 293
@@ -168,9 +225,11 @@ enum { WP_NONE, WP_STARTED, WP_WAITING, WP_WOKEN, WP_WORKING, WP_ANSWERED, WP_NA
 typedef char op_crumb_words_are_the_api_s[DRV_OPTICS_CRUMB == CR_N ? 1 : -1];
 /* Phases of a job, in the crumbs (state: job << 16 | substage << 8 | phase; phases: bit 1 << phase of each reached) */
 enum { P_NONE, P_LISTED, P_ENTER, P_WAITED, P_SLOTS, P_SLEPT, P_LOOP, P_BUSY, P_MAP, P_MAPPED, P_HEAD, P_READ, P_READ_END,
-       P_CACHED, P_CACHED_END, P_STRIPES, P_STRIPES_END, P_UNMAP, P_UNMAPPED, P_OUT, P_ENDED, P_HANDED, P_WORK, P_WORK_END, P_LATE, P_BACK, P_N };
+       P_CACHED, P_CACHED_END, P_STRIPES, P_STRIPES_END, P_UNMAP, P_UNMAPPED, P_OUT, P_ENDED, P_HANDED, P_WORK, P_WORK_END, P_LATE, P_BACK,
+       P_DOWN, P_DOWN_END, P_LAYER, P_LAYER_END, P_FINAL, P_N };
 
-enum { OE_NONE, OE_WAIT, OE_NOBUF, OE_SLOT, OE_ADDR, OE_MAP, OE_WIN, OE_BUDGET, OE_TASK, OE_WORKER, OE_N };
+enum { OE_NONE, OE_WAIT, OE_NOBUF, OE_SLOT, OE_ADDR, OE_MAP, OE_WIN, OE_BUDGET, OE_TASK, OE_WORKER, OE_DOWN, OE_LAYER,
+       OE_STOPPED, OE_BUFFER, OE_N };
 enum { CS_NONE, CS_NOTARMED, CS_NOTWINDOW, CS_BEGUN, CS_DONE };
 
 typedef struct {
@@ -205,6 +264,19 @@ typedef struct {
     u32 c_state, c_bytes, c_us, c_sum, c_fl0, c_fl1;
     u32 s_rows, s_px, s_us, s_fl;
     u32 yields, t_total;                    /* t_total: from the end of the wait, with the ticks given away */
+    /* the layer (L substages) */
+    u32 route;                              /* DRV_OPTICS_PAIR / _403 */
+    u32 t_down, down_rc;                    /* our reduction 0x603937f8: us, its d0 (the slot; 48 or more - none) */
+    u32 l_bus, l_wh, l_pitch, l_len, l_kind;    /* the small frame: bus, w | h << 16, row in pixels, bytes, kind */
+    u32 l_asked;                            /* the size asked for (w | h << 16), 0 - the firmware's */
+    u32 fallback;                           /* 1 - the chain left out (the plain pass put in its place) */
+    u32 order;                              /* py | pcb << 8 | pcr << 16 used */
+    u32 maps, unmaps_bad;
+    u32 t_lread, t_calc, t_lwrite;          /* the worker: the layer read, the sources and Gaussians, the layer written */
+    u32 sig[4];                             /* the Gaussians, layer pixels Q8: Bloom 1, 2, Halation 1, 2 */
+    u32 f_rows, f_passes, f_us, f_cells, f_maps, f_err;   /* the picture's read: rows, passes, us, rows of cells reached */
+    u32 lanes[1 + 4 * OL_LANES];            /* L1: ol_lanes_t */
+    u32 blend_set;                          /* the blend hook made the blend additive (any CPU sets it, the core reads) */
 } op_rec_t;
 
 typedef struct {
@@ -219,6 +291,8 @@ typedef struct {
     u32 wl;                                 /* W: jobs listed (the crumbs' job number) */
     struct {
         u32 h, sub, job;                    /* h 0 - free: W takes it (CPU 0), H3 frees it (any CPU, h last) */
+        u32 layer;                          /* 1 - the layer is ready (the step), so the blend hook makes it additive */
+        u32 rec;                            /* the job's ring record (the step), 0 - none */
     } row[ROWS];
     u32 ended[CPUS][SUBS];                  /* H3: our jobs ended, by the substage they had (each CPU its own row) */
     /* The worker: made by the core task; the request from the step, one at a time (the job task runs one job at a time) */
@@ -231,6 +305,15 @@ typedef struct {
     u32 w_rc;                               /* the result of its last wait (0 - the flag, -2 the time ran out) */
     u32 w_sp, w_psw, w_pri, w_stk;          /* at its start: sp, psw, priority (current | base << 16), stack base */
     op_rec_t test;                          /* drv_optics_worker_test's request */
+    /* The layer (drv_optics_layer, core task, before any list) */
+    u32 layer_on;
+    drv_optics_layer_cfg cfg;
+    u32 order;                              /* py | pcb << 8 | pcr << 16 now (AUTO: the guess of the first L1 dump) */
+    u32 order_auto, order_set;
+    u16 lin[256];                           /* the curves (ol_luts), copied into the work buffer a job */
+    u8 enc[OL_ENC];
+    u32 wbuf, wsize;                        /* the worker's buffer: its cached address, bytes */
+    u32 fallbacks, blends[CPUS][2];         /* jobs whose chain was left out; blends made additive by the hook, by case */
     op_rec_t ring[RING];
 } op_t;
 
@@ -238,7 +321,9 @@ typedef struct {
     u32 t0, ty;                             /* the work's start; the last tick given away */
     u32 slept, yields;
     volatile u32 *stop;                     /* the worker: a word that ends the work, 0 - none */
+    u32 budget;                             /* us, 0 - OPT_BUDGET_US; PACE_NONE - no limit (the stop words only) */
 } pace_t;
+#define PACE_NONE 0xffffffffu
 
 /* Only through slot(): the uncached alias; word 1 - the arena block */
 static u32 optics_slot[16] __attribute__((aligned(64), section(".data.cpu_shared")));
@@ -330,6 +415,15 @@ u32 drv_fw_win_map(u32 bus, u32 flags);     /* thunks.s: 0x60411572, the window'
 u32 drv_fw_win_unmap(u32 win);              /* thunks.s: 0x604116a1, 0 - not released */
 void drv_fw_cache_flush(void);              /* thunks.s: 0x60069fbf, this CPU's cache written back and dropped */
 u32 drv_grain_shot(u32 h);                  /* graindrv.c: the shot of our job h, 0 - none */
+u32 drv_fw_sf_down(u8 *h);                  /* thunks.s: 0x603937f8, the reduction 0x400 -> the slot of 0x1060 (u16) */
+u32 drv_fw_xfer(u8 *h, u32 slot, u32 cb, u32 *dep);    /* thunks.s: 0x6038c50f, the pass to the outputs -> 0 or a code */
+void drv_tramp_optics_final(void);          /* thunks.s: our last step (403), d0 drv_optics_final's */
+
+
+static u32 op_row(volatile op_t *o, u32 h);
+static void op_layer_step(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc);
+static void op_fallback(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 k);
+static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p);
 
 /* The empty loop: n iterations of 2 instructions */
 static void op_spin(u32 n)
@@ -342,7 +436,7 @@ static int op_pace(pace_t *p)
 {
     u32 t;
 
-    if (drv_ticks_since(p->t0) >= OPT_BUDGET_US || (p->stop && (p->stop[0] | p->stop[1])))
+    if (drv_ticks_since(p->t0) >= (p->budget ? p->budget : OPT_BUDGET_US) || (p->stop && (p->stop[0] | p->stop[1])))
         return 1;                           /* stop[1]: abandon, right after stop in ow_chan_t */
     if (drv_ticks_since(p->ty) >= OPT_YIELD_US) {
         t = drv_ticks();
@@ -460,10 +554,16 @@ static void op_work(volatile op_t *o, volatile op_rec_t *r)
 
     p.t0 = p.ty = drv_ticks();
     p.slept = p.yields = 0;
+    p.budget = 0;
     p.stop = &o->ch.stop;
     op_crumb(job, sub, P_WORK);
     if (sub == DRV_OPTICS_W0)
         goto out;                           /* nothing: the answer at once */
+    if (sub >= DRV_OPTICS_L0) {
+        p.budget = PACE_NONE;               /* the layer's work is bounded by its size; the picture's read has its own */
+        op_layer_work(o, r, &p);
+        goto out;
+    }
     r->loop_n = o->loop ? o->loop : OPT_LOOP;
     if (sub == DRV_OPTICS_W1) {             /* at once: the worker's priority 56 is below every task it could hold up */
         t = drv_ticks();
@@ -698,6 +798,7 @@ static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
 
     p.t0 = p.ty = drv_ticks();
     p.slept = p.yields = 0;
+    p.budget = 0;
     p.stop = 0;
     if (sub < DRV_OPTICS_B)
         goto out;
@@ -728,12 +829,18 @@ static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
     if (r->task != TASK_REC_IMAGE) {
         r->err = OE_TASK;                   /* the executor in another task (REC_VIEW: priority 26, under a semaphore) */
         r->detail = r->task;
+        if (sub >= DRV_OPTICS_L0)
+            op_fallback(o, r, h, r->step & 0xff);
         goto out;
     }
     p.ty -= OPT_YIELD_US;                   /* one tick given away now, whatever the time */
     op_pace(&p);
     op_crumb(job, sub, P_SLEPT);
     op_low(r);
+    if (sub >= DRV_OPTICS_L0) {
+        op_layer_step(o, r, h, wait_rc);
+        goto out;
+    }
     if (sub == DRV_OPTICS_C2 || sub == DRV_OPTICS_C3) {
         r->loop_n = sub == DRV_OPTICS_C2 ? LOOP_SHORT : o->loop ? o->loop : OPT_LOOP;
         t = drv_ticks();
@@ -793,6 +900,514 @@ static u32 op_row(volatile op_t *o, u32 h)
     for (i = 0; i < ROWS && o->row[i].h != h; i++)
         ;
     return i;
+}
+
+/* ---- The layer (L substages) ------------------------------------------------------------------------------------ */
+
+/* The hook at 0x60393879 (thunks.s) reads these through their uncached address: [0] the job h whose reduction takes our
+ * size, 0 - none; [1] {u16 w, u16 h}, read by the firmware through a0. The step writes them on CPU 0 right before its call
+ * of 0x603937f8 and clears [0] right after; the hook runs inside that call, in the same task */
+u32 drv_optics_hook[16] __attribute__((aligned(64), section(".data.cpu_shared")));
+
+static volatile u32 *op_hook(void)
+{
+    return (volatile u32 *)((u32)drv_optics_hook + DRV_UNCACHED);
+}
+
+/* The entry at k of the job's list put to fn (the executor reads fn when it gets there) */
+static void op_put(u8 *h, u32 k, u32 fn)
+{
+    if (k < STEPS) {
+        *(u32 *)(h + H_STEPS + 12 * k) = fn;
+        *(u32 *)(h + H_STEPS + 12 * k + 4) = 0;
+        *(u32 *)(h + H_STEPS + 12 * k + STEP_PENDING) = 0;
+    }
+}
+
+/* The chain left out (step k is ours): PAIR - the firmware's CPU step that only waits in place of 0x603932cb (so that it
+ * makes no reduction of its own and no 0x1061), the plain pass to the outputs in place of 0x603934ba; 403 - the plain pass
+ * in place of our last step. Only entries that are the ones W put there */
+static void op_fallback(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 k)
+{
+    if (r->route == DRV_OPTICS_PAIR) {
+        if (k + 2 < STEPS && *(const u32 *)(h + H_STEPS + 12 * (k + 1)) == STEP_SF_UP &&
+            *(const u32 *)(h + H_STEPS + 12 * (k + 2)) == STEP_SF_OUT) {
+            op_put(h, k + 1, STEP_STOCK);
+            op_put(h, k + 2, STEP_OUT);
+        }
+    } else if (k + 1 < STEPS && *(const u32 *)(h + H_STEPS + 12 * (k + 1)) == (u32)drv_tramp_optics_final) {
+        op_put(h, k + 1, STEP_OUT);
+    }
+    r->fallback = 1;
+    o->fallbacks++;
+    op_crumb(r->job, r->sub, P_FINAL);
+}
+
+/* The layer's size for a picture W x H: the configured width, the height by the aspect */
+static u32 op_layer_size(volatile op_t *o, u32 W, u32 H)
+{
+    u32 lw = o->cfg.width, lh;
+
+    lh = W ? (lw * H + W / 2) / W : 0;
+    if (lh < LAYER_MIN)
+        lh = LAYER_MIN;
+    return lw | lh << 16;
+}
+
+/* The step's part from L0 on (the job task, after the wait for the development's pass and the checks of the slots and
+ * the task): the picture, our reduction, the worker. Any failure: the chain left out */
+static void op_layer_step(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
+{
+    const u8 *s;
+    volatile u32 *hk = op_hook();
+    u32 k = r->step & 0xff, i, d, sub = r->sub, w, hh, pitch, len, ri;
+
+    r->route = o->cfg.route;
+    ri = op_row(o, (u32)h);
+    if (ri < ROWS) {
+        o->row[ri].layer = 0;
+        o->row[ri].rec = (u32)r;
+    }
+    if (wait_rc) {
+        r->err = OE_WAIT;
+        r->detail = wait_rc;
+        goto fail;
+    }
+    if (r->i_frame >= SLOTS) {
+        r->err = OE_NOBUF;
+        r->detail = r->i_frame;
+        goto fail;
+    }
+    s = h + H_SLOTS + SLOT_SIZE * r->i_frame;
+    r->bus = *(const u32 *)(s + SL_BUS);
+    r->err = op_frame_check(s, &d);
+    if (r->err) {
+        r->detail = d;
+        goto fail;
+    }
+    r->len = *(const u32 *)(s + SL_LEN) - (r->bus - *(const u32 *)(s + SL_ALLOC));
+    r->pitch = *(const u16 *)(s + SL_PITCH);
+    r->width = *(const u16 *)(s + SL_W);
+    r->height = *(const u16 *)(s + SL_H);
+    if (sub == DRV_OPTICS_L0 && r->route == DRV_OPTICS_PAIR)
+        goto ok;                            /* the firmware's chain as it is: its own reduction in 0x603932cb */
+    if (r->i_small < SLOTS) {
+        r->err = OE_BUFFER;                 /* a small frame there already: not ours */
+        r->detail = r->i_small;
+        goto fail;
+    }
+    if (sub >= DRV_OPTICS_L1) {
+        r->l_asked = op_layer_size(o, r->width, r->height);
+        hk[1] = r->l_asked;
+        hk[0] = (u32)h;
+    }
+    op_crumb(r->job, sub, P_DOWN);
+    i = drv_ticks();
+    r->down_rc = drv_fw_sf_down(h) & 0xffff;
+    r->t_down = drv_ticks_since(i);
+    hk[0] = 0;
+    op_crumb(r->job, sub, P_DOWN_END);
+    if (r->down_rc >= SLOTS) {
+        r->err = OE_DOWN;
+        r->detail = r->down_rc;
+        goto fail;
+    }
+    s = h + H_SLOTS + SLOT_SIZE * r->down_rc;
+    r->l_bus = *(const u32 *)(s + SL_BUS);
+    w = *(const u16 *)(s + SL_W);
+    hh = *(const u16 *)(s + SL_H);
+    pitch = *(const u16 *)(s + SL_PITCH);
+    len = *(const u32 *)(s + SL_LEN);
+    r->l_wh = w | hh << 16;
+    r->l_pitch = pitch;
+    r->l_len = len;
+    r->detail = *(const u16 *)(s + SL_FORMAT);
+    if (*(const u32 *)(s + SL_TYPE) != BUF_SMALL || r->detail != FMT_LAYER || !w || !hh || pitch < w ||
+        (r->l_asked && r->l_wh != r->l_asked) || (r->l_bus & 3) || r->l_bus < *(const u32 *)(s + SL_ALLOC) ||
+        len < pitch * 4 * hh || w > LAYER_MAX || hh > LAYER_MAX) {
+        r->err = OE_LAYER;                  /* detail: the format */
+        goto fail;
+    }
+    r->l_kind = op_bus_kind(r->l_bus, pitch * 4 * hh);
+    if (r->l_kind == OP_BUS_BAD) {
+        r->err = OE_ADDR;
+        r->detail = r->l_bus;
+        goto fail;
+    }
+    if (sub >= DRV_OPTICS_L1) {
+        op_low(r);
+        op_delegate(o, r, h);               /* the worker: from here on it may touch the layer and the picture */
+        if (r->err || (r->w_state & (OW_LATE | OW_ABANDON | OW_CANCEL))) {
+            if (!r->err)
+                r->err = OE_STOPPED;
+            goto fail;
+        }
+    }
+ok:
+    if (ri < ROWS && o->row[ri].h == (u32)h)
+        o->row[ri].layer = 1;
+    return;
+fail:
+    op_fallback(o, r, h, k);
+}
+
+/* The window (or the direct address) to [bus, bus + len): the base to address bus by, 0 - none (r->err set). *win: the
+ * window to release, 0 - none */
+static u32 op_map(volatile op_rec_t *r, u32 bus, u32 len, u32 *win)
+{
+    u32 kind = op_bus_kind(bus, len), w;
+
+    *win = 0;
+    if (kind == OP_BUS_DIRECT)
+        return op_direct(bus);
+    if (kind != OP_BUS_WINDOW) {
+        r->err = OE_ADDR;
+        r->detail = bus;
+        return 0;
+    }
+    w = drv_fw_win_map(bus, WIN_NOWAIT);
+    r->maps++;
+    if (!w) {
+        r->err = OE_MAP;
+        r->detail = bus;
+        return 0;
+    }
+    if (!op_win_ok(bus, w)) {
+        drv_fw_win_unmap(w);
+        r->err = OE_WIN;
+        r->detail = w;
+        return 0;
+    }
+    *win = w;
+    return w;
+}
+
+static void op_unmap(volatile op_rec_t *r, u32 win)
+{
+    if (win && !drv_fw_win_unmap(win))
+        r->unmaps_bad++;
+}
+
+/* The planes in the work buffer (cached, CPU 0 only); 0 - the layer does not fit it */
+static int op_planes(volatile op_t *o, ol_t *L, u32 lw, u32 lh)
+{
+    u8 *b = (u8 *)o->wbuf;
+    u32 n = lw * lh, m = lw > lh ? lw : lh;
+
+    if (!b || 512 + OL_ENC + 6 * n + 2 * (m + 2) + n + lh + lw + 64 > o->wsize)
+        return 0;
+    L->lw = lw;
+    L->lh = lh;
+    L->lin = (const u16 *)b;
+    b += 512;
+    L->enc = b;
+    b += OL_ENC;
+    L->pb = (u16 *)b;
+    b += 2 * n;
+    L->ph = (u16 *)b;
+    b += 2 * n;
+    L->pc = (u16 *)b;
+    b += 2 * n;
+    L->tmp = (u16 *)b;
+    b += 2 * (m + 2);
+    L->y = b;
+    b += n;
+    L->nrow = b;
+    b += lh;
+    L->cwp = b;
+    return 1;
+}
+
+/* The picture's rows read into the sources (L4, [optics] read): passes of rows at offsets in the cells' height by bit
+ * reversal, so that wherever the time runs out the rows read are spread evenly; in a pass the picture's two banks of the
+ * window one after the other (one map each), each with its share of the time left, its rows of cells in an interleaved
+ * order. Through the window past the cache, or through its cached view (the cache written back and dropped before and
+ * after). The rows of cells no row reached take the layer's own Y (ol_sources) */
+static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const ol_par_t *P, pace_t *p)
+{
+    u32 W = r->width, H = r->height, rb = r->pitch * 2, lw = L->lw, lh = L->lh, chmin, j, off, bank, b0, b1, rows, left;
+    u32 t0 = drv_ticks(), budget = o->cfg.read_us, done = 0, slice, ts, cy, y, bus, win, base, q, k, cached = o->cfg.cached;
+    if (ol_columns(L->cwp, W, lw)) {
+        r->f_err = 1;
+        return;
+    }
+    L->shift = ol_read_shift(L->cwp, lw, 16);
+    chmin = H / lh;
+    b0 = r->bus >> 27;
+    b1 = (r->bus + rb * (H - 1) + 2 * W - 1) >> 27;
+    for (j = 0; j < 16 && chmin; j++) {
+        off = ol_bitrev4(j) * chmin / 16;
+        if (off < 32) {
+            if (done >> off & 1)
+                continue;
+            done |= 1u << off;
+        }
+        r->f_passes++;
+        left = 0;                           /* the pass's rows still to read, all banks */
+        for (cy = 0; cy < lh; cy++)
+            if (cy * H / lh + off < H)
+                left++;
+        for (bank = b0; bank <= b1; bank++) {
+            if (drv_ticks_since(t0) >= budget)
+                goto out;
+            for (cy = 0, rows = 0; cy < lh; cy++) {
+                y = cy * H / lh + off;
+                bus = r->bus + y * rb;
+                if (y < H && bus >> 27 == bank && (bus + 2 * W - 1) >> 27 == bank)
+                    rows++;
+            }
+            if (!rows)
+                continue;
+            slice = (budget - drv_ticks_since(t0)) / left * rows;
+            left -= rows;
+            for (cy = 0; cy < lh; cy++) {   /* the bank's first row: its window */
+                bus = r->bus + (cy * H / lh + off) * rb;
+                if (bus >> 27 == bank)
+                    break;
+            }
+            base = op_map(r, bus, 2 * W, &win);
+            r->f_maps++;
+            if (!base) {
+                r->f_err = 2;
+                r->err = 0;                 /* the read only: the layer goes on from its own Y */
+                goto out;
+            }
+            base = win ? base & ~OP_BANK_MASK : 0;   /* a window shows the whole bank; 0: the CPU's own memory */
+            if (cached)
+                drv_fw_cache_flush();
+            ts = drv_ticks();
+            for (q = 0; q < 4; q++) {       /* the rows of cells 0, 4, 8, ..., then 2, 6, ..., 1, 5, ..., 3, 7, ... */
+                for (cy = (q == 1 ? 2 : q == 2 ? 1 : q); cy < lh; cy += 4) {
+                    y = cy * H / lh + off;
+                    bus = r->bus + y * rb;
+                    if (y >= H || bus >> 27 != bank || (bus + 2 * W - 1) >> 27 != bank)
+                        continue;
+                    if (drv_ticks_since(ts) >= slice || op_pace(p))
+                        goto bank_end;
+                    k = base ? base | (bus & OP_BANK_MASK) : op_direct(bus);
+                    ol_read_row(L, P, (const volatile u32 *)(cached ? k - OP_UNCACHED : k), cy);
+                    r->f_rows++;
+                }
+            }
+bank_end:
+            if (cached)
+                drv_fw_cache_flush();       /* no line of the picture stays in the cache */
+            op_unmap(r, win);
+            if (p->stop && (p->stop[0] | p->stop[1]))
+                goto out;
+        }
+    }
+out:
+    for (k = 0; k < lh; k++)
+        if (L->nrow[k])
+            r->f_cells++;
+    r->f_us = drv_ticks_since(t0);
+}
+
+/* The worker's part from L1 on: the layer read (L1: its words' statistics), written neutral (L2), the pattern (L3), or
+ * the effect (L4). The stop and abandon words between rows: nothing of the layer or the picture touched after either */
+static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
+{
+    ol_t L;
+    ol_par_t P;
+    ol_lanes_t ln;
+    u32 lw = r->l_wh & 0xffff, lh = r->l_wh >> 16, lp = r->l_pitch * 4, sub = r->sub, x, yy, i, w, base, win, t, fl;
+    volatile u32 *row;
+
+    op_crumb(r->job, sub, P_LAYER);
+    P.py = o->order & 0xff;
+    P.pcb = o->order >> 8 & 0xff;
+    P.pcr = o->order >> 16 & 0xff;
+    r->order = o->order;
+    if (sub == DRV_OPTICS_L2 || sub == DRV_OPTICS_L3) {
+        t = drv_ticks();
+        base = op_map(r, r->l_bus, lp * lh, &win);
+        if (!base)
+            goto out;
+        for (yy = 0; yy < lh && !op_pace(p); yy++) {
+            row = (volatile u32 *)(base + yy * lp);
+            for (x = 0; x < lw; x++)
+                row[x] = sub == DRV_OPTICS_L2 ? ol_neutral(&P) : ol_pattern(&P, x, lw);
+        }
+        drv_fw_cache_flush();               /* the bus's write buffers before the next pass reads the layer */
+        op_unmap(r, win);
+        r->t_lwrite = drv_ticks_since(t);
+        if (yy < lh)
+            r->err = OE_STOPPED;
+        goto out;
+    }
+    if (!op_planes(o, &L, lw, lh)) {
+        r->err = OE_LAYER;
+        r->detail = lw | lh << 16;
+        goto out;
+    }
+    drv_fw_cache_flush();                   /* no old line over the work buffer (its cached view, CPU 0 alone) */
+    for (i = 0; i < 128; i++)
+        ((u32 *)L.lin)[i] = ((const volatile u32 *)o->lin)[i];
+    for (i = 0; i < OL_ENC / 4; i++)
+        ((u32 *)L.enc)[i] = ((const volatile u32 *)o->enc)[i];
+    t = drv_ticks();
+    base = op_map(r, r->l_bus, lp * lh, &win);
+    if (!base)
+        goto out;
+    ol_lanes_init(&ln);
+    for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++) {
+        row = (volatile u32 *)(base + yy * lp);
+        for (x = 0; x < lw; x++, i++) {
+            w = row[x];
+            if (i < 16)
+                r->head[i] = w;
+            if (sub == DRV_OPTICS_L1)
+                ol_lanes_add(&ln, w);
+            L.y[i] = (u8)(w >> (8 * P.py));
+        }
+    }
+    op_unmap(r, win);
+    r->t_lread = drv_ticks_since(t);
+    if (yy < lh) {
+        r->err = OE_STOPPED;
+        goto out;
+    }
+    if (sub == DRV_OPTICS_L1) {
+        r->lanes[0] = ln.n;
+        for (i = 0; i < OL_LANES; i++) {
+            r->lanes[1 + i] = ln.min[i];
+            r->lanes[1 + OL_LANES + i] = ln.max[i];
+            r->lanes[1 + 2 * OL_LANES + i] = ln.sum[i];
+            r->lanes[1 + 3 * OL_LANES + i] = ln.sq[i];
+        }
+        goto out;
+    }
+    /* L4: the effect */
+    fl = ol_floor_sigma(r->width, lw);
+    P.tb = L.lin[o->cfg.tb > 255 ? 255 : o->cfg.tb];
+    P.th = L.lin[o->cfg.th > 255 ? 255 : o->cfg.th];
+    P.sb1 = r->sig[0] = ol_cpu_sigma(o->cfg.sb & 0xffff, fl, r->width, lw);
+    P.sb2 = r->sig[1] = ol_cpu_sigma(o->cfg.sb >> 16, fl, r->width, lw);
+    P.mixb = o->cfg.mixb;
+    P.sh1 = r->sig[2] = ol_cpu_sigma(o->cfg.sh & 0xffff, fl, r->width, lw);
+    P.sh2 = r->sig[3] = ol_cpu_sigma(o->cfg.sh >> 16, fl, r->width, lw);
+    P.mixh = o->cfg.mixh;
+    P.gb = o->cfg.gb;
+    P.gh = o->cfg.gh;
+    P.dark = o->cfg.dark;
+    P.hcb = o->cfg.hcb;
+    P.hcr = o->cfg.hcr;
+    for (i = 0; i < lw * lh; i++)
+        L.pb[i] = L.ph[i] = 0;
+    for (i = 0; i < lh; i++)
+        L.nrow[i] = 0;
+    if (o->cfg.read && (P.gb || P.gh))
+        op_frame_read(o, r, &L, &P, p);
+    if (p->stop && (p->stop[0] | p->stop[1])) {
+        r->err = OE_STOPPED;
+        goto out;
+    }
+    t = drv_ticks();
+    ol_sources(&L, &P);
+    if (P.gb)
+        ol_blur2(&L, L.pb, P.sb1, P.sb2, P.mixb);
+    op_pace(p);
+    if (P.gh)
+        ol_blur2(&L, L.ph, P.sh1, P.sh2, P.mixh);
+    r->t_calc = drv_ticks_since(t);
+    if (op_pace(p)) {
+        r->err = OE_STOPPED;
+        goto out;
+    }
+    t = drv_ticks();
+    base = op_map(r, r->l_bus, lp * lh, &win);
+    if (!base)
+        goto out;
+    for (yy = 0, i = 0; yy < lh; yy++) {
+        if (p->stop && (p->stop[0] | p->stop[1]))
+            break;
+        row = (volatile u32 *)(base + yy * lp);
+        for (x = 0; x < lw; x++, i++)
+            row[x] = ol_word(&L, &P, i);
+    }
+    drv_fw_cache_flush();
+    op_unmap(r, win);
+    r->t_lwrite = drv_ticks_since(t);
+    if (yy < lh)
+        r->err = OE_STOPPED;
+out:
+    op_crumb(r->job, sub, P_LAYER_END);
+}
+
+/* The blend hook's part (graindrv.c's A, any CPU, after the image of a pass's blend was built): for the blend of our job's
+ * layer from L2 on - case 11 (PAIR: input A the picture, B the enlarged layer) or 12 (403: A the small layer enlarged in
+ * the pass, B the picture) - the picture's gains 1024 and the layer's LAYER_GAIN in Y and chroma: the sum. Reads the
+ * arena block (uncached), ctx, request R and the image as the grain's part does */
+void drv_optics_blend(u8 *ctx, u32 kase)
+{
+    volatile op_t *o = op();
+    volatile op_rec_t *r;
+    const u8 *R;
+    u8 *img;
+    u32 i, h, code, c = kase & 0xff, cpu, gl = LAYER_GAIN | LAYER_GAIN << 16;
+
+    if (!o || !o->layer_on || !ctx || (c != CASE_402 && c != CASE_403))
+        return;
+    R = *(const u8 **)(ctx + CTX_B);
+    img = *(u8 **)(ctx + CTX_IMAGE);
+    if (!R || !img || R[R_KIND] != 3 || *(const u16 *)(R + R_STAGE) != STAGE_F005)
+        return;
+    code = *(const u16 *)(R + R_CODE);
+    if (!(c == CASE_402 && code == CODE_402 && o->cfg.route == DRV_OPTICS_PAIR) &&
+        !(c == CASE_403 && code == CODE_403 && o->cfg.route == DRV_OPTICS_403))
+        return;
+    h = (u32)R - H_B;
+    i = op_row(o, h);
+    if (i == ROWS || o->row[i].sub < DRV_OPTICS_L2 || !o->row[i].layer)
+        return;
+    img += IMG_BLEND;
+    if ((u32)img >= GUARD_LO && (u32)img < GUARD_HI)
+        return;                             /* never seen; a cached write there would stop the camera */
+    if (c == CASE_402) {
+        *(u32 *)(img + BL_GAIN_A) = GAIN_ONE;
+        *(u32 *)(img + BL_GAIN_A2) = 1024;
+        *(u32 *)(img + BL_GAIN_B) = gl;
+        *(u32 *)(img + BL_GAIN_B2) = LAYER_GAIN;
+    } else {
+        *(u32 *)(img + BL_GAIN_A) = gl;
+        *(u32 *)(img + BL_GAIN_A2) = LAYER_GAIN;
+        *(u32 *)(img + BL_GAIN_B) = GAIN_ONE;
+        *(u32 *)(img + BL_GAIN_B2) = 1024;
+    }
+    cpu = drv_cpu();
+    if (cpu < CPUS)
+        o->blends[cpu][c == CASE_403]++;
+    r = (volatile op_rec_t *)o->row[i].rec;
+    if (r)
+        r->blend_set++;
+}
+
+/* Our last step for 403 (thunks.s: drv_tramp_optics_final, by the executor's calls; the job task): as the firmware's
+ * 0x603934ba - the dependency on the pass of the step before (its +8, then 0), the pass to the outputs 0x6038c50f, our
+ * +8 the new pass - but with the small frame as the input and the callback 0x6039379e (0x403: enlarge and blend in one
+ * pass). Without a small frame: the plain pass's input and callback (0x60391b23's). d0: 0, or the firmware's code */
+u32 drv_optics_final(u8 *h)
+{
+    u32 k = *(const u16 *)(h + H_STEP), idx, cb = CB_403, dep = 0, rc;
+
+    idx = drv_fw_job_buf(h, BUF_SMALL) & 0xffff;
+    if (idx >= SLOTS) {
+        idx = drv_fw_job_buf(h, BUF_FRAME) & 0xffff;
+        cb = CB_PLAIN;
+        if (idx >= SLOTS)
+            return E_NO_BUFFER;
+    }
+    if (k > 0 && k <= STEPS) {
+        dep = *(const u32 *)(h + H_STEPS + 12 * (k - 1) + STEP_PENDING);
+        *(u32 *)(h + H_STEPS + 12 * (k - 1) + STEP_PENDING) = 0;
+    }
+    rc = drv_fw_xfer(h, idx, cb, &dep) & 0xffff;
+    if (rc)
+        return rc;
+    if (k < STEPS)
+        *(u32 *)(h + H_STEPS + 12 * k + STEP_PENDING) = dep;
+    return 0;
 }
 
 /* The step (thunks.s: drv_tramp_optics_step, by the step executor's calls; any CPU, the firmware's job task). Its result
@@ -871,18 +1486,23 @@ u32 drv_optics_step(u8 *h)
     return 0;
 }
 
-/* W (graindrv.c, CPU 0), after the development 0x901 of our job h: the step to put into the list, or 0 - none (no probe,
- * substage N, or no room - `room` 0 - for a step, the pass to the outputs and the selector's step). The job gets a row
- * with the substage in force (also at N: H3 counts the job) */
-u32 drv_optics_list(u8 *h, int room)
+/* W (graindrv.c, CPU 0), after the development 0x901 of our job h: the steps after it into out[] - ours, then for the
+ * layer's substages the chain (PAIR: 0x603932cb, 0x603934ba; 403: our last step) - their number, 0 - none (no probe or
+ * layer, substage N, or no room: `room` entries are free before the selector's step). Without the chain the caller puts
+ * the plain pass to the outputs after them. The job gets a row with the substage in force (also at N: H3 counts the
+ * job) */
+u32 drv_optics_list(u8 *h, u32 room, u32 *out)
 {
     volatile op_t *o = op();
-    u32 i, sub;
+    u32 i, sub, n;
 
     if (!o || !h)
         return 0;
     sub = o->sub;
-    if (sub != DRV_OPTICS_N && !room) {
+    if (sub >= DRV_OPTICS_L0 && !o->layer_on)
+        sub = DRV_OPTICS_N;                 /* the layer not set up (drv_optics_layer failed): no step */
+    n = sub < DRV_OPTICS_L0 ? 2 : o->cfg.route == DRV_OPTICS_PAIR ? 3 : 2;   /* with the plain pass after ours */
+    if (sub != DRV_OPTICS_N && room < n) {
         o->noroom++;
         return 0;
     }
@@ -895,13 +1515,24 @@ u32 drv_optics_list(u8 *h, int room)
     o->row[i].h = 0;
     o->row[i].sub = sub;
     o->row[i].job = ++o->wl;
+    o->row[i].layer = 0;
+    o->row[i].rec = 0;
     o->row[i].h = (u32)h;
     crumb()[CR_LISTED] = o->wl;
     op_crumb(o->wl, sub, P_LISTED);
     if (sub == DRV_OPTICS_N)
         return 0;
     o->listed++;
-    return sub == DRV_OPTICS_A0 ? STEP_STOCK : (u32)drv_tramp_optics_step;
+    out[0] = sub == DRV_OPTICS_A0 ? STEP_STOCK : (u32)drv_tramp_optics_step;
+    if (sub < DRV_OPTICS_L0)
+        return 1;
+    if (o->cfg.route == DRV_OPTICS_PAIR) {
+        out[1] = STEP_SF_UP;
+        out[2] = STEP_SF_OUT;
+        return 3;
+    }
+    out[1] = (u32)drv_tramp_optics_final;
+    return 2;
 }
 
 /* H3 (graindrv.c, any CPU): our job h ended - counted by its substage, its row freed */
@@ -938,8 +1569,8 @@ static int install(u32 level)
     volatile op_t *o;
     u32 i, k;
 
-    if (level < 1 || level > 3)
-        return 1;
+    if (level > 3)
+        return 1;                           /* 0: the layer alone (drv_optics_layer), no probe's level */
     for (i = 0; i < 7; i++)
         for (k = 0; k < 4; k++)
             if (*(volatile u8 *)(fn[i].addr + k + DRV_UNCACHED) != fn[i].b[k])
@@ -959,6 +1590,70 @@ int drv_optics_install(u32 level)
     if (install_rc < 0)
         install_rc = install(level);
     return install_rc;
+}
+
+void drv_tramp_optics_size(void);           /* thunks.s: the hook at 0x60393879 */
+#define SIZE_SITE 0x60393879                /* in 0x603937f8: a0 -> {w, h} of the small frame from 0x6037eb7a, then the
+                                               format 0x305 into its descriptor (mov 773,d0; movhu d0,(8,a2)) */
+
+/* Core task, once, after drv_optics_install: the layer's settings, curves, work buffer and the size hook. 0, or a code:
+ * 1 bad settings or no install, 2 no memory, 3 the site not as expected, 10 + a code of drv_code_jump, 20 + i: the
+ * firmware function i not as expected */
+int drv_optics_layer(const drv_optics_layer_cfg *c)
+{
+    static const u8 size_site[5] = {0x2c, 0x05, 0x03, 0xf8, 0x72};    /* mov 773,d0; movhu d0,(8,a2) (+ 0x08) */
+    static const struct {
+        u32 addr;
+        u8 b[4];
+    } fn[5] = {
+        {0x603937f8, {0xf1, 0xd3, 0x2c, 0x60}},   /* the reduction: mov a0,d3; mov 4192,d0 */
+        {0x6038c50f, {0xf1, 0xe6, 0xf1, 0xd6}},   /* the pass to the outputs: mov d1,a2; mov a1,d2 */
+        {0x603932cb, {0xcf, 0xb0, 0xf8, 0xfe}},   /* the enlarging step: movm [d2,a2,a3],(sp); add -16,sp */
+        {0x603934ba, {0xcf, 0xb0, 0xf8, 0xfe}},   /* the blending pass to the outputs: movm ...; add -8,sp */
+        {0x6039379e, {0xcf, 0xb0, 0xf8, 0xfe}},   /* the callback of 0x403: movm ...; add -4,sp */
+    };
+    static int rc = -1;
+    volatile op_t *o = op();
+    u32 i, k, lw, sz;
+    u8 *b;
+
+    if (rc >= 0)
+        return rc;
+    if (!o || !c || (c->route != DRV_OPTICS_PAIR && c->route != DRV_OPTICS_403) || c->width < LAYER_MIN ||
+        c->width > LAYER_MAX)
+        return rc = 1;
+    for (i = 0; i < 5; i++)
+        for (k = 0; k < 4; k++)
+            if (*(volatile u8 *)(fn[i].addr + k + DRV_UNCACHED) != fn[i].b[k])
+                return rc = 20 + i;
+    if (*(volatile u8 *)(SIZE_SITE + 5 + DRV_UNCACHED) != 0x08)
+        return rc = 3;
+    lw = c->width;
+    sz = 512 + OL_ENC + 7 * lw * lw + 2 * (lw + 2) + 2 * lw + 64;   /* the planes of a square picture (the largest) */
+    b = mem_alloc_for(MEM_OWNER_CORE, sz, MEM_LINES);
+    if (!b)
+        return rc = 2;
+    mem_copy((void *)&o->cfg, c, sizeof(*c));
+    ol_luts(c->gamma, (u16 *)o->lin, (u8 *)o->enc);
+    o->order_auto = c->order == DRV_OPTICS_ORDER_AUTO;
+    o->order = o->order_auto ? 0 | 1u << 8 | 2u << 16 : c->order;
+    o->wbuf = (u32)b - DRV_UNCACHED;       /* the cached alias: the worker's alone, on CPU 0 */
+    o->wsize = sz;
+    k = drv_code_jump(SIZE_SITE, size_site, (void *)drv_tramp_optics_size);
+    if (k)
+        return rc = 10 + (int)k;
+    o->layer_on = 1;
+    return rc = 0;
+}
+
+/* Core task: the layer's state for the log at start: the transport's smallest sigma for a picture W wide, the work
+ * buffer's bytes */
+u32 drv_optics_layer_floor(u32 W, u32 *wsize)
+{
+    volatile op_t *o = op();
+
+    *wsize = o ? o->wsize : 0;
+    return o && o->layer_on ? ol_floor_sigma(W, o->cfg.width) : 0;
 }
 
 /* Core task: the substage of the jobs listed from now on */
@@ -1112,7 +1807,9 @@ static const char *op_err(u32 e)
                                            "picture buffer not as expected", "address out of the known ranges",
                                            "no window (busy or refused)", "window not the expected one",
                                            "time budget used up", "not the task REC_IMAGE (0x20)",
-                                           "no worker task"};
+                                           "no worker task", "no small frame from the reduction",
+                                           "small frame not as expected", "the worker stopped or was late",
+                                           "a small frame there already"};
 
     return e < OE_N ? name[e] : "?";
 }
@@ -1120,7 +1817,8 @@ static const char *op_err(u32 e)
 /* Core task: names for the log */
 const char *drv_optics_sub_name(u32 sub)
 {
-    static const char *const name[SUBS] = {"N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full"};
+    static const char *const name[SUBS] = {"N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full",
+                                           "L0", "L1", "L2", "L3", "L4"};
 
     return sub < SUBS ? name[sub] : "?";
 }
@@ -1133,7 +1831,9 @@ const char *drv_optics_phase(u32 phase)
                                           "cached read begun", "cached read", "stripes begun", "stripes written",
                                           "window release called", "window released", "step returned", "job ended",
                                           "handed to the worker", "worker began", "worker ended",
-                                          "worker late: stop asked", "the step has the worker's answer"};
+                                          "worker late: stop asked", "the step has the worker's answer",
+                                          "reduction called", "reduction returned", "layer work began",
+                                          "layer work ended", "chain left out"};
 
     return phase < P_N ? name[phase] : "?";
 }
@@ -1141,6 +1841,86 @@ const char *drv_optics_phase(u32 phase)
 static u32 op_kbs(u32 bytes, u32 us)
 {
     return us ? (bytes >> 10) * 1000000u / us : 0;
+}
+
+/* sigma Q8 as "u.hh" for the log */
+static u32 op_q8i(u32 v)
+{
+    return v >> 8;
+}
+
+static u32 op_q8f(u32 v)
+{
+    return (v & 0xff) * 100 / 256;
+}
+
+/* Core task: the layer's lines of a job's block */
+static void op_report_layer(volatile op_rec_t *r, u32 n)
+{
+    u32 k, m, v, sd[OL_LANES], mean[OL_LANES];
+
+    log_printf(r->fallback ? OMK_LOG_WARN : OMK_LOG_INFO, "optics: job %u: layer %s, route %s: reduction %u us (d0 %x), small "
+               "frame %ux%u (asked %ux%u) pitch %u, %u bytes at %08x (%s)%s", n, drv_optics_sub_name(r->sub),
+               r->route == DRV_OPTICS_403 ? "403" : "pair", r->t_down, r->down_rc, r->l_wh & 0xffff, r->l_wh >> 16,
+               r->l_asked & 0xffff, r->l_asked >> 16, r->l_pitch, r->l_len, r->l_bus, r->l_kind == OP_BUS_WINDOW ?
+               "window" : r->l_kind == OP_BUS_DIRECT ? "direct" : "-", r->fallback ? "; the chain LEFT OUT: the plain pass "
+               "to the outputs" : "");
+    if (r->sub >= DRV_OPTICS_L1 && r->w_task)
+        log_printf(OMK_LOG_INFO, "optics: job %u: layer read %u us, sources and Gaussians %u us, written %u us; window maps "
+                   "%u (%u not released); bytes Y %u Cb %u Cr %u; blend made additive %u time(s)", n, r->t_lread, r->t_calc,
+                   r->t_lwrite, r->maps, r->unmaps_bad, r->order & 0xff, r->order >> 8 & 0xff, r->order >> 16 & 0xff,
+                   r->blend_set);
+    if (r->sub == DRV_OPTICS_L4 && r->w_task) {
+        log_printf(OMK_LOG_INFO, "optics: job %u: Gaussians in layer pixels: Bloom %u.%02u + %u.%02u, Halation %u.%02u + "
+                   "%u.%02u (after the transport's own)", n, op_q8i(r->sig[0]), op_q8f(r->sig[0]), op_q8i(r->sig[1]),
+                   op_q8f(r->sig[1]), op_q8i(r->sig[2]), op_q8f(r->sig[2]), op_q8i(r->sig[3]), op_q8f(r->sig[3]));
+        log_printf(r->f_err ? OMK_LOG_WARN : OMK_LOG_INFO, "optics: job %u: picture read: %u rows in %u passes, %u of %u rows "
+                   "of cells reached, %u us, %u maps%s", n, r->f_rows, r->f_passes, r->f_cells, r->l_wh >> 16, r->f_us,
+                   r->f_maps, r->f_err == 1 ? " - layer too small for the picture, not read" : r->f_err == 2 ?
+                   " - no window, the rest from the layer" : "");
+    }
+    if (r->sub != DRV_OPTICS_L1 || !r->lanes[0])
+        return;
+    for (k = 0; k < 16; k += 8)
+        log_printf(OMK_LOG_INFO, "optics: job %u: layer words %u..%u: %08x %08x %08x %08x %08x %08x %08x %08x", n, k, k + 7,
+                   r->head[k], r->head[k + 1], r->head[k + 2], r->head[k + 3], r->head[k + 4], r->head[k + 5],
+                   r->head[k + 6], r->head[k + 7]);
+    for (k = 0; k < OL_LANES; k++) {
+        m = r->lanes[1 + 2 * OL_LANES + k] / r->lanes[0];
+        v = r->lanes[1 + 3 * OL_LANES + k] / r->lanes[0] * 256;
+        mean[k] = m;
+        sd[k] = ol_isqrt(v > m * m ? v - m * m : 0);
+    }
+    log_printf(OMK_LOG_INFO, "optics: job %u: layer bytes over %u pixels (min/mean/max, sd): 0 %u/%u/%u %u; 1 %u/%u/%u %u; "
+               "2 %u/%u/%u %u; 3 %u/%u/%u %u", n, r->lanes[0], r->lanes[1], mean[0], r->lanes[5], sd[0], r->lanes[2],
+               mean[1], r->lanes[6], sd[1], r->lanes[3], mean[2], r->lanes[7], sd[2], r->lanes[4], mean[3], r->lanes[8],
+               sd[3]);
+}
+
+/* Core task: [optics] layer_bytes = auto - the byte positions from the first L1 dump (ol_lane_order), for the jobs after */
+static void op_auto_order(volatile op_t *o, volatile op_rec_t *r)
+{
+    ol_lanes_t ln;
+    u32 k, py, pcb, pcr;
+
+    if (!o->order_auto || o->order_set || r->sub != DRV_OPTICS_L1 || !r->lanes[0])
+        return;
+    ln.n = r->lanes[0];
+    for (k = 0; k < OL_LANES; k++) {
+        ln.min[k] = r->lanes[1 + k];
+        ln.max[k] = r->lanes[1 + OL_LANES + k];
+        ln.sum[k] = r->lanes[1 + 2 * OL_LANES + k];
+        ln.sq[k] = r->lanes[1 + 3 * OL_LANES + k];
+    }
+    if (ol_lane_order(&ln, &py, &pcb, &pcr)) {
+        log_printf(OMK_LOG_WARN, "optics: layer_bytes = auto: the dump does not tell the bytes apart; Y %u, Cb %u, Cr %u kept",
+                   o->order & 0xff, o->order >> 8 & 0xff, o->order >> 16 & 0xff);
+        return;
+    }
+    o->order = py | pcb << 8 | pcr << 16;
+    o->order_set = 1;
+    log_printf(OMK_LOG_INFO, "optics: layer_bytes = auto: Y in byte %u, Cb %u, Cr %u (the fourth: the smallest range) - "
+               "for the jobs from now on", py, pcb, pcr);
 }
 
 /* Core task: a job's block in the log */
@@ -1185,6 +1965,10 @@ static void op_report(volatile op_rec_t *r, u32 n)
     if (r->sleep_ms)
         log_printf(OMK_LOG_INFO, "optics: job %u: the worker slept %u ms instead of the loop (%u us)", n, r->sleep_ms,
                    r->loop_us);
+    if (r->sub >= DRV_OPTICS_L0) {
+        op_report_layer(r, n);
+        return;
+    }
     if (!r->kind)
         return;
     log_printf(OMK_LOG_INFO, "optics: job %u: picture %08x (%u bytes) %s %08x, map %u us; uncached read %u bytes in %u us "
@@ -1237,6 +2021,7 @@ void drv_optics_service(drv_optics_info *st)
         if (r->seq != seen + 1)
             break;                          /* still being written: the next report */
         op_report(r, seen + 1);
+        op_auto_order(o, r);
         c.jobs++;
         if (r->c_state == CS_BEGUN || r->c_state == CS_DONE)
             c.cached++;
@@ -1257,6 +2042,20 @@ void drv_optics_service(drv_optics_info *st)
         log_printf(o->w_naps ? OMK_LOG_WARN : OMK_LOG_DEBUG, "optics: worker: %u waits, %u woken with no request (%u at "
                    "once), %u naps, %u requests done, last wait %d", o->w_loops, o->w_empty, o->w_fast, o->w_naps,
                    o->w_count, (int)o->w_rc);
+    }
+    if (o->layer_on) {
+        static u32 blends_seen, fallbacks_seen;
+        u32 b = 0;
+
+        for (k = 0; k < CPUS; k++)
+            b += o->blends[k][0] + o->blends[k][1];
+        if (b != blends_seen || o->fallbacks != fallbacks_seen) {
+            blends_seen = b;
+            fallbacks_seen = o->fallbacks;
+            log_printf(o->fallbacks ? OMK_LOG_WARN : OMK_LOG_DEBUG, "optics: layer: blends made additive %u (cpu 0/1/2 case "
+                       "11: %u %u %u, case 12: %u %u %u); chains left out %u", b, o->blends[0][0], o->blends[1][0],
+                       o->blends[2][0], o->blends[0][1], o->blends[1][1], o->blends[2][1], o->fallbacks);
+        }
     }
     c.armed = o->armed;
     c.listed = o->listed;

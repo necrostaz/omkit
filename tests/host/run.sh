@@ -51,6 +51,14 @@ mkdir "$tmp/schedule"
 out=$("$BIN/test_core" "$tmp/schedule" schedule 2>&1)
 if [ "$out" = ok ]; then pass "core: optics schedule"; else fail "core: optics schedule"; echo "$out" | sed 's/^/        /'; fi
 
+# The optics layer's settings: strengths alone (the jobs get L4, defaults), a schedule of layer substages (route 403,
+# byte positions, warnings)
+for phase in 1 2; do
+    mkdir "$tmp/layer$phase"
+    out=$("$BIN/test_core" "$tmp/layer$phase" layer $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics layer settings $phase"; else fail "core: optics layer settings $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+
 # The test scenario (tests/host/test_shoot.c): its state machine against a simulated camera, by keys and by wifi events
 for path in keys wifi; do
     mkdir "$tmp/shoot_$path"
@@ -142,8 +150,9 @@ if [ "$out" = ok ]; then pass "filmlook edits: the blocks and the pace"; else fa
 
 # The driver's plain C parts (src/platform/om5m2/fw1100): the grain texture's fill by rows against the word-by-word
 # one and the definition; the editors' quarter sine table against the full one it replaced; the optics probe's address
-# checks, sum and stripes; the handing of its work to its worker task (request, answer, stop, the limits)
-for t in test_texfill test_edtrig test_optprobe test_optwork; do
+# checks, sum and stripes; the handing of its work to its worker task (request, answer, stop, the limits); the layer's
+# curves, read, Gaussians (their sigma) and words
+for t in test_texfill test_edtrig test_optprobe test_optwork test_optlayer; do
     if out=$("$BIN/$t" 2>&1) && [ "$out" = ok ]; then pass "driver: ${t#test_}"; else fail "driver: ${t#test_}"; echo "$out" | sed 's/^/        /'; fi
 done
 

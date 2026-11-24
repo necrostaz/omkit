@@ -1085,6 +1085,55 @@ static void test_schedule(void)
     free(t);
 }
 
+/* The optics layer's settings ([optics] bloom, halation, ...; core/optics.c): 1 - strengths without a probe or a
+ * schedule: the jobs get L4, the settings as given and as defaults, the log line; 2 - a schedule of layer substages
+ * without strengths: the layer on, route 403, the byte positions given, a sigma below the transport's warned of */
+extern drv_optics_layer_cfg host_opt_layer;
+
+static void test_layer(int phase)
+{
+    long n;
+    char *t;
+
+    omk_dir(LOG_DIR);
+    write_file("OMKIT.INI", phase == 1 ? "[optics]\nbloom = 5\nhalation = 2\nbloom_sigma = 80\nbloom_sigma2 = 200\n"
+                                         "bloom_mix = 25\nhalation_cb = -50\n" :
+                                         "[optics]\nroute = 403\nlayer_bytes = 120\nlayer_width = 648\n"
+                                         "halation = 1\nhalation_sigma = 10\nschedule = L0, L1, l2, L4\n");
+    CHECK(cfg_load() == 1);
+    log_setup(1, OMK_LOG_INFO);
+    host_prev_ended = 1;
+    host_opt_worker_rc = 0;
+    host_opt_sub = 99;
+    memset(&host_opt_layer, 0, sizeof(host_opt_layer));
+    memset(&host_opt, 0, sizeof(host_opt));
+    optics_setup();
+    CHECK(host_opt_level == 0);
+    if (phase == 1) {
+        CHECK(host_opt_sub == DRV_OPTICS_L4);
+        CHECK(host_opt_layer.route == DRV_OPTICS_PAIR && host_opt_layer.width == 324);
+        CHECK(host_opt_layer.order == DRV_OPTICS_ORDER_AUTO && host_opt_layer.gamma == 220);
+        CHECK(host_opt_layer.tb == 200 && host_opt_layer.th == 225);
+        CHECK(host_opt_layer.sb == (80u | 200u << 16) && host_opt_layer.mixb == 64 && host_opt_layer.sh == 40);
+        CHECK(host_opt_layer.gb == 150 * 256 * 5 / 500 && host_opt_layer.gh == 200 * 256 * 2 / 500);
+        CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 70 * 256 / 100);
+        CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 100000 && host_opt_layer.cached == 0);
+    } else {
+        CHECK(host_opt_sub == DRV_OPTICS_N);    /* the schedule's first entry later */
+        CHECK(host_opt_layer.route == DRV_OPTICS_403 && host_opt_layer.width == 400);   /* 648 clamped to 400 */
+        CHECK(host_opt_layer.order == (1u | 2u << 8 | 0u << 16) && host_opt_layer.gb == 0);
+    }
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &n);
+    CHECK(t && strstr(t, "optics: layer: route"));
+    if (phase == 1)
+        CHECK(t && strstr(t, "optics: probe level 0: a step in the look's stills on the mask route; the stills get L4"));
+    else
+        CHECK(t && strstr(t, "layer_width = 648 out of 42..400") && strstr(t, "Halation sigma 10 px is below the layer's "
+                                                                           "smallest") && strstr(t, "schedule of 4 entries"));
+    free(t);
+}
+
 int main(int argc, char **argv)
 {
     host_dir = argc > 1 ? argv[1] : ".";
@@ -1101,6 +1150,8 @@ int main(int argc, char **argv)
         test_bisect(atoi(argv[3]));
     else if (argc > 2 && !strcmp(argv[2], "schedule"))
         test_schedule();
+    else if (argc > 3 && !strcmp(argv[2], "layer"))
+        test_layer(atoi(argv[3]));
     else {
         test_cfg_template();
         test_log();

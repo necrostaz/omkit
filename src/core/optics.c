@@ -48,6 +48,24 @@
  * debug service's RAM log is the record. After the last entry the jobs keep it. A hang or a reset on a press is the
  * one before it or its own: the log says which entry each press got.
  *
+ * The layer (feature/optics-layer, Bloom and Halation; opticsdrv.c's header, optlayer.h): on when [optics] bloom or
+ * halation is 1..5 or the schedule names a layer substage (L0..L4); the jobs then get L4 (without a schedule). Its
+ * settings, all in [optics]:
+ *   bloom, halation           0..5, the strengths (0 - off)
+ *   route                     pair (the firmware's Soft Focus steps, 0x401 + 0x402) or 403 (our last step, 0x403)
+ *   layer_width               the small layer's width, 42..400 (324: a cell of 16 pixels of 5184)
+ *   layer_bytes               auto, or the bytes of Y, Cb, Cr in a layer word as three digits (012: Y 0, Cb 1, Cr 2)
+ *   gamma                     the curve to linear light, 200..300 (x100)
+ *   bloom_threshold, halation_threshold    codes 0..255 of Y where the glow starts
+ *   bloom_sigma, bloom_sigma2, bloom_mix   the Gaussians in pixels of the picture, the second's weight in percent
+ *   halation_sigma, halation_sigma2, halation_mix
+ *   bloom_gain, halation_gain              the light added at strength 5, percent of the excess
+ *   halation_cb, halation_cr               the halation's colour: Cb, Cr a unit of its Y, percent (signed)
+ *   halation_dark                          less halation on bright places: percent
+ *   read, read_ms, read_cached             the picture's rows read for the sources, the time a job, the cached view
+ * The smallest sigma the transport gives (the ISP's reduction and enlargement) is logged at start; a sigma below it
+ * comes out as it (a warning).
+ *
  * With the debug service on ([debug] enabled), the moments of the layer - a substage or the cached read armed, a
  * substage passed, the worker task made, a job of ours listed or ended (as the core task sees them) - are events of its
  * RAM log (dbg_event): a mark, the watched tasks' states and the window of snapshots after it. */
@@ -62,7 +80,7 @@
 #define BIS_KEY 2                           /* the bisection */
 #define OPT_RETRY_MS 2000                   /* a log or store write that failed: tried again after this */
 #define LEVEL_MAX 3
-#define SUBS DRV_OPTICS_SUBS
+#define SUBS DRV_OPTICS_PROBES                 /* the bisection's substages (the layer's are not in it) */
 #define BIS_DONE SUBS                       /* bis.index after the last substage */
 #define SCHED_MAX 24                        /* entries of [optics] schedule */
 #define LOOP_MAX 100000000u                 /* iterations of a schedule's loop: ~2 s at ~10 ns an instruction */
@@ -283,13 +301,13 @@ static void sch_parse(const char *s)
                 else
                     v = v * 10 + (u32)(word[k] - '0');
         }
-        for (k = 0; k < SUBS && !str_ieq(word, drv_optics_sub_name(k)); k++)
+        for (k = 0; k < DRV_OPTICS_SUBS && !str_ieq(word, drv_optics_sub_name(k)); k++)
             ;
         if (sleep)
             bad |= k != DRV_OPTICS_W1 || !v || v > SLEEP_MAX;
         else if (slash)
             bad |= (k != DRV_OPTICS_C3 && k != DRV_OPTICS_W1 && k != DRV_OPTICS_W2) || v < 10 || v > LOOP_MAX;
-        if (k == SUBS || bad || sch.n == SCHED_MAX) {
+        if (k == DRV_OPTICS_SUBS || bad || sch.n == SCHED_MAX) {
             if (slash)
                 word[i] = '/';
             log_printf(OMK_LOG_WARN, "optics: schedule: '%s' %s - left out", word, sch.n == SCHED_MAX ? "is one too many" :
@@ -330,18 +348,98 @@ static void crumbs(void)
                    w[26] >> 16, w[27] & 0xffff, w[27] >> 16);
 }
 
+/* An [optics] integer clamped to lo..hi (logged when it was out) */
+static int opt_int(const char *key, int def, int lo, int hi)
+{
+    int v = cfg_int("optics", key, def);
+
+    if (v < lo || v > hi) {
+        log_printf(OMK_LOG_WARN, "optics: %s = %d out of %d..%d, %d taken", key, v, lo, hi, v < lo ? lo : hi);
+        v = v < lo ? lo : hi;
+    }
+    return v;
+}
+
+/* The layer's settings; 1 - the layer is on (a strength, or a layer substage in the schedule) */
+static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
+{
+    const char *t;
+    u32 sb, sh, fl, i;
+    int on;
+
+    sb = (u32)opt_int("bloom", 0, 0, 5);
+    sh = (u32)opt_int("halation", 0, 0, 5);
+    for (on = sb || sh, i = 0; schedule[i] && !on; i++)
+        on = (schedule[i] == 'L' || schedule[i] == 'l') && schedule[i + 1] >= '0' && schedule[i + 1] <= '4' &&
+             (!i || schedule[i - 1] == ',' || schedule[i - 1] == ' ');
+    if (!on)
+        return 0;
+    mem_set(c, 0, sizeof(*c));
+    t = cfg_str("optics", "route", "pair");
+    c->route = str_ieq(t, "403") ? DRV_OPTICS_403 : DRV_OPTICS_PAIR;
+    if (!str_ieq(t, "403") && !str_ieq(t, "pair"))
+        log_printf(OMK_LOG_WARN, "optics: route = %s unknown (pair, 403), pair taken", t);
+    c->width = (u32)opt_int("layer_width", 324, 42, 400);
+    t = cfg_str("optics", "layer_bytes", "auto");
+    if (t[0] >= '0' && t[0] <= '3' && t[1] >= '0' && t[1] <= '3' && t[2] >= '0' && t[2] <= '3' && !t[3] &&
+        t[0] != t[1] && t[0] != t[2] && t[1] != t[2])
+        c->order = (u32)(t[0] - '0') | (u32)(t[1] - '0') << 8 | (u32)(t[2] - '0') << 16;
+    else {
+        if (!str_ieq(t, "auto"))
+            log_printf(OMK_LOG_WARN, "optics: layer_bytes = %s: not auto or three different digits 0..3, auto taken", t);
+        c->order = DRV_OPTICS_ORDER_AUTO;
+    }
+    c->gamma = (u32)opt_int("gamma", 220, 200, 300);
+    c->tb = (u32)opt_int("bloom_threshold", 200, 0, 254);
+    c->th = (u32)opt_int("halation_threshold", 225, 0, 254);
+    c->sb = (u32)opt_int("bloom_sigma", 60, 0, 1000) | (u32)opt_int("bloom_sigma2", 0, 0, 1000) << 16;
+    c->sh = (u32)opt_int("halation_sigma", 40, 0, 1000) | (u32)opt_int("halation_sigma2", 0, 0, 1000) << 16;
+    c->mixb = (u32)opt_int("bloom_mix", 0, 0, 100) * 256 / 100;
+    c->mixh = (u32)opt_int("halation_mix", 0, 0, 100) * 256 / 100;
+    c->gb = (u32)opt_int("bloom_gain", 150, 0, 1000) * 256 * sb / 500;
+    c->gh = (u32)opt_int("halation_gain", 200, 0, 1000) * 256 * sh / 500;
+    c->hcb = opt_int("halation_cb", -40, -200, 200) * 256 / 100;
+    c->hcr = opt_int("halation_cr", 70, -200, 200) * 256 / 100;
+    c->dark = (u32)opt_int("halation_dark", 70, 0, 100) * 256 / 100;
+    c->read = (u32)opt_int("read", 1, 0, 1);
+    c->read_us = (u32)opt_int("read_ms", 100, 0, 250) * 1000;
+    c->cached = (u32)opt_int("read_cached", 0, 0, 1);
+    fl = (216 * 5184 + 50 * c->width) / (100 * c->width);   /* optlayer.h's ol_floor_sigma for 5184 */
+    log_printf(OMK_LOG_INFO, "optics: layer: route %s, width %u (cells of %u px; the transport alone blurs by sigma ~%u px), "
+               "bytes %s; Bloom %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5), Halation %u (threshold %u, sigma %u + "
+               "%u at %u%%, gain %u%% at 5, colour Cb %d%% Cr %d%%, dark %u%%); picture read %s, %u ms%s", c->route ==
+               DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width, fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" :
+               t, sb, c->tb, c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, cfg_int("optics", "bloom_gain", 150), sh,
+               c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256, cfg_int("optics", "halation_gain", 200),
+               c->hcb * 100 / 256, c->hcr * 100 / 256, c->dark * 100 / 256, c->read ? "on" : "off", c->read_us / 1000,
+               c->cached ? " through the CACHED view" : "");
+    for (i = 0; i < 4; i++) {
+        u32 v = i == 0 ? c->sb & 0xffff : i == 1 ? c->sb >> 16 : i == 2 ? c->sh & 0xffff : c->sh >> 16;
+
+        if (v && v < fl && (i < 2 ? sb : sh))
+            log_printf(OMK_LOG_WARN, "optics: %s sigma %u px is below the layer's smallest (~%u px at width %u): it comes "
+                       "out ~%u px; a wider layer (layer_width) narrows it - ~%u px at %u", i < 2 ? "Bloom" : "Halation",
+                       v, fl, c->width, fl, (216 * 5184 + 50 * 400) / (100 * 400), 400);
+    }
+    return 1;
+}
+
 /* Boot, after the store and before the modules: the level, the bisection and the store of level 2, the driver's step */
 void optics_setup(void)
 {
-    int lv = cfg_int("optics", "probe", 0), rc, run = cfg_int("optics", "bisect", 0);
+    int lv = cfg_int("optics", "probe", 0), rc, run = cfg_int("optics", "bisect", 0), layer;
     u32 sub = DRV_OPTICS_FULL;
+    drv_optics_layer_cfg lc;
 
-    if (!lv)
-        return;
     if (lv < 0 || lv > LEVEL_MAX) {
         log_printf(OMK_LOG_WARN, "optics: probe = %d out of 0..%u, the probe is off", lv, LEVEL_MAX);
-        return;
+        lv = 0;
     }
+    layer = layer_cfg(&lc, cfg_str("optics", "schedule", ""));
+    if (!lv && !layer)
+        return;
+    if (!lv)
+        sub = DRV_OPTICS_L4;
     op.level = (u32)lv;
     op.worker_test = (u32)cfg_int("optics", "worker_test", 0);
     crumbs();
@@ -369,10 +467,25 @@ void optics_setup(void)
         log_printf(OMK_LOG_ERROR, "optics: the probe's step not installed, code %d", rc);
         return;
     }
+    if (layer) {
+        u32 ws;
+
+        rc = drv_optics_layer(&lc);
+        if (rc) {
+            log_printf(OMK_LOG_ERROR, "optics: the layer not set up, code %d: no Bloom and Halation", rc);
+            if (!lv)
+                return;
+        } else {
+            drv_optics_layer_floor(5184, &ws);
+            log_printf(OMK_LOG_INFO, "optics: layer set up: the size hook in, the worker's buffer %u bytes", ws);
+            if (!run && !sch.n && lv)
+                sub = DRV_OPTICS_L4;        /* a strength with the probe's level: the layer's work */
+        }
+    }
     drv_optics_sub(sub);
     op.on = 1;
     log_printf(OMK_LOG_INFO, "optics: probe level %u: a step in the look's stills on the mask route%s; the stills get %s",
-               op.level, lv == 1 ? "" : lv == 2 ? (op.can_arm ? ", cached read one job an arming" : ", cached read off") :
+               op.level, lv <= 1 ? "" : lv == 2 ? (op.can_arm ? ", cached read one job an arming" : ", cached read off") :
                ", stripes in the picture", drv_optics_sub_name(sub));
 }
 

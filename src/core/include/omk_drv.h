@@ -238,8 +238,11 @@ int drv_grain_route_state(u32 *freed, u32 *live);
  * reports to the log, the counts since install in *st */
 enum {                                      /* the bisection's substages (opticsdrv.c's header), in their order */
     DRV_OPTICS_N, DRV_OPTICS_A0, DRV_OPTICS_A, DRV_OPTICS_B, DRV_OPTICS_C1, DRV_OPTICS_C2, DRV_OPTICS_C3, DRV_OPTICS_W0,
-    DRV_OPTICS_W1, DRV_OPTICS_W2, DRV_OPTICS_D, DRV_OPTICS_E, DRV_OPTICS_F, DRV_OPTICS_FULL, DRV_OPTICS_SUBS
+    DRV_OPTICS_W1, DRV_OPTICS_W2, DRV_OPTICS_D, DRV_OPTICS_E, DRV_OPTICS_F, DRV_OPTICS_FULL,
+    /* the layer's substages (Bloom and Halation, opticsdrv.c's header), after the probe's: not in a bisection */
+    DRV_OPTICS_L0, DRV_OPTICS_L1, DRV_OPTICS_L2, DRV_OPTICS_L3, DRV_OPTICS_L4, DRV_OPTICS_SUBS
 };
+#define DRV_OPTICS_PROBES (DRV_OPTICS_FULL + 1) /* the bisection's substages: N .. FULL */
 #define DRV_OPTICS_TESTS (1u << DRV_OPTICS_C3)  /* tests only: the ones after them do not include them, so a reset there
                                                    does not end the bisection */
 #define DRV_OPTICS_WORKER DRV_OPTICS_W0        /* from this substage on the work is done by the worker task */
@@ -259,6 +262,33 @@ typedef struct {
     u32 ended[DRV_OPTICS_SUBS];             /* our jobs ended (H3), by the substage they were listed with */
 } drv_optics_info;
 int drv_optics_install(u32 level);
+/* The optics layer (Bloom and Halation, feature/optics-layer): its settings, given before drv_optics_install (core task;
+ * the driver keeps a copy, makes its curves and takes its work buffer from the arena). route: DRV_OPTICS_PAIR - the
+ * firmware's Soft Focus pair (enlarge 0x401 into a picture-sized buffer, blend 0x402), DRV_OPTICS_403 - a last step of
+ * ours with the pass that enlarges and blends at once (0x403). 0, or a code (1 bad, 2 no memory) */
+#define DRV_OPTICS_PAIR 1
+#define DRV_OPTICS_403 2
+#define DRV_OPTICS_ORDER_AUTO 0xffffffffu  /* the layer's byte positions guessed from the first dump (substage L1) */
+typedef struct {
+    u32 route;
+    u32 width;                              /* the layer's width, 42..400 (the height by the picture's aspect) */
+    u32 order;                              /* the bytes of Y, Cb, Cr in a layer word: py | pcb << 8 | pcr << 16, or AUTO */
+    u32 gamma;                              /* the curve to linear light, x100 (200..300) */
+    u32 tb, th;                             /* thresholds of Bloom and Halation, codes 0..255 */
+    u32 sb, sh;                             /* their Gaussians: sigma of the first | of the second << 16, pixels of the
+                                               picture (the second 0 - one Gaussian) */
+    u32 mixb, mixh;                         /* the second Gaussian's weight, Q8 */
+    u32 gb, gh;                             /* their gains, Q8 (the strength in them) */
+    u32 dark;                               /* Halation by darkness, Q8 */
+    s32 hcb, hcr;                           /* Halation's colour: Cb, Cr a unit of its Y, Q8 */
+    u32 read;                               /* read the picture's rows for the sources (1) or not */
+    u32 read_us;                            /* the read's time a job */
+    u32 cached;                             /* the read through the window's cached view */
+} drv_optics_layer_cfg;
+int drv_optics_layer(const drv_optics_layer_cfg *c);
+/* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize
+ * the worker's buffer */
+u32 drv_optics_layer_floor(u32 W, u32 *wsize);
 void drv_optics_arm(void);
 void drv_optics_service(drv_optics_info *st);
 /* The bisection (core 1.34): drv_optics_sub - the substage of the jobs listed from now on (after install: N, no step);

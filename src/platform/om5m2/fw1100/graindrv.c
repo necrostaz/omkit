@@ -155,6 +155,7 @@
                                                then 0x6038c50f, as the grain film's last step 0x60391313 does for 0x1010)
                                                with the callback 0x60391516, which does nothing. The ART planner's own
                                                last step after 0x6038cfa5 (P+28 not 0, 0x6038dfb6) */
+#define STEP_SF_OUT 0x603934ba              /* the Soft Focus pass to the outputs (the optics layer's chain, PAIR) */
 #define STEP_M_OUT 0x60391b8f               /* the same pass with the shading callback 0x60391d48: the stock last step
                                                of the monochrome list, from the job flag 0x80000 (0x6038e0a2) */
 #define LIST_DEV 1                          /* the list the planner built (ring detail) */
@@ -285,7 +286,8 @@ void drv_tramp_grain_h2(void);
 void drv_tramp_grain_h3(void);
 void drv_tramp_grain_wl(void);
 void drv_tramp_grain_det(void);
-u32 drv_optics_list(u8 *h, int room);       /* opticsdrv.c: the optics layer's step for a list, 0 - none */
+u32 drv_optics_list(u8 *h, u32 room, u32 *out);    /* opticsdrv.c: the optics layer's steps for a list (at most 3) */
+void drv_optics_blend(u8 *ctx, u32 kase);   /* opticsdrv.c: the layer's blend made additive (cases 11, 12) */
 void drv_optics_ended(u8 *h);               /* opticsdrv.c: our job ended (its substage counted) */
 u32 drv_fw_tex_build(u8 *p, const u16 *params);    /* thunks.s: 0x603a3bdb, the record or 0 */
 void drv_fw_tex_release(u8 *p, u32 rec);           /* thunks.s: 0x603a452a */
@@ -368,7 +370,11 @@ void drv_grain_set(u8 *ctx, u32 kase)
     u32 cpu, e, gn, row = 0, i, sel, ch, *dst;
     int k;
 
-    if (!t || !ctx || (kase & 0xff) != CASE_TEX)   /* the setup tests the low byte (0x6036fc65) */
+    if ((kase & 0xff) != CASE_TEX) {        /* the setup tests the low byte (0x6036fc65) */
+        drv_optics_blend(ctx, kase);        /* the optics layer's blend (Soft Focus' cases 11 and 12) */
+        return;
+    }
+    if (!t || !ctx)
         return;
     B = *(u8 **)(ctx + CTX_B);
     img = *(u8 **)(ctx + CTX_IMAGE);
@@ -690,7 +696,8 @@ void drv_grain_wl_after(u8 *h)
             list |= LIST_MASK;
         if (*(const u32 *)(h + H_STEPS + 12 * k) == STEP_M901)
             list |= LIST_901;
-        if (*(const u32 *)(h + H_STEPS + 12 * k) == STEP_OUT || *(const u32 *)(h + H_STEPS + 12 * k) == STEP_M_OUT)
+        if (*(const u32 *)(h + H_STEPS + 12 * k) == STEP_OUT || *(const u32 *)(h + H_STEPS + 12 * k) == STEP_M_OUT ||
+            *(const u32 *)(h + H_STEPS + 12 * k) == STEP_SF_OUT)
             list |= LIST_OUT;
     }
     /* The monochrome list ends in the buffer 0x1000: both developments get their output from the step (0x6039f787 with
@@ -702,14 +709,18 @@ void drv_grain_wl_after(u8 *h)
      * of key 12 builds. Room for it and for the selector's step */
     if (t->live[i].route != DRV_GRAIN_GF && n && n + 2 <= STEPS && !(list & LIST_OUT) &&
         *(const u32 *)(h + H_STEPS + 12 * (n - 1)) == STEP_M901) {
-        /* The optics layer's step (opticsdrv.c, [optics] probe) goes in first, right after the development 0x901: it
-         * waits for that pass and works on the buffer 0x1000 before the pass to the outputs reads it. Room for it too */
-        k = drv_optics_list(h, n + 3 <= STEPS);
-        if (k) {
-            put_step(h, n++, k);
+        /* The optics layer's steps (opticsdrv.c, [optics]) go in first, right after the development 0x901: its step
+         * waits for that pass and works on the buffer 0x1000 before the pass to the outputs reads it; for the layer
+         * (Bloom, Halation) the chain after it ends with a pass to the outputs of its own. Room for them too, and for
+         * the selector's step */
+        u32 st[3], m = drv_optics_list(h, STEPS - n - 1, st), j;
+
+        for (j = 0; j < m; j++)
+            put_step(h, n++, st[j]);
+        if (m)
             list |= LIST_PROBE;
-        }
-        put_step(h, n++, STEP_OUT);
+        if (m < 2)
+            put_step(h, n++, STEP_OUT);     /* the probe's step alone (or none): the plain pass to the outputs */
         *(u16 *)(h + H_NSTEPS) = n;
         list |= LIST_OUT;
     }
