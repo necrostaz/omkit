@@ -353,7 +353,8 @@ static void test_once(void)
     fclose(f);
     shoot_setup(now_ms());
     CHECK(!exists("SHOOT.RUN"));
-    CHECK(!str_ieq(cfg_str("core", "log", "none"), "off") && str_ieq(cfg_str("shoot", "shots", ""), "1"));
+    CHECK(!str_ieq(cfg_str("core", "log", "none"), "off") && !cfg_str("shoot", "log", 0));
+    CHECK(str_ieq(cfg_str("shoot", "shots", ""), "1"));
     run(60000, 1);
     shoot_status(&si);
     CHECK(si.state == SHOOT_DONE && si.taken == 1 && si.total == 1);

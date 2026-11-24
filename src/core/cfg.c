@@ -75,13 +75,14 @@ static char *trim(char *s, char *e)
     return s;
 }
 
-/* Lines of p[0..len) into the table. only: every key belongs to this section, a header of another one is not understood
- * (the one-shot file); 0: sections as the text has them. Returns the lines not understood */
+/* Lines of p[0..len) into the table. only: every key belongs to this section; a header of another one and the keys under it
+ * are not understood and not kept (the one-shot file); 0: sections as the text has them. Returns the lines not understood */
 static u32 parse(char *p, u32 len, const char *only)
 {
     char *end = p + len, *line, *line_end, *eol, *eq, *s;
     const char *section = only ? only : "";
     u32 n = 0, wrong = 0;
+    int other = 0;                          /* only: under the header of another section */
 
     if (len >= 3 && (u8)p[0] == 0xef && (u8)p[1] == 0xbb && (u8)p[2] == 0xbf)
         p += 3;
@@ -102,13 +103,15 @@ static u32 parse(char *p, u32 len, const char *only)
 
                 if (!only)
                     section = name;
-                if (!only || str_ieq(name, only))   /* the one-shot file: its own section's header only */
+                else
+                    other = !str_ieq(name, only);
+                if (!other)                         /* the one-shot file: its own section's header only */
                     continue;
             }
         } else {
             for (eq = line; *eq && *eq != '='; eq++)
                 ;
-            if (*eq == '=' && eq > line && count < CFG_ENTRIES) {
+            if (*eq == '=' && eq > line && count < CFG_ENTRIES && !other) {
                 entries[count].section = section;
                 entries[count].value = trim(eq + 1, line_end);
                 entries[count].key = trim(line, eq);
