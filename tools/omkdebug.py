@@ -52,6 +52,9 @@ STATES = {1: "RUN", 2: "RDY", 4: "WAI", 8: "SUS", 12: "WAS", 16: "DMT", 0xFF: "G
 WAITS = ["-", "SLP", "DLY", "SEM", "FLG", "SDTQ", "RDTQ", "MBX", "MTX", "SMBF", "RMBF", "CAL", "ACP", "RDV", "MPF", "MPL", "W15"]
 
 
+# The PROPVARIANT union's field (comtypes' generated name; a double underscore name is mangled inside a class)
+PV_UNION = '__MIDL____MIDL_itf_PortableDeviceApi_0001_00000001'
+
 class Refused(Exception):
     pass
 
@@ -137,10 +140,16 @@ def parse_task_dump(b: bytes) -> dict:
 def parse_list(b: bytes) -> list[dict]:
     out = []
     for i in range(0, len(b) - 63, 64):
-        attr, size, t8, t12 = struct.unpack_from("<4I", b, i)
+        attr, size, made, changed = struct.unpack_from("<4I", b, i)
         out.append({"name": b[i + 16:i + 64].split(b"\0")[0].decode("ascii", "replace"), "dir": bool(attr & 0x10),
-                    "size": size, "time": (t8, t12)})
+                    "size": size, "made": dos_time(made), "changed": dos_time(changed)})
     return out
+
+
+def dos_time(w: int) -> str:
+    """FAT date << 16 | time -> 'YYYY-MM-DD hh:mm:ss'"""
+    d, t = w >> 16, w & 0xFFFF
+    return f"{1980 + (d >> 9):04d}-{d >> 5 & 15:02d}-{d & 31:02d} {t >> 11:02d}:{t >> 5 & 63:02d}:{(t & 31) * 2:02d}"
 
 
 def wait_name(bit: int) -> str:
@@ -232,7 +241,7 @@ class Camera:
         for i in range(n.value):
             pv = self.api.tag_inner_PROPVARIANT()
             coll._IPortableDevicePropVariantCollection__com_GetAt(i, self.ct.byref(pv))
-            out.append(pv.__MIDL____MIDL_itf_PortableDeviceApi_0001_00000001.ulVal)
+            out.append(getattr(pv, PV_UNION).ulVal)
         return out
 
     def _command(self, cmd: int, opcode=None, params=(), extra=None):
@@ -246,7 +255,7 @@ class Camera:
             for v in params:
                 pv = self.api.tag_inner_PROPVARIANT()
                 pv.vt = 19                  # VT_UI4
-                pv.__MIDL____MIDL_itf_PortableDeviceApi_0001_00000001.ulVal = v & 0xFFFFFFFF
+                getattr(pv, PV_UNION).ulVal = v & 0xFFFFFFFF
                 coll.Add(pv)
             p.SetIPortableDevicePropVariantCollectionValue(self._key(self.MTP_EXT, 1002), coll)
         for f in extra or ():
@@ -513,6 +522,9 @@ def run(cam, a) -> int:
     if a.cmd == "hist":
         code, _, data = cam.get(HIST)
         ok(code, "HIST")
+        if not data:
+            print("the camera keeps no PTP history now (its pointer at 0xa2644f98 is 0)")
+            return 0
         idx = struct.unpack_from("<I", data)[0] if len(data) >= 4 else 0
         print(f"index {idx}")
         for i in range(8, len(data) - 23, 24):
@@ -531,7 +543,7 @@ def run(cam, a) -> int:
         return 0
     if a.cmd == "ls":
         for e in list_dir(cam, a.path):
-            print(f"{'<dir>' if e['dir'] else e['size']:>10} {e['name']}")
+            print(f"{'<dir>' if e['dir'] else e['size']:>10}  {e['changed']}  {e['name']}")
         return 0
     if a.cmd == "get":
         data = read_file(cam, a.path)
