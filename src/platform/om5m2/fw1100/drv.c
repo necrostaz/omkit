@@ -460,6 +460,28 @@ int drv_shutter(u32 key, int down, u32 path)
 /* Media busy flags: the camera's power code waits while (0x61e418f0) = 1 or (0x61e418f4) != 0
  * before sleep. A hypothesis that this is the camera's own card work (a picture being written); core's writes do not set
  * them. Read through the cache on CPU 0, like the firmware */
+/* The firmware's open file (the pointer fopen gives, F = slot + 16 in a pool of 6 slots, (0x62151c98)): +0 u16 1 - in use
+ * (0x606ba8d1), +296 u16 the file's number from the counter (0x62151ec0), new at every fopen (0x606b9b16, 0x606ba8ef). A
+ * mount or an unmount of the card frees every file of the drive without writing anything (0x606b99c4: unmount 0x60698259,
+ * mount 0x6068d81f) and its own check (0x606b9a5e) then refuses the pointer with 0x9414 - until the slot is given to the
+ * next fopen, which takes the freed slot first (LIFO, 0x606b9821). The number tells the two apart. Static reading of
+ * E148 1.1; the refusal - camera, card157 (the PC mode over USB). Read by the core task on CPU 0, where the file task runs */
+u32 drv_file_id(void *fp)
+{
+    const volatile u16 *f = (const volatile u16 *)fp;
+
+    if (!fp || f[0] != 1)
+        return 0;
+    return 0x10000u | f[296 / 2];
+}
+
+/* The volume of drive 0 (C:) mounted: the u16 the file system's mount sets to 1 (0x606983ab) and its unmount to 0
+ * (0x6069829d), the bit 0x10000 of the media state request 0x2000f (0x606961ff); read past the cache, as it is kept */
+int drv_card_mounted(void)
+{
+    return *(const volatile u16 *)0xa26423c8 == 1;
+}
+
 int drv_card_busy(void)
 {
     return *(const volatile u32 *)0x61e418f0 == 1 || *(const volatile u32 *)0x61e418f4 != 0;

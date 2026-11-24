@@ -191,9 +191,21 @@ static void test_log(void)
     log_flush();
     CHECK(host_fopens == before + 1);       /* the new file stays open */
     t = read_file("LOG/CORE.LOG", &m);
-    CHECK(t && strstr(t, " I after the pc mode\r\n") && strstr(t, " I and on\r\n") && strstr(t, "(the open file): opened again"));
+    CHECK(t && strstr(t, " I after the pc mode\r\n") && strstr(t, " I and on\r\n") && strstr(t, "was closed by the firmware (the card was mounted again), opened again"));
     free(t);
+    /* the volume not mounted (USB Storage): nothing is opened or written until it is again */
+    host_unmounted = 1;
+    before = host_fopens;
+    log_close();
+    log_printf(OMK_LOG_INFO, "while unmounted");
+    log_flush();
+    CHECK(host_fopens == before);
+    host_unmounted = 0;
+    log_retry_now();
+    log_flush();
+    CHECK(host_fopens == before + 1);
     t = read_file("LOG/CORE.LOG", &n);      /* the length the later checks count from */
+    CHECK(t && strstr(t, "while unmounted"));
     free(t);
     /* a long line is cut, '~' at the end */
     {

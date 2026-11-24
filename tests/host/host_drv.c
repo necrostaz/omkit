@@ -1,6 +1,7 @@
 /* Driver for testing core on the host: files C:\OMKIT\X live in the HOST_DIR directory, the test sets the time.
  * As on the camera, wb mode does not truncate an existing file. Firmware heap: three classes on top of malloc. */
 #include <stdio.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #ifdef _WIN32
@@ -432,6 +433,18 @@ void drv_prof_prepare(void)
 int drv_prof_take_recent(void)
 {
     return 0;
+}
+
+u32 drv_file_id(void *fp)
+{
+    return fp && !stale(fp, 0) ? 0x10000u | ((u32)(uintptr_t)fp & 0xfff0u) | 1u : 0;
+}
+
+int host_unmounted;                         /* 1 - the volume is not mounted (USB Storage) */
+
+int drv_card_mounted(void)
+{
+    return !host_unmounted;
 }
 
 int drv_card_busy(void)

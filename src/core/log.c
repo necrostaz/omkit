@@ -59,6 +59,9 @@ static int tee_level = OMK_LOG_OFF;
 static char log_path[OMK_PATH_MAX];
 static log_file core_file;
 static void *log_fp;                        /* the open log file, or 0 */
+static u32 log_fid;                         /* its identity at the open (drv_file_id) */
+
+static void check_open(const char *path);
 static u32 fails;                           /* portions a file opened anew did not take, in a row */
 static u32 last_write;                      /* when the last portion was written to it */
 
@@ -271,9 +274,12 @@ static int append(log_file *f, u32 h)
 
     if (f->state == FILE_STOPPED || h == f->done)
         return 1;
+    if (!drv_card_mounted())                /* the card's volume is not mounted now (USB Storage): later */
+        return 0;
     core_card_write(1, f->path);
     for (pass = 0; pass < 2; pass++) {
         n = h - f->done;
+        check_open(f->path);
         fresh = !log_fp;
         if (fresh) {
             if (f->state == FILE_NEW)
@@ -286,6 +292,7 @@ static int append(log_file *f, u32 h)
                     log_printf(OMK_LOG_WARN, "log: cannot open %s: no card, or the card's file module refuses", f->path);
                 return 0;
             }
+            log_fid = drv_file_id(log_fp);
             f->state = FILE_OPEN;
         }
         w = write_ring(log_fp, f->done, n);
@@ -368,9 +375,22 @@ void log_close(void)
     if (!fp)
         return;
     log_fp = 0;
+    if (drv_file_id(fp) != log_fid)         /* the firmware freed it (a mount): not ours to close - the slot may be
+                                               another file's now */
+        return;
     rc = drv_fclose(fp);
     if (rc)
         log_printf(OMK_LOG_WARN, "log: closing %s failed, code %x", log_path, rc);
+}
+
+/* The open file freed by the firmware (the card mounted again - the camera's PC mode): forgotten without fclose and
+ * opened again; a write through it could go to another file that got its slot */
+static void check_open(const char *path)
+{
+    if (log_fp && drv_file_id(log_fp) != log_fid) {
+        log_fp = 0;
+        log_printf(OMK_LOG_INFO, "log: %s was closed by the firmware (the card was mounted again), opened again", path);
+    }
 }
 
 /* Free bytes in the ring now: a writer of many lines (the task dump) waits while it is low, rather than losing lines */

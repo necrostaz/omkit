@@ -258,6 +258,12 @@ void drv_prof_flush(void);
 int drv_prof_mono_matrix_get(u32 filter, u32 level, s16 *matrix);   /* the camera's own, also while replaced */
 /* The camera itself is using the card (the media busy flags its own power code waits for): core postpones its writes */
 int drv_card_busy(void);
+/* An open file of the firmware stays valid only while the card stays mounted: a mount or an unmount (the camera's PC
+ * mode, USB) frees every open file without a write, and the freed slot goes to the next fopen of anyone. drv_file_id:
+ * the file's identity - nonzero while it is open, another value for another opening; 0 - freed. drv_card_mounted: the
+ * card's volume is mounted (1) */
+u32 drv_file_id(void *fp);
+int drv_card_mounted(void);
 
 /* Kernel tasks and objects of the three CPUs for the task dump (core/taskdump.c). Read only, no
  * locks, core task only. The tasks of other CPUs are read past the cache: a word they wrote a moment ago may still be old.
