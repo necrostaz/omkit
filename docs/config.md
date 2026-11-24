@@ -116,6 +116,7 @@ The keys below are **diagnostics**, not in the sample:
 | `mask_jobs` | number | `4` | 1..64 | grain stills a level of `mask_test` must pass |
 | `mask_run` | number | `1` | | a run number of `mask_test`: another number starts the list again |
 | `chroma_test` | number | `100` | 0..1024 | the colour grain of the `chroma` level of `mask_test` |
+| `level_test` | number | `0` | 0..3 | a test of the grain stills without choosing a strength in the camera: a preset with a tile and the strength Off gets this strength (1 Low, 2 Med, 3 High) on its stills; the grain item still shows Off. 0 - none |
 
 A number out of range is replaced by the default with the warning `grain: KEY = N out of LO..HI, DEF taken`. How the mask
 and the colour grain work in the camera: [platform/om5m2/grain.md](platform/om5m2/grain.md).

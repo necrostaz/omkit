@@ -13,6 +13,7 @@ run anywhere (tests/test_omkdebug.py, tests/test_omkdebug_session.py).
     python tools/omkdebug.py banks                    both bank headers
     python tools/omkdebug.py snap [-o FILE]           every task of the three CPUs, now
     python tools/omkdebug.py mem ADDR LEN [-o FILE]   memory, as the white list allows (RAM only)
+    python tools/omkdebug.py crumbs                   the optics layer's crumbs (where its step and worker task are)
     python tools/omkdebug.py hist                     the firmware's last 20 PTP operations
     python tools/omkdebug.py level N                  the RAM log's level 0..4 (in RAM only)
     python tools/omkdebug.py mark [TAG]               a mark and a snapshot in the RAM log
@@ -60,7 +61,8 @@ RESULTS = ["ok", "bad path", "cannot open", "card i/o", "size differs", "CRC dif
 RESPONSES = {0x2001: "OK", 0x2002: "GeneralError", 0x2005: "OperationNotSupported", 0x200F: "AccessDenied (no write key)",
              0x2019: "DeviceBusy", 0x201D: "InvalidParameter"}
 LEVELS = "-EWID"
-TRIGGERS = {1: "card+", 2: "card-", 3: "window", 4: "camera busy", 5: "camera idle", 6: "stuck", 7: "mark", 8: "boot", 9: "job"}
+TRIGGERS = {1: "card+", 2: "card-", 3: "window", 4: "camera busy", 5: "camera idle", 6: "stuck", 7: "mark", 8: "boot", 9: "job",
+            10: "event"}
 STATES = {1: "RUN", 2: "RDY", 4: "WAI", 8: "SUS", 12: "WAS", 16: "DMT", 0xFF: "GONE"}
 WAITS = ["-", "SLP", "DLY", "SEM", "FLG", "SDTQ", "RDTQ", "MBX", "MTX", "SMBF", "RMBF", "CAL", "ACP", "RDV", "MPF", "MPL", "W15"]
 
@@ -191,6 +193,60 @@ def format_record(typ: int, seq: int, ms: int, p: bytes, names: dict) -> str:
     if typ == 5:
         return f"{ms:8d} B {p.hex()}"
     return f"{ms:8d} ? type {typ} {p.hex()}"
+
+
+# The optics layer's crumbs (src/platform/om5m2/fw1100/opticsdrv.c, CR_*): 28 words in the last 128 bytes of the RAM the
+# arena leaves out, written past the cache by the step, the worker task and the core task's heartbeat
+CRUMBS_ADDR, CRUMBS_LEN, CRUMBS_MAGIC = 0xA377FF80, 128, 0x4F435242
+CRUMB_WORDS = ("magic", "boot", "beat", "state", "ticks", "phases", "listed", "ended", "psw", "sp", "sp_min", "task", "stk",
+               "stksz", "mode", "work", "w_loops", "w_empty", "w_fast", "w_naps", "w_rc", "w_phase", "w_ticks", "w_done",
+               "w_sp", "w_psw", "w_pri", "w_flags")
+OPTICS_SUBS = ("N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full")
+OPTICS_PHASES = ("none", "listed", "step entered", "pass waited for", "slots read", "tick given away", "empty loop",
+                 "250 ms busy", "window map called", "window map returned", "64 bytes read", "1 MiB read begun", "1 MiB read",
+                 "cached read begun", "cached read", "stripes begun", "stripes written", "window release called",
+                 "window released", "step returned", "job ended", "handed to the worker", "worker began", "worker ended",
+                 "worker late: stop asked", "the step has the worker's answer")
+WORKER_PHASES = ("none", "started", "waiting", "woken", "working", "answered", "nap")
+
+
+def name_of(names: tuple, i: int) -> str:
+    return names[i] if i < len(names) else str(i)
+
+
+def format_crumbs(b: bytes) -> list[str]:
+    """The crumbs' words, named, and what they say"""
+    w = dict(zip(CRUMB_WORDS, struct.unpack_from(f"<{len(CRUMB_WORDS)}I", b)))
+    if w["magic"] != CRUMBS_MAGIC:
+        return [f"no crumbs (magic {w['magic']:08x}): no optics probe in this run, or the memory was cleared"]
+    st = w["state"]
+    rc = w["w_rc"] - 2**32 if w["w_rc"] >= 2**31 else w["w_rc"]
+    return [f"run {w['boot']:08x}, core heartbeat {w['beat']} ms; jobs listed {w['listed']}, the last ended {w['ended']}",
+            f"job {st >> 16} at {name_of(OPTICS_SUBS, st >> 8 & 0xFF)}: last phase '{name_of(OPTICS_PHASES, st & 0xFF)}' "
+            f"at {w['ticks']} us, phases {w['phases']:08x}",
+            f"step entry: psw {w['psw']:08x}, sp {w['sp']:08x} (lowest {w['sp_min']:08x}), task {w['task']}, stack "
+            f"{w['stk']:08x} + {w['stksz']}, request {w['mode']:08x}; worker request {w['work'] & 0xFFFF} done "
+            f"{w['work'] >> 16}",
+            f"worker: {w['w_loops']} waits, {w['w_empty']} woken with no request ({w['w_fast']} at once), {w['w_naps']} "
+            f"naps, last wait {rc}, phase '{name_of(WORKER_PHASES, w['w_phase'])}' at {w['w_ticks']} us, {w['w_done']} "
+            f"requests done; at its start sp {w['w_sp']:08x} psw {w['w_psw']:08x} priority {w['w_pri'] & 0xFFFF} (base "
+            f"{w['w_pri'] >> 16}), flags {w['w_flags'] & 0xFFFF} {w['w_flags'] >> 16}"]
+
+
+def read_mem(cam, addr: int, n: int) -> bytes:
+    out = bytearray()
+    while len(out) < n:
+        piece = min(n - len(out), STAGE)
+        code, _, data = cam.get(MEM, addr + len(out), piece)
+        ok(code, "MEM")
+        out += data
+    return bytes(out)
+
+
+def parse_mem_spec(spec: str) -> tuple[int, int]:
+    """ADDR:LEN (numbers as in C: 0x... or decimal)"""
+    a, _, n = spec.partition(":")
+    return int(a, 0), int(n or "0", 0)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -421,6 +477,7 @@ def main(argv=None) -> int:
     m.add_argument("length")
     m.add_argument("-o")
     sub.add_parser("hist")
+    sub.add_parser("crumbs")
     lv = sub.add_parser("level")
     lv.add_argument("n", type=int)
     mk = sub.add_parser("mark")
@@ -452,7 +509,12 @@ def main(argv=None) -> int:
     se.add_argument("--restart", action="store_true", help="restart the camera after the files (new CORE.BIN, modules "
                     "and OMKIT.INI run); the scenario then runs once from OMKIT\\SHOOT.RUN")
     se.add_argument("--wait", action="store_true", help="wait for the scenario to end (the cable must go out meanwhile)")
-    se.add_argument("--pull-log", action="store_true", help="the RAM log and OMKIT\\LOG\\CORE.LOG into the output folder")
+    se.add_argument("--pull-log", action="store_true", help="the RAM logs (this power-on: ramlog.txt, the one before: "
+                    "ramlog_prev.txt) and OMKIT\\LOG\\CORE.LOG into the output folder; also after a failed step while the "
+                    "camera is there (a restart during the scenario: the power-on that ended is the one before)")
+    se.add_argument("--crumbs", action="store_true", help="with the logs: the optics layer's crumbs (crumbs.txt)")
+    se.add_argument("--pull-mem", action="append", default=[], metavar="ADDR:LEN",
+                    help="with the logs: memory as the white list allows, into mem_ADDR.bin; repeatable")
     se.add_argument("--pull-pictures", type=int, default=0, metavar="N", help="the last N pictures into the output folder")
     se.add_argument("-o", "--out", default="session", help="the output folder (default: session)")
     se.add_argument("--connect-timeout", type=float, default=120.0, metavar="S")
@@ -623,14 +685,12 @@ def run(cam, a) -> int:
         for o in d["objects"]:
             print(f"obj {o['kind']:#x} {o['id']:04x} owner {o['owner']:04x} {o['a']} {o['b']}")
         return 0
+    if a.cmd == "crumbs":
+        print("\n".join(format_crumbs(read_mem(cam, CRUMBS_ADDR, CRUMBS_LEN))))
+        return 0
     if a.cmd == "mem":
         addr, n = int(a.addr, 0), int(a.length, 0)
-        out = bytearray()
-        while len(out) < n:
-            piece = min(n - len(out), STAGE)
-            code, _, data = cam.get(MEM, addr + len(out), piece)
-            ok(code, "MEM")
-            out += data
+        out = read_mem(cam, addr, n)
         if a.o:
             Path(a.o).write_bytes(out)
         else:
@@ -782,7 +842,9 @@ SESSION_HELP = """A whole test session, step by step, each with its checks and t
      with a new run; when a CORE.BIN was put, its build must be the one that runs now;
   5. --wait: the scenario runs once the cable is out (by hand, or --usb-off / --usb-on with a hub that switches its
      ports' power); the tool waits for the camera to come back and for the scenario's end;
-  6. --pull-log, --pull-pictures N: the RAM log, CORE.LOG and the last N pictures into the output folder.
+  6. --pull-log, --pull-pictures N: the RAM logs, CORE.LOG and the last N pictures into the output folder; --crumbs and
+     --pull-mem add the optics layer's crumbs and memory. The logs are pulled also when a step failed with the camera
+     there - a restart during the scenario leaves the log of the power-on that ended in ramlog_prev.txt.
 
 The camera comes back in the MTP mode by itself only when its USB mode is set to MTP; otherwise choose MTP in its USB
 dialog each time it asks. Exit status: 0 done, 1 a step failed, 2 bad use, 3 no camera.
@@ -956,20 +1018,40 @@ class Session:
                 raise StepFailed("scenario: not finished in time: " + shoot_text(s))
             self.sleep(2.0)
 
-    def pull_log(self, out: Path):
+    def pull_log(self, out: Path, a=None):
+        """The RAM logs of this power-on and of the one before, CORE.LOG; with a: its crumbs and memory"""
         code, _, raw = self.cam.get(BANKS)
         ok(code, "BANKS")
-        data, start, _ = read_bank(self.cam, 0, parse_banks(raw))
-        names: dict = {}
-        lines = [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in parse_records(data, start)]
-        (out / "ramlog.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        banks = parse_banks(raw)
+        counts = []
+        for which, name in ((0, "ramlog.txt"), (1, "ramlog_prev.txt")):
+            if which and banks["prev"] == 0xFF:
+                counts.append("no RAM log of a power-on before")
+                continue
+            h = banks["banks"][banks["cur"] if which == 0 else banks["prev"]]
+            data, start, _ = read_bank(self.cam, which, banks)
+            names: dict = {}
+            lines = [f"# power-on {h['boot']} run {h['run']}: heartbeat {h['beat']} ms, "
+                     f"{'ended with a power-off' if h['ended'] else 'did NOT end with a power-off'}, lost {h['lost']}"]
+            lines += [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in parse_records(data, start)]
+            (out / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            counts.append(f"{name} {len(lines) - 1} records (run {h['run']})")
         log = read_file(self.cam, "OMKIT\\LOG\\CORE.LOG")
         (out / "CORE.LOG").write_bytes(log)
-        self.say(f"log: {len(lines)} records of the RAM log, CORE.LOG {len(log)} bytes")
+        self.say(f"log: {', '.join(counts)}, CORE.LOG {len(log)} bytes")
+        if a is not None and getattr(a, "crumbs", False):
+            text = format_crumbs(read_mem(self.cam, CRUMBS_ADDR, CRUMBS_LEN))
+            (out / "crumbs.txt").write_text("\n".join(text) + "\n", encoding="utf-8")
+            self.say("crumbs: " + text[0])
+        for spec in (getattr(a, "pull_mem", None) or []) if a is not None else []:
+            addr, n = parse_mem_spec(spec)
+            (out / f"mem_{addr:08x}.bin").write_bytes(read_mem(self.cam, addr, n))
+            self.say(f"memory: {n} bytes at {addr:08x}")
 
     def run(self, a) -> int:
         out = Path(a.out)
         done: list[str] = []
+        pulled = False
 
         def step(name):
             done.append(name)
@@ -1022,7 +1104,8 @@ class Session:
                 out.mkdir(parents=True, exist_ok=True)
             if a.pull_log:
                 step("pull the log")
-                self.pull_log(out)
+                pulled = True
+                self.pull_log(out, a)
             if a.pull_pictures:
                 step("pull the pictures")
                 for path, n in pull_pictures(self.cam, a.pull_pictures, out):
@@ -1031,6 +1114,12 @@ class Session:
             return 0
         except (StepFailed, Refused, OSError) as e:
             self.say(f"session: FAILED at '{done[-1] if done else '?'}': {e}")
+            if a.pull_log and not pulled and self.cam is not None:
+                try:                        # what the camera can still tell: after a restart, the run that ended
+                    out.mkdir(parents=True, exist_ok=True)
+                    self.pull_log(out, a)
+                except Exception as e2:     # gone meanwhile: the failure above is the result
+                    self.say(f"log: not pulled after the failure: {e2}")
             return 1
         finally:
             self.drop()

@@ -88,6 +88,7 @@ static struct {
 static struct {
     u32 level;                              /* `mask`: the level after the list (or without one) */
     u32 chroma, chroma_test;
+    u32 level_test;                         /* [grain] level_test: the strength of a preset at Off, for tests (0 - none) */
     u32 route, ch, tag, given;              /* given to the driver */
     u32 curve, seq, warned;                 /* the curve published (LV_*, 0 none) and the tone it was built on */
     u16 w[256];
@@ -364,6 +365,10 @@ static void mk_config(void)
     mk.level = lv;
     mk.chroma = cfg_range("chroma", 0, 0, DRV_GRAIN_CHROMA_MAX);
     mk.chroma_test = cfg_range("chroma_test", 100, 0, DRV_GRAIN_CHROMA_MAX);
+    mk.level_test = cfg_range("level_test", 0, 0, OMK_GRAIN_LEVELS - 1);
+    if (mk.level_test)
+        log_printf(OMK_LOG_WARN, "grain: level_test = %u: a preset with a tile and the strength Off gets strength %u on its "
+                   "stills (a test key)", mk.level_test, mk.level_test);
     bis.jobs = cfg_range("mask_jobs", 4, 1, BIS_JOBS_MAX);
     for (p = cfg_str("grain", "mask_test", ""); *p;) {
         while (*p == ' ' || *p == ',' || *p == '\t')
@@ -662,6 +667,8 @@ int grain_look(u32 entry, s32 tile, u32 level)
         return -2;
     if (tile < -1 || tile >= (s32)ngrn || level >= OMK_GRAIN_LEVELS)
         return -1;
+    if (!level && tile >= 0)                /* [grain] level_test: grain stills for a test without the user's choice */
+        level = mk.level_test;
     rc = drv_look_grain(entry, tile, level);
     if (rc)
         return rc;

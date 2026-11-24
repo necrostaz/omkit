@@ -284,6 +284,21 @@ static void test_proto(void)
     b.size = 65536;
     s = walk(&b);
     CHECK(s.n > 5 && s.types[DR_LOG] && s.types[DR_MAP] == 1 && s.types[DR_SNAP] >= 2 && s.types[DR_MARK] >= 2 && !s.bad);
+    {                                       /* another service's event: a mark with its text, a snapshot, the window */
+        u32 marks = s.types[DR_MARK], snaps = s.types[DR_SNAP], i, found = 0;
+        static const char ev[] = "optics: armed W1";
+
+        dbg_event("optics: armed", "W1");
+        s = walk(&b);
+        CHECK(s.types[DR_MARK] == marks + 1 && s.types[DR_SNAP] == snaps + 1 && !s.bad);
+        for (i = 0; i + sizeof(ev) - 1 <= 65536 && !found; i++)
+            found = !memcmp(host_keep + 128 + i, ev, sizeof(ev) - 1);
+        CHECK(found);
+        CHECK(dbg_tick(250) == 50);         /* the window after it: the core loop serves the snapshots */
+        for (i = 0; i < 25; i++)
+            service();
+        CHECK(dbg_tick(250) == 250);
+    }
     r = call(DBG_OP_GET, DBG_BANK, 0, 0, 4096);
     CHECK(r.code == 0x2001 && r.n == 3 && r.p[0] == 4096 && host_ptp_out_n == 4096 && r.p[1] == 0 && r.p[2] > 100);
     CHECK(host_ptp_out[0] == DRING_SYNC);

@@ -51,5 +51,8 @@ void dbg_service(u32 now);                  /* core loop, every pass while the c
 u32 dbg_tick(u32 tick);                     /* the core loop's next wait: shorter while a window or a job is on */
 void dbg_ended(void);                       /* the run reached the end of a power-off */
 int core_card_ok(void);                     /* 0 - core writes nothing to the card ([debug] card_writes = off) */
+/* A mark, a snapshot of the watched tasks and the window of snapshots after it (core task; nothing while the service is
+ * off): for another service's moments worth a look after a reset */
+void dbg_event(const char *what, const char *arg);
 
 #endif

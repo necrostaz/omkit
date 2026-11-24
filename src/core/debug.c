@@ -36,7 +36,7 @@
                                                camera leaves USB */
 #define RESTART_TAKEN_MS 5000               /* no power-off this long after the request: the firmware did not take it */
 
-enum { T_CARD_BEGIN = 1, T_CARD_END, T_WINDOW, T_CAM_BUSY, T_CAM_IDLE, T_STUCK, T_MARK, T_BOOT, T_JOB };
+enum { T_CARD_BEGIN = 1, T_CARD_END, T_WINDOW, T_CAM_BUSY, T_CAM_IDLE, T_STUCK, T_MARK, T_BOOT, T_JOB, T_EVENT };
 enum { J_NONE, J_SNAP, J_READ, J_LIST, J_WBEGIN, J_WDATA, J_WCOMMIT, J_WABORT, J_RESTART, J_SHOOT };
 
 typedef struct {
@@ -250,6 +250,21 @@ void core_card_write(int begin, const char *what)
     mark(begin ? "card+" : "card-", what);
     snapshot(begin ? T_CARD_BEGIN : T_CARD_END, 0);
     if (!begin && window_ms) {
+        window_until = omk_ms() + window_ms;
+        window_last = 0;
+    }
+}
+
+/* An event of another service of core (optics.c: a substage armed or passed, the worker task made, a job listed or
+ * ended): a mark with its text, a snapshot of the watched tasks and the window of snapshots after it, as after a write
+ * to the card - a reset soon after the event leaves the tasks' last states in the RAM log. Core task only */
+void dbg_event(const char *what, const char *arg)
+{
+    if (!on || !cur)
+        return;
+    mark(what, arg);
+    snapshot(T_EVENT, 0);
+    if (window_ms) {
         window_until = omk_ms() + window_ms;
         window_last = 0;
     }

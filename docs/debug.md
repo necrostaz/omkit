@@ -29,7 +29,7 @@ enabled = on
 | `write` | switch | `off` | `on` - the computer may write files of the `OMKIT` folder (section 4), restart the camera and start or stop the test scenario (section 6) |
 | `ring_level` | text | `debug` | how much of the log the RAM ring keeps: `error`, `warn`, `info`, `debug`. The card's log keeps `[core] log_level` as before |
 | `tasks` | text | the card and recording tasks | firmware task names whose state each snapshot records, separated by commas, at most 11 (the `core` task is always added) |
-| `window_ms` | number, ms | `1000` | 0..10000: after each write of `core` to the card, snapshots for this long ... |
+| `window_ms` | number, ms | `1000` | 0..10000: after each write of `core` to the card, and after an event of another service of `core` (the optics layer's probe: a substage armed or passed, its worker task made, a job of its own listed or ended - a mark with the event's text first), snapshots for this long ... |
 | `window_every` | number, ms | `50` | 10..1000: ... this often (only changes are kept) |
 | `stuck_ms` | number, ms | `1000` | the camera's application in a state that normally lasts a moment (half-press, a transition) for longer than this: snapshots every 500 ms, at most 20 |
 
@@ -69,6 +69,7 @@ python tools/omkdebug.py tail --follow         this power-on's RAM log, as it gr
 python tools/omkdebug.py postmortem            the RAM log of the power-on before (after a crash and restart)
 python tools/omkdebug.py snap -o tasks.bin     every task of the three CPUs, now
 python tools/omkdebug.py mem 0xa3470000 256    memory (RAM only)
+python tools/omkdebug.py crumbs                the optics layer's crumbs: where its step and worker task were last
 python tools/omkdebug.py hist                  the camera's last 20 PTP operations
 python tools/omkdebug.py level 4               the RAM log's level (until the next power-on)
 python tools/omkdebug.py mark 1                a mark and a snapshot in the RAM log
@@ -130,10 +131,12 @@ python tools/omkdebug.py session --put build/CORE.BIN --put OMKIT.INI --scenario
 | `--scenario` | with `--restart`: the file `OMKIT\SHOOT.RUN` ([config.md](config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)), which runs once at the next start (`--shots`, `--start-delay` go into it); without: the scenario starts now over USB | the steps are checked by the camera |
 | `--restart` | the camera restarts and comes back | it left USB, then answers with a new run; the build that runs is the one of the `CORE.BIN` put |
 | `--wait` | the scenario runs once the camera shoots: the tool asks you to take the cable out and to put it back when the pictures are made (or `--usb-off CMD --usb-on CMD` switch a hub's port off and on, for `--offline` seconds) | the camera comes back in the same run; the scenario's result |
-| `--pull-log`, `--pull-pictures N` | the RAM log (`ramlog.txt`), `CORE.LOG` and the last N pictures into the output folder | each piece's CRC-32 |
+| `--pull-log`, `--pull-pictures N` | the RAM logs of this power-on (`ramlog.txt`) and of the one before (`ramlog_prev.txt`), `CORE.LOG` and the last N pictures into the output folder; `--crumbs` adds the optics layer's crumbs (`crumbs.txt`), `--pull-mem ADDR:LEN` memory (`mem_ADDR.bin`, repeatable) | each piece's CRC-32 |
 
 Every step has a time limit (`--connect-timeout`, `--restart-timeout`, `--scenario-timeout`); the first step that fails
-ends the session with its reason and the exit status 1.
+ends the session with its reason and the exit status 1. With `--pull-log` the logs are pulled after a failed step too,
+while the camera answers: when it restarted during the scenario, `ramlog_prev.txt` holds the log of the power-on that went
+down, up to its last moment.
 
 **The restart.** `core` asks the camera's firmware to restart the way its own USB and Wi-Fi reboot requests do: the
 firmware does an ordinary power-off - it saves the settings, finishes and unmounts the card, `core` does its last save as

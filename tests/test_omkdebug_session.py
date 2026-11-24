@@ -36,6 +36,8 @@ class World:
                       "DCIM\\100OMSYS\\P1010001.JPG": b"jpeg1", "DCIM\\100OMSYS\\P1010002.JPG": b"jpeg2"}
         self.runs = 1
         self.run = "RUN00001"
+        self.prev_run = ""
+        self.mem = {}
         self.online = True                  # in the MTP mode, answering
         self.cable = True
         self.events = []                    # [when, what]
@@ -65,6 +67,7 @@ class World:
     def boot(self):
         """A real start: the new CORE.BIN's build runs, SHOOT.RUN is taken (removed) and its scenario armed"""
         self.runs += 1
+        self.prev_run = self.run
         self.run = f"RUN{self.runs:05d}"
         self.build = omkdebug.build_of(self.files.get(CORE_BIN, b"")) or self.build
         self.shoot = {"state": 0, "waiting": 0, "total": 0, "taken": 0}
@@ -166,10 +169,24 @@ class FakeCam:
             return 0x2001, [], self.xfer[p[1]:p[1] + p[2]]
         if p[0] == omkdebug.BANKS:
             self.bank = record(1, 1, 5, b"\x03       5 I OMKit core 1.42 (" + w.build.encode() + b")")
-            return 0x2001, [], header(1, 0, len(self.bank), 2) + header(0, 0, 0, 0) + struct.pack("<4I", 0, 0x20080, 0, 0xFF)
+            self.prev = record(1, 7, 37503, b"\x03   37503 I the last line of " + w.prev_run.encode())
+            prev = header(w.runs - 1, 0, len(self.prev), 8, run=w.prev_run.encode()) if w.runs > 1 else header(0, 0, 0, 0)
+            return 0x2001, [], (header(w.runs, 0, len(self.bank), 2, run=w.run.encode()) + prev +
+                                struct.pack("<4I", 0, 0x20080, 0, 1 if w.runs > 1 else 0xFF))
         if p[0] == omkdebug.BANK:
-            return 0x2001, [0, 0, len(self.bank)], self.bank[p[2]:p[2] + p[3]]
+            b = self.prev if p[1] else self.bank
+            return 0x2001, [0, 0, len(b)], b[p[2]:p[2] + p[3]]
+        if p[0] == omkdebug.MEM:
+            return 0x2001, [], w.mem.get(p[1], bytes(p[2]))[:p[2]]
         return 0x2005, [], b""
+
+
+def crumbs():
+    """The optics layer's crumbs as the step and the worker leave them (opticsdrv.c's CR_* words)"""
+    w = [0] * 32
+    w[0], w[1], w[2], w[3], w[4] = omkdebug.CRUMBS_MAGIC, 0x2A801D, 37472, 4 << 16 | 8 << 8 | 20, 35885934
+    w[6], w[7], w[20], w[21], w[23] = 4, 4, 2**32 - 2, 2, 7
+    return struct.pack("<32I", *w)
 
 
 class Args:
@@ -252,9 +269,22 @@ class SessionSteps(unittest.TestCase):
                 w.at(2, w.unplug)
                 w.at(4, w.boot)                             # the camera started again meanwhile
                 w.at(8, w.plug)
-        rc = self.make(w, user=False, on_say=on_say).run(Args(scenario="keep", wait=True))
+        w.mem[omkdebug.CRUMBS_ADDR] = crumbs()
+        w.files["OMKIT\\LOG\\CORE.LOG"] = b"the card's log"
+        with tempfile.TemporaryDirectory() as d:
+            rc = self.make(w, user=False, on_say=on_say).run(Args(scenario="keep", wait=True, pull_log=True, crumbs=True,
+                                                                  pull_mem=["0xa3700000:32"], out=d))
+            prev = (Path(d) / "ramlog_prev.txt").read_text()
+            cr = (Path(d) / "crumbs.txt").read_text()
+            mem = (Path(d) / "mem_a3700000.bin").read_bytes()
         self.assertEqual(rc, 1)
-        self.assertIn("it restarted, the scenario is lost", w.said[-1])
+        self.assertTrue(any("it restarted, the scenario is lost" in m for m in w.said), w.said)
+        # the log of the power-on that ended is pulled all the same: the one before the camera's run now
+        self.assertIn("run RUN00001", prev)
+        self.assertIn("did NOT end with a power-off", prev)
+        self.assertIn("the last line of RUN00001", prev)
+        self.assertIn("job 4 at W1: last phase 'job ended'", cr)
+        self.assertEqual(mem, bytes(32))
 
     def test_restart_not_taken(self):
         w = World()
@@ -314,6 +344,14 @@ class SessionSteps(unittest.TestCase):
             FakeCam.cmd = orig
         self.assertEqual(rc, 1)
         self.assertIn("write = on is needed", w.said[-1])
+
+    def test_crumbs(self):
+        t = omkdebug.format_crumbs(crumbs())
+        self.assertIn("core heartbeat 37472 ms; jobs listed 4, the last ended 4", t[0])
+        self.assertIn("job 4 at W1: last phase 'job ended' at 35885934 us", t[1])
+        self.assertIn("last wait -2, phase 'waiting'", t[3])
+        self.assertIn("no crumbs", omkdebug.format_crumbs(bytes(128))[0])
+        self.assertEqual(omkdebug.parse_mem_spec("0xa377ff80:128"), (0xA377FF80, 128))
 
     def test_texts(self):
         t = omkdebug.shoot_run_text("look:1, stock", 2, 0).decode()

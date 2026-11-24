@@ -36,8 +36,13 @@
  * arming, shows whether a still came after it.
  *
  * The crumbs (drv_optics_crumb): the step's last phase, kept past the cache in memory outside the arena - logged at the
- * next start when the memory outlived the reset. */
+ * next start when the memory outlived the reset.
+ *
+ * With the debug service on ([debug] enabled), the moments of the layer - a substage or the cached read armed, a
+ * substage passed, the worker task made, a job of ours listed or ended (as the core task sees them) - are events of its
+ * RAM log (dbg_event): a mark, the watched tasks' states and the window of snapshots after it. */
 #include "omk_core.h"
+#include "omk_debug.h"
 #include "omk_log.h"
 #include "omk_store.h"
 
@@ -81,6 +86,7 @@ static struct {
     u32 arm_jobs;                           /* the reports counted at the last arming */
     u32 cached, same;                       /* the driver's counts already in b */
     u32 retry_ms;
+    u32 listed, ended;                      /* the driver's counts already told to the debug service */
 } op;
 
 static struct {
@@ -297,6 +303,7 @@ static int opt_worker(void)
         return op.worker;
     rc = drv_optics_worker(&tid);
     op.worker = rc ? -1 : 1;
+    dbg_event(rc ? "optics: worker task not made" : "optics: worker task made", 0);
     if (rc)
         log_printf(OMK_LOG_ERROR, "optics: the worker task not running, code %d (task %u)", rc, tid);
     else
@@ -327,6 +334,7 @@ static void bis_service(const drv_optics_info *st, u32 now, int busy)
         log_printf(OMK_LOG_INFO, "optics: substage %s armed for the next still%s", drv_optics_sub_name(bis.b.index),
                    bis.b.index >= DRV_OPTICS_WORKER && !op.worker ? " (the worker task made first)" : "");
         bis.b.armed = 1;
+        dbg_event("optics: armed", drv_optics_sub_name(bis.b.index));
         if (!log_flush() || bis_save()) {   /* the log up to here on the card, then "armed" */
             bis.b.armed = 0;
             store_set(op.s, BIS_KEY, &bis.b, sizeof(bis.b), OMK_STORE_PERSIST);
@@ -368,6 +376,7 @@ static void bis_service(const drv_optics_info *st, u32 now, int busy)
     log_printf(OMK_LOG_INFO, "optics: substage %s passed (%u jobs ended with it)%s", drv_optics_sub_name(prev.index),
                st->ended[prev.index] - bis.ended0, bis.b.index == BIS_DONE ? "; bisection done, the level's work from now"
                " on" : "");
+    dbg_event("optics: passed", drv_optics_sub_name(prev.index));
     if (bis.b.index == BIS_DONE)
         bis.on = 0;                         /* the driver keeps FULL, the last one given */
 }
@@ -389,6 +398,7 @@ static void opt_arm(const drv_optics_info *st, u32 now, int busy)
     if (st->armed || st->jobs == op.arm_jobs || busy || (op.retry_ms && now - op.retry_ms < OPT_RETRY_MS))
         return;
     log_printf(OMK_LOG_INFO, "optics: arming the cached read for the next job (%u reads before)", op.b.reads);
+    dbg_event("optics: cached read armed", 0);
     if (!log_flush()) {                     /* the reports before it are not all on the card */
         op.retry_ms = now | 1;
         return;
@@ -409,12 +419,23 @@ static void opt_arm(const drv_optics_info *st, u32 now, int busy)
 void optics_service(u32 now)
 {
     drv_optics_info st;
+    u32 ended, k;
     int busy;
 
     if (!op.on)
         return;
     drv_optics_beat(now);
     drv_optics_service(&st);
+    for (ended = k = 0; k < DRV_OPTICS_SUBS; k++)
+        ended += st.ended[k];
+    if (st.listed != op.listed) {           /* the debug service's events: the tasks while a job of ours is under way */
+        op.listed = st.listed;
+        dbg_event("optics: job listed", 0);
+    }
+    if (ended != op.ended) {
+        op.ended = ended;
+        dbg_event("optics: job ended", 0);
+    }
     busy = drv_card_busy() || drv_prof_take_recent();
     if (op.worker_test && op.worker > 0 && !busy) {
         u32 us, work, state;
