@@ -287,7 +287,7 @@ void core_main(void)
             log_printf(OMK_LOG_WARN, "core: the event flag wait fails or returns at once again and again, plain sleep from now on");
         }
         if (!power_service(now)) {
-            shoot_power_lost();             /* keys released, the scenario ends */
+            shoot_power_lost();             /* keys released, the scenario waits for the camera to shoot again */
             continue;                       /* power-off or sleep: no card, no module work */
         }
         if (!loaded) {

@@ -28,7 +28,7 @@ void shoot_stop(void);                      /* both keys released at once, the s
 void shoot_status(shoot_info *out);
 /* The core loop while running: the scenario's next step. Returns how soon to call again, ms (at most SERVICE_MS) */
 u32 shoot_service(u32 now, u32 most);
-void shoot_power_lost(void);                /* power-off or sleep: keys released, the scenario ends */
+void shoot_power_lost(void);                /* power-off or sleep began: keys released, the scenario waits to shoot again */
 
 /* For the host tests: parse a steps string, 0 or -1 */
 int shoot_parse(const char *steps);

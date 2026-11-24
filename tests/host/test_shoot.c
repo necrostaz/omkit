@@ -242,13 +242,23 @@ static void test_ways_out(void)
     for (i = 0; i < 3000 && !cam.down[1]; i++)
         run(10, 0);
     CHECK(cam.down[0] && cam.down[1]);
-    shoot_power_lost();
+    shoot_power_lost();                     /* a power-off began (the cable out in the PC mode, cancelled by the lever) */
     shoot_status(&si);
-    CHECK(si.state == SHOOT_FAILED);
+    CHECK(si.state == SHOOT_RUNNING && si.waiting);
     CHECK(all_released());
     CHECK(strstr(cam.trace, "F1 F0 H0 ") != 0);
-    shoot_power_lost();                     /* nothing running: nothing sent */
+    shoot_power_lost();                     /* again while it lasts: nothing more sent */
     CHECK(cam.releases == 2);
+    cam.usb = 1;                            /* not shooting for a while, then shooting again: the picture taken again */
+    run(5000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_RUNNING && si.waiting && cam.presses == 2);
+    cam.usb = 0;
+    run(60000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_DONE && si.taken == 2 && si.failed == 0 && all_released());
+    shoot_power_lost();                     /* nothing running: nothing sent */
+    CHECK(cam.releases == 6);
 }
 
 /* The half-press state stays after the release: the watchdog releases once more, the picture counts */

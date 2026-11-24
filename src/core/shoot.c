@@ -42,6 +42,7 @@ static struct {
     u32 step, shot, taken, failed, fails_row, total;
     u32 takes0, counter, half_seen, half_ms, full_at, write_t, stuck_t, stuck_sent, started;
     u32 shooting_since, arm_told;           /* ARMED: since when the camera shoots (0 - it does not); the wait was logged */
+    u32 paused, resume;                     /* ARMED after a power-off or sleep began; then to the step, not the delay */
     u8 down[2];                             /* our presses: half, full */
 } s;
 
@@ -295,7 +296,7 @@ int shoot_start(const char *steps, u32 delay_ms)
     s.delay = delay_ms;
     s.started = now;
     s.result = SHOOT_RUNNING;
-    s.shooting_since = s.arm_told = 0;
+    s.shooting_since = s.arm_told = s.paused = s.resume = 0;
     log_printf(OMK_LOG_INFO, "shoot: %u steps, %u pictures each, every %u ms, by %s; starts %u ms after the camera shoots",
                s.nsteps, s.shots, s.interval, s.path == DRV_SHUTTER_WIFI ? "wifi events" : "keys", delay_ms);
     for (i = 0; i < s.nsteps; i++)
@@ -311,10 +312,27 @@ void shoot_stop(void)
         finish(SHOOT_STOPPED, "stopped", omk_ms());
 }
 
+/* A power-off or sleep began: not the end of the scenario. The firmware begins one and cancels it in normal work - the
+ * USB cable taken out in the PC mode is a power-off (reason 1) that the lever, still on, cancels (camera, card155): then the
+ * camera shoots again. So the keys are released and the scenario waits for the camera to shoot again (ARMED, a new
+ * arm_wait); a picture that was under way is taken again. A real power-off ends it with the camera; after a sleep it goes
+ * on. Called on every pass while the core loop does not run: acts once */
 void shoot_power_lost(void)
 {
-    if (s.state != S_IDLE)
-        finish(SHOOT_FAILED, "power-off or sleep", omk_ms());
+    u32 now = omk_ms();
+
+    if (s.state == S_IDLE || (s.state == S_ARMED && s.paused))
+        return;
+    release_all();
+    if (s.state >= S_HALF && s.state <= S_WRITE)
+        log_printf(OMK_LOG_WARN, "shoot: power-off or sleep during picture %u of step %u (state %s): taken again later",
+                   s.shot + 1, s.step + 1, state_names[s.state]);
+    log_printf(OMK_LOG_INFO, "shoot: power-off or sleep began: paused, waiting for the camera to shoot again");
+    s.paused = 1;
+    s.resume = s.state > S_WAIT;            /* past the start's delay: back to the step, its preset applied again */
+    s.shooting_since = 0;
+    s.arm_told = 1;                         /* the wait is logged here */
+    go(S_ARMED, now);
 }
 
 void shoot_status(shoot_info *out)
@@ -426,9 +444,10 @@ u32 shoot_service(u32 now, u32 most)
             s.shooting_since = now | 1;     /* 0 is "not shooting" */
         } else if (now - s.shooting_since >= ARM_SETTLE) {
             if (s.arm_told)
-                log_printf(OMK_LOG_INFO, "shoot: the camera shoots after %u s", dt / 1000);
-            go(S_WAIT, now);
-            return most;
+                log_printf(OMK_LOG_INFO, "shoot: the camera shoots after %u s%s", dt / 1000, s.paused ? ", going on" : "");
+            go(s.resume ? S_STEP : S_WAIT, now);
+            s.paused = s.resume = 0;
+            return TICK_MIN;
         }
         if (dt >= s.arm_wait)
             finish(SHOOT_FAILED, "the camera did not come to shooting in time", now);
