@@ -29,6 +29,8 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 - **core 1.42** has both the debug service and the test scenario. Its image with the stack may now end at `0x634a0000`
   (was `0x63490000`); the module arena still starts at the image's real end.
+- **core 1.43** adds the test session over USB (restart over USB, the one-shot scenario `OMKIT\SHOOT.RUN`, the build
+  in the log's first line and in `INFO`) and fixes writing files over USB, which failed since core 1.40.
 
 ## [0.1.0] - 2026-11-20
 
