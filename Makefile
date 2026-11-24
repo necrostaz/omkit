@@ -19,16 +19,23 @@ LD_SCRIPTS := src/core/core.ld src/platform/$(PLATFORM)/fw.ld
 
 all: $(OUT)/CORE.BIN
 
-# The branch and commit of the build, in core's log at every start (tools/build_id.sh; BUILD_ID=... overrides it). The
-# header is rewritten only when the text changes, so an unchanged tree is not rebuilt
-BUILD_ID ?= $(shell sh tools/build_id.sh)
-$(OUT)/build_id.h: FORCE
+# The build's name in the log's first line and in the debug service's INFO: the git branch and the short commit, "-dirty"
+# with uncommitted changes, so that two test cards of one core version differ. git, else git.exe (WSL in a worktree made by
+# Windows git: WSL's git cannot follow its link), else "unknown"; BUILD_ID=<name> on the command line sets it. The stamp
+# file changes only when the name does: then main.o and debug.o, which print it, are compiled again
+GIT_ID = b=$$($(1) rev-parse --abbrev-ref HEAD 2>/dev/null) && c=$$($(1) rev-parse --short=7 HEAD 2>/dev/null) && \
+	{ $(1) diff --quiet HEAD -- 2>/dev/null && echo "$$b@$$c" || echo "$$b@$$c-dirty"; }
+ifeq ($(origin BUILD_ID),undefined)
+BUILD_ID := $(shell { $(call GIT_ID,git) || $(call GIT_ID,git.exe) || echo unknown; } | tr -d '\r')
+endif
+BUILD_STAMP := $(OUT)/build.id
+
+$(BUILD_STAMP): FORCE
 	@mkdir -p $(OUT)
-	@echo '#define OMK_BUILD "$(BUILD_ID)"' > $@.tmp
-	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
-$(OUT)/main.o: $(OUT)/build_id.h
-$(OUT)/main.o: CFLAGS += -include $(OUT)/build_id.h
-FORCE:
+	@echo '$(BUILD_ID)' | cmp -s - $@ || echo '$(BUILD_ID)' > $@
+
+$(OUT)/main.o $(OUT)/debug.o: $(BUILD_STAMP)
+$(OUT)/main.o $(OUT)/debug.o: CFLAGS += -DCORE_BUILD='"$(BUILD_ID)"'
 
 # The MN10300 toolchain must be there before anything is compiled for the camera
 toolchain-check:
@@ -116,7 +123,7 @@ HOST_CC ?= gcc
 TEST := $(OUT)/test
 HOST_CFLAGS := -std=gnu99 -Wall -Wextra -Werror
 HOST_INC := -Isrc/core/include -Isrc/sdk/include -Itests/host
-HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c dring.c debug.c)
+HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c dring.c debug.c shoot.c)
 HOST_DEPS := src/core/include/*.h src/sdk/include/*.h tests/host/host_drv.h tests/host/host_drv.c
 HAVE_TC = $(shell command -v $(TC)gcc 2>/dev/null)
 HAVE_NUMPY = $(shell $(PYTHON) -c "import numpy" 2>/dev/null && echo yes)
@@ -126,9 +133,9 @@ $(TEST)/test_core: $(HOST_CORE) tests/host/test_core.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) tests/host/host_drv.c tests/host/test_core.c -o $@
 
-$(TEST)/test_shoot: $(HOST_CORE) src/core/shoot.c tests/host/test_shoot.c $(HOST_DEPS)
+$(TEST)/test_shoot: $(HOST_CORE) tests/host/test_shoot.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
-	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) src/core/shoot.c tests/host/host_drv.c tests/host/test_shoot.c -o $@
+	$(HOST_CC) $(HOST_CFLAGS) $(HOST_INC) $(HOST_CORE) tests/host/host_drv.c tests/host/test_shoot.c -o $@
 
 $(TEST)/test_mod: $(HOST_CORE) src/core/module.c src/core/api.c src/core/event.c tests/host/test_mod.c $(HOST_DEPS)
 	@mkdir -p $(TEST)
@@ -190,4 +197,6 @@ test: test-host test-tools test-data test-apps
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all clean card toolchain-check FORCE test test-hello test-host test-tools test-data test-apps
+FORCE:
+
+.PHONY: all clean card toolchain-check test test-hello test-host test-tools test-data test-apps FORCE

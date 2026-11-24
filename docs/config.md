@@ -55,7 +55,7 @@ was:
 
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
-| `log` | switch | `on` | | `off` - nothing is logged and no log file is written. The log `OMKIT\LOG\CORE.LOG` holds the power-ons one after another, each from a header line; `core` never removes it - delete it on a computer when it gets too long. (`run_logs`, a file per power-on, is gone since core 1.42; the key is ignored) |
+| `log` | switch | `on` | | `off` - nothing is logged and no log file is written. The log `OMKIT\LOG\CORE.LOG` holds the power-ons one after another, each from a header line; `core` never removes it - delete it on a computer when it gets too long. (`run_logs`, a file per power-on, is gone; the key is ignored) |
 | `log_level` | text | `info` | `error`, `warn`, `info`, `debug`, `off` | how much detail goes to the log. `info`: start, modules, what the user chose, power states, warnings and errors - a few lines a session; `debug` adds the lines that repeat with use (one per picture, per dial step, per second in an editor; counters) and also writes a few boot lines to the card at once, so a crash during start leaves a trace. An unknown value: `info`, with the warning `config: log_level '...' unknown, using info` |
 | `fw_heap` | switch | `off` | | `on` - when the module memory (the arena) is full, small module buffers may come from the camera's firmware heap, up to `fw_heap_limit` in total. The heap is shared with shooting and the menus: turn it on only if a module reports that it is out of memory. Needs `fw_heap_limit`, otherwise it stays off with a warning. Code and resources never go there, and `core` always leaves at least a quarter of each heap class to the camera |
 | `fw_heap_limit` | size | `256K` in the sample, none without it | | the most the modules may take from the firmware heap. Not a size: a warning, and `fw_heap` stays off |
@@ -223,13 +223,15 @@ A series of pictures without the user, for testing presets: `core` presses the s
 own path in the camera, half-press first, then the full press - and before each step chooses a preset the way the user
 chooses it in the picture mode screen, so the module that owns it (FILMLOOK, CREATPRF) applies it as usual. The camera's
 own settings (exposure mode, focus, quality, ISO) stay as set on the camera. Not in the sample: a test tool, off unless
-asked for. The camera does not take pictures while it is connected to a computer for data (Storage, MTP): use the USB
-choice that only charges, or no cable.
+asked for. The camera does not take pictures while it is connected to a computer for data (Storage, MTP): every start
+first waits until the camera is in its shooting state (the cable out, or the USB choice that only charges), up to
+`arm_wait`, and the start's delay counts from then.
 
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
-| `run` | text | `off` | `off`, `boot` | `boot` - the scenario starts once after the modules have loaded |
-| `start_delay` | number | `5000` | 0..600000 | milliseconds from the start of the modules to the first step |
+| `run` | text | `off` | `off`, `boot` | `boot` - the scenario starts once after the modules have loaded (at every power-on) |
+| `start_delay` | number | `5000` | 0..600000 | milliseconds from the moment the camera shoots (2 s in its shooting state) to the first step |
+| `arm_wait` | number | `600000` | 1000..86400000 | the longest wait for the camera to shoot after the start (a cable in the MTP mode, a menu open); then the scenario ends without a picture |
 | `steps` | text | empty | up to 16 steps separated by commas | the presets in order: `look:N` - entry N (from 1) of the film look, `look:NAME` - the entry of that name (as the picture mode screen shows it), `prof:cN` / `prof:mN` - colour or monochrome profile N, `stock` - the camera's own picture mode (the look and the profiles off), `keep` - no change. Empty: one step without a change. An unknown step stops the scenario before the first picture, with an error in the log |
 | `shots` | number | `1` | 1..20 | pictures per step (200 in a scenario at most) |
 | `interval` | number | `3000` | 500..3600000 | milliseconds between two pictures, from the end of the one before |
@@ -241,4 +243,22 @@ choice that only charges, or no cable.
 
 A number out of range is taken at the nearest end. Every press is released on every way out - the end, a time limit,
 power-off or sleep, a stop - and a half-press the camera still shows 3 s after the release is released once more. The log
-has a line per step and per picture and the result: `shoot: done: N of M pictures made`.
+has a line per step and per picture and the result: `shoot: done: N of M pictures made`. A power-off or sleep does not
+end the scenario: the camera begins a power-off also when the USB cable is taken out in the MTP mode, and cancels it
+because the power lever is on. The scenario releases the keys, waits until the camera shoots again and goes on; a
+picture that was under way is taken again.
+
+### 10.1. One scenario at the next power-on: `OMKIT\SHOOT.RUN`
+
+A file `SHOOT.RUN` in the `OMKIT` folder holds `[shoot]` keys for one start: at the next power-on `core` reads it after
+`OMKIT.INI` (its keys win over those of `[shoot]`), **removes it from the card** and then starts the scenario as `run =
+boot` would. Removed first, the file runs at most once, even if the scenario brings the camera down. Lines of another
+section are not used (`shoot: one-shot scenario from SHOOT.RUN (removed from the card), lines not understood in it`);
+a file over 1 KB is not used at all. If the file cannot be removed, the scenario does not run (error in the log). The
+debug tool writes this file for a test session (`omkdebug.py session --scenario ... --restart`, [debug.md](debug.md)):
+
+```ini
+[shoot]
+steps = look:Kodak Portra 400, stock
+shots = 1
+```

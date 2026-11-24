@@ -5,6 +5,7 @@
 #define CFG_NAME "OMKIT.INI"
 #define CFG_MAX 8192
 #define CFG_ENTRIES 128
+#define CFG_ONCE_MAX 1024                   /* a one-shot file of one section's keys (cfg_once) */
 
 static const char cfg_template[] =
     "; OMKit settings. Lines starting with ; or # are comments.\r\n"
@@ -35,11 +36,12 @@ static const char cfg_template[] =
     "; Line order is load order. Module settings are in its own section [NAME]\r\n"
     "; for example: CREATPRF = on\r\n";
 
-static char text[CFG_MAX + 1];
+static char text[CFG_MAX + 1], once_text[CFG_ONCE_MAX + 1];
 static struct {
     const char *section, *key, *value;
 } entries[CFG_ENTRIES];
-static u32 count, bad, first_bad;
+static u32 count, bad, first_bad, once_from;
+static int once_on;
 
 static int is_space(char c)
 {
@@ -71,11 +73,14 @@ static char *trim(char *s, char *e)
     return s;
 }
 
-static void parse(u32 len)
+/* Lines of p[0..len) into the table. only: every key belongs to this section; a header of another one and the keys under it
+ * are not understood and not kept (the one-shot file); 0: sections as the text has them. Returns the lines not understood */
+static u32 parse(char *p, u32 len, const char *only)
 {
-    char *p = text, *end = text + len, *line, *line_end, *eol, *eq, *s;
-    const char *section = "";
-    u32 n = 0;
+    char *end = p + len, *line, *line_end, *eol, *eq, *s;
+    const char *section = only ? only : "";
+    u32 n = 0, wrong = 0;
+    int other = 0;                          /* only: under the header of another section */
 
     if (len >= 3 && (u8)p[0] == 0xef && (u8)p[1] == 0xbb && (u8)p[2] == 0xbf)
         p += 3;
@@ -92,13 +97,19 @@ static void parse(u32 len)
             for (s = line + 1; *s && *s != ']'; s++)
                 ;
             if (*s == ']') {
-                section = trim(line + 1, s);
-                continue;
+                const char *name = trim(line + 1, s);
+
+                if (!only)
+                    section = name;
+                else
+                    other = !str_ieq(name, only);
+                if (!other)                         /* the one-shot file: its own section's header only */
+                    continue;
             }
         } else {
             for (eq = line; *eq && *eq != '='; eq++)
                 ;
-            if (*eq == '=' && eq > line && count < CFG_ENTRIES) {
+            if (*eq == '=' && eq > line && count < CFG_ENTRIES && !other) {
                 entries[count].section = section;
                 entries[count].value = trim(eq + 1, line_end);
                 entries[count].key = trim(line, eq);
@@ -106,10 +117,10 @@ static void parse(u32 len)
                 continue;
             }
         }
-        if (!bad)
+        if (!wrong++ && !bad && !only)
             first_bad = n;
-        bad++;
     }
+    return wrong;
 }
 
 int cfg_load(void)
@@ -129,7 +140,7 @@ int cfg_load(void)
             drv_fclose(fp);
         }
         mem_copy(text, cfg_template, len);
-        parse(len);
+        bad = parse(text, len, 0);
         return fp ? 0 : -1;
     }
     len = drv_fread(text, 1, CFG_MAX + 1, fp);  /* one byte more: to tell a full file from a longer one */
@@ -138,8 +149,35 @@ int cfg_load(void)
         len = CFG_MAX;
         log_printf(OMK_LOG_WARN, "config: OMKIT.INI longer than %u bytes, the rest is ignored", CFG_MAX);
     }
-    parse(len);
+    bad = parse(text, len, 0);
     return 1;
+}
+
+/* The one-shot file: read once after OMKIT.INI, its keys are added after the others - the last value wins */
+int cfg_once(const char *name, const char *section, u32 *wrong)
+{
+    char path[OMK_PATH_MAX];
+    void *fp;
+    u32 len;
+
+    *wrong = 0;
+    if (once_on || omk_path(path, 0, name) || !(fp = drv_fopen(path, "r")))
+        return 0;
+    len = drv_fread(once_text, 1, CFG_ONCE_MAX + 1, fp);   /* one byte more: to tell a full file from a longer one */
+    drv_fclose(fp);
+    if (len > CFG_ONCE_MAX)
+        return -1;                          /* longer than any scenario: not used at all */
+    once_on = 1;
+    once_from = count;
+    *wrong = parse(once_text, len, section);
+    return 1;
+}
+
+void cfg_once_drop(void)
+{
+    if (once_on)
+        count = once_from;
+    once_on = 0;
 }
 
 const char *cfg_str(const char *section, const char *key, const char *def)

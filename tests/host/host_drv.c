@@ -42,6 +42,8 @@ static void host_path(char *out, const char *path)
 u32 host_written, host_fopens, host_removes, host_inplace;
 int host_no_card;                       /* 1 - no file opens, as without a card */
 
+u32 host_fopen_us;
+
 /* Files open now, and whether the firmware no longer takes them (the camera's PC mode: every call gives 0x9414) */
 static struct {
     FILE *f;
@@ -100,6 +102,7 @@ static FILE *host_fopen(const char *path, const char *mode)
 
     host_path(p, path);
     host_fopens++;
+    host_ticks = (host_ticks + host_fopen_us) & 0x3fffffff;   /* a card operation takes time, as on the camera */
     if (host_no_card)
         return 0;
     if (mode[0] == 'r' && mode[1] == '+') {   /* the firmware: no truncation, made if not there */
@@ -896,4 +899,45 @@ __attribute__((weak)) int drv_ui_probe(u32 *app, u32 *keys)
     *app = host_app;
     *keys = 0;
     return host_ui;
+}
+
+/* The restart request: counted */
+int host_restarts;
+
+int drv_restart_request(void)
+{
+    host_restarts++;
+    return 0;
+}
+
+/* Weak: the scenario (core/shoot.c, in every host program since the debug service starts it); test_shoot.c has its own */
+int host_shutter_calls;
+
+__attribute__((weak)) int drv_shutter(u32 key, int down, u32 path)
+{
+    (void)key, (void)down, (void)path;
+    host_shutter_calls++;
+    return 0;
+}
+
+__attribute__((weak)) void drv_look_stats(drv_look_info *st)
+{
+    memset(st, 0, sizeof(*st));
+}
+
+__attribute__((weak)) int drv_look_choose(int on, u32 index)
+{
+    (void)on, (void)index;
+    return -1;
+}
+
+__attribute__((weak)) int drv_look_find(const char *name)
+{
+    (void)name;
+    return -1;
+}
+
+__attribute__((weak)) void drv_prof_choose(u32 prof)
+{
+    (void)prof;
 }

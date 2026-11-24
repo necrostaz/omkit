@@ -69,7 +69,7 @@ static void stack_service(u32 now)
 }
 
 static const char *const level_names[] = {"off", "error", "warn", "info", "debug"};
-/* run_logs: a log file per power-on, dropped in core 1.42 (a file made at every start); still known, so that an old
+/* run_logs: a log file per power-on, dropped (a file made at every start); still known, so that an old
  * OMKIT.INI gets no warning, and ignored */
 static const char *const core_keys[] = {"log", "log_level", "run_logs", "fw_heap", "fw_heap_limit", "core_events",
                                          "fw_cache_inv", "taskdump", "taskdump_every", "taskdump_base", "taskdump_stuck"};
@@ -98,10 +98,6 @@ static void make_run_id(void)
     run_id[8] = 0;
 }
 
-#ifndef OMK_BUILD
-#define OMK_BUILD "unknown"                 /* the Makefile gives the branch and commit (tools/build_id.sh) */
-#endif
-
 /* The run's header in CORE.LOG, which holds the runs one after another: the start's date and time by the camera's clock,
  * the build, the run id. The modules' versions follow when they are loaded (modules_load) */
 static void log_header(void)
@@ -127,7 +123,7 @@ static void log_header(void)
         k += width;
         when[k++] = i == 2 ? ' ' : i == 5 ? 0 : i < 2 ? '-' : ':';
     }
-    log_banner("======== OMKit core %s (%s), %s, run %s, started %s ========", CORE_VERSION, OMK_BUILD, drv_name(), run_id,
+    log_banner("======== OMKit core %s (%s), %s, run %s, started %s ========", CORE_VERSION, CORE_BUILD, drv_name(), run_id,
                d.year >= 2000 && d.year < 2100 && d.month >= 1 && d.month <= 12 ? when : "?");
 }
 
@@ -313,7 +309,7 @@ void core_main(void)
             log_printf(OMK_LOG_WARN, "core: the event flag wait fails or returns at once again and again, plain sleep from now on");
         }
         if (!power_service(now)) {
-            shoot_power_lost();             /* keys released, the scenario ends */
+            shoot_power_lost();             /* keys released, the scenario waits for the camera to shoot again */
             continue;                       /* power-off or sleep: no card, no module work */
         }
         if (!loaded) {
