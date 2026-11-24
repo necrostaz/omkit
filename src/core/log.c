@@ -261,7 +261,7 @@ void log_banner(const char *fmt, ...)
 /* Appends ring[f->done, h) to the file. 0 - the card does not take it now: try again later (log_flush's pause).
  *
  * The open file may stop working while it is open: the camera's PC mode (USB, MTP) gave every call on it the firmware's
- * error 9414 (0x24C6: fwrite took 0 bytes, fflush and fclose returned it - camera, card157), while a file opened anew
+ * error 0x9414 (an invalid file - fwrite took 0 bytes, fflush and fclose returned it; camera, card157), while a file opened anew
  * worked. So a portion the open file does not take closes it and goes once more to a file opened anew; only a file
  * opened anew that does not take it is a failure of the card: the text stays in the ring and is tried again after the
  * pause, and after LOG_FAILS_MAX such failures in a row (a full or failing card) the file is given up for this run -

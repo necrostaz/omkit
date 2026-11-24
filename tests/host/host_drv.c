@@ -42,7 +42,7 @@ static void host_path(char *out, const char *path)
 u32 host_written, host_fopens, host_removes, host_inplace;
 int host_no_card;                       /* 1 - no file opens, as without a card */
 
-/* Files open now, and whether the firmware no longer takes them (the camera's PC mode: every call gives 0x24C6) */
+/* Files open now, and whether the firmware no longer takes them (the camera's PC mode: every call gives 0x9414) */
 static struct {
     FILE *f;
     int stale;
@@ -84,7 +84,7 @@ void host_files_stale(void)
             open_files[i].stale = 1;
 }
 
-#define HOST_STALE_RC 0x24c6                /* the firmware's answer on such a file (camera, card157) */
+#define HOST_STALE_RC 0x9414                /* the firmware's answer on such a file (camera, card157) */
 
 static FILE *host_fopen(const char *path, const char *mode);
 

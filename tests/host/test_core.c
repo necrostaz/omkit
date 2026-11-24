@@ -180,7 +180,7 @@ static void test_log(void)
     t = read_file("LOG/CORE.LOG", &m);
     CHECK(t && strstr(t, " I portion 4\r\n") && strstr(t, " I after the pause\r\n"));
     free(t);
-    /* the camera's PC mode: the open file no longer takes anything (0x24C6) - it is closed and the portion goes to a file
+    /* the camera's PC mode: the open file no longer takes anything (0x9414) - it is closed and the portion goes to a file
      * opened anew, nothing lost and nothing stopped */
     host_files_stale();
     before = host_fopens;

@@ -19,7 +19,7 @@ extern u32 host_installs[8];             /* how many times the event hook was in
 extern u32 host_fopens;                  /* drv_fopen calls */
 extern u32 host_removes, host_inplace;   /* drv_remove calls; drv_fopen calls in r+ (a rewrite in place) */
 extern drv_date_t host_date;            /* what drv_date gives */
-void host_files_stale(void);              /* every file open now fails from now on (0x24C6) */
+void host_files_stale(void);              /* every file open now fails from now on (0x9414) */
 extern int host_unmounted;                /* drv_card_mounted gives 0 */
 extern int host_fclose_rc;               /* drv_fclose's answer */
 extern int host_no_card;                 /* 1 - drv_fopen fails, as without a card */
