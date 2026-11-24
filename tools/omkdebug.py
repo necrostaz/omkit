@@ -702,22 +702,54 @@ def run(cam, a) -> int:
     return 2
 
 
+DCF_SUFFIXES = ("OMSYS", "OLYMP")          # the DCF folder names of OM SYSTEM and Olympus cameras: NNNOMSYS, NNNOLYMP
+DCF_GAP = 5                                 # numbers in a row without pictures that end the search for folders
+
+
+def dcim_folders(cam) -> list[str]:
+    """The DCF folders of DCIM, oldest first. The listing of core (the firmware's findfirst with the mask *.*) leaves out
+    names without a dot - the folders (camera, card155) - so DCIM lists empty: then the folders are looked for by name,
+    NNN + OMSYS or OLYMP from 100 up, until DCF_GAP numbers in a row have no files (an empty folder looks the same)"""
+    found = sorted(e["name"] for e in list_dir(cam, "DCIM") if e["dir"] and e["name"][:1].isdigit())
+    if found:
+        return found
+    gap, n = 0, 100
+    while n <= 999 and gap < DCF_GAP:
+        hit = False
+        for suffix in DCF_SUFFIXES:
+            if list_dir(cam, f"DCIM\\{n}{suffix}"):
+                found.append(f"{n}{suffix}")
+                hit = True
+        gap = 0 if hit else gap + 1
+        n += 1
+    return found
+
+
 def pull_pictures(cam, n: int, folder: Path) -> list[tuple[Path, int]]:
-    """The last n pictures of DCIM (JPEG and ORF of each)"""
-    dirs = sorted(e["name"] for e in list_dir(cam, "DCIM") if e["dir"] and e["name"][:1].isdigit())
-    files: list[str] = []
-    for f in reversed(dirs):
-        names = sorted(e["name"] for e in list_dir(cam, "DCIM\\" + f) if not e["dir"])
-        files = [f"DCIM\\{f}\\{x}" for x in names if x.upper().endswith((".JPG", ".ORF"))] + files
-        if len({Path(x.replace("\\", "/")).stem for x in files}) >= n:
+    """The last n pictures of DCIM (JPEG and ORF of each): by folder, then by the time written, then by name. Fewer than
+    n there - Refused (a session must not end well without them)"""
+    pics: list[tuple[str, str, str]] = []           # (folder, changed, name)
+    stems: list[tuple[str, str]] = []
+    for f in reversed(dcim_folders(cam)):
+        here = [(f, e["changed"], e["name"]) for e in list_dir(cam, "DCIM\\" + f)
+                if not e["dir"] and e["name"].upper().endswith((".JPG", ".ORF"))]
+        pics = sorted(here) + pics
+        last: dict = {}                             # a picture (folder, stem): its latest file
+        for x in pics:
+            k = (x[0], Path(x[2]).stem)
+            last[k] = max(last.get(k, x), x)
+        stems = sorted(last, key=last.get)
+        if len(stems) >= n:
             break
-    stems = sorted({Path(x.replace("\\", "/")).stem for x in files})[-n:] if n > 0 else []
+    if len(stems) < n:
+        raise Refused(f"pictures: {len(stems)} found in DCIM, {n} asked for")
+    want = set(stems[-n:]) if n > 0 else set()
     out = []
     folder.mkdir(parents=True, exist_ok=True)
-    for x in files:
-        if Path(x.replace("\\", "/")).stem in stems:
-            data = read_file(cam, x)
-            path = folder / x.split("\\")[-1]
+    for f, _, name in pics:
+        if (f, Path(name).stem) in want:
+            data = read_file(cam, f"DCIM\\{f}\\{name}")
+            path = folder / name
             path.write_bytes(data)
             out.append((path, len(data)))
     return out

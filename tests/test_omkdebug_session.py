@@ -125,6 +125,7 @@ class FakeCam:
             return self._job(sub, 0, len(self.xfer), binascii.crc32(self.xfer), p[1] + len(self.xfer))
         if sub == omkdebug.LIST:
             ents = sorted({k[len(self.path) + 1:].split("\\")[0] for k in w.files if k.startswith(self.path + "\\")})
+            ents = [e for e in ents if "." in e]            # the firmware's findfirst "*.*": names with a dot (camera)
             self.xfer = b"".join(struct.pack("<4I", 0x20 if "." in e else 0x10, 1, 0, 0) + e.encode().ljust(48, b"\0")
                                  for e in ents)
             return self._job(sub, 0, len(self.xfer), 0, len(ents))
@@ -271,6 +272,24 @@ class SessionSteps(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertTrue(any("the request was not taken" in m for m in w.said))
         self.assertEqual(w.run, "RUN00001")
+
+    def test_no_pictures_fails(self):
+        w = World()
+        del w.files["DCIM\\100OMSYS\\P1010001.JPG"], w.files["DCIM\\100OMSYS\\P1010002.JPG"]
+        with tempfile.TemporaryDirectory() as d:
+            rc = self.make(w).run(Args(pull_pictures=1, out=d))
+        self.assertEqual(rc, 1)
+        self.assertIn("pictures: 0 found in DCIM, 1 asked for", w.said[-1])
+
+    def test_pictures_in_two_folders(self):
+        w = World()
+        w.files["DCIM\\101OMSYS\\P1020003.JPG"] = b"j3"
+        w.files["DCIM\\101OMSYS\\P1020003.ORF"] = b"r3"
+        with tempfile.TemporaryDirectory() as d:
+            rc = self.make(w).run(Args(pull_pictures=2, out=d))
+            got = sorted(x.name for x in Path(d).iterdir())
+        self.assertEqual(rc, 0, w.said)
+        self.assertEqual(got, ["P1010002.JPG", "P1020003.JPG", "P1020003.ORF"])
 
     def test_camera_gone_for_good(self):
         w = World()
