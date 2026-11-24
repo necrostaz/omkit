@@ -20,6 +20,15 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A reset during a card write no longer breaks the card's volume (core 1.42).** The stores' copies have a fixed length
+  and are rewritten in place, so a save changes neither the FAT nor the allocation bitmap nor more than one directory
+  entry, and the log is no longer removed and made again at every start. Before, a reset in the middle of a save could
+  leave a half-written directory entry set in `OMKIT\STORE` (Windows hid the folder until `chkdsk /f`). The copies of an
+  older core are made again once, in the new length, at their first save; the settings in them are kept.
+- **One log for all power-ons (core 1.42).** `OMKIT\LOG\CORE.LOG` is appended to from one start to the next; each
+  power-on begins with a header line - the build (branch and commit), the run id, the camera clock's date and time - and
+  a line with the versions of the loaded modules. `run_logs` is gone (ignored if still in `OMKIT.INI`); old
+  `XXXXXXXX.LOG` files are left on the card.
 - **core 1.42** has both the debug service and the test scenario. Its image with the stack may now end at `0x634a0000`
   (was `0x63490000`); the module arena still starts at the image's real end.
 
