@@ -41,7 +41,58 @@ static void host_path(char *out, const char *path)
 u32 host_written, host_fopens, host_removes, host_inplace;
 int host_no_card;                       /* 1 - no file opens, as without a card */
 
+/* Files open now, and whether the firmware no longer takes them (the camera's PC mode: every call gives 0x24C6) */
+static struct {
+    FILE *f;
+    int stale;
+} open_files[32];
+
+static FILE *opened(FILE *f)
+{
+    unsigned i;
+
+    for (i = 0; f && i < sizeof(open_files) / sizeof(open_files[0]); i++)
+        if (!open_files[i].f) {
+            open_files[i].f = f;
+            open_files[i].stale = 0;
+            break;
+        }
+    return f;
+}
+
+static int stale(void *fp, int forget)
+{
+    unsigned i;
+    int r = 0;
+
+    for (i = 0; i < sizeof(open_files) / sizeof(open_files[0]); i++)
+        if (open_files[i].f == fp) {
+            r = open_files[i].stale;
+            if (forget)
+                open_files[i].f = 0;
+        }
+    return r;
+}
+
+void host_files_stale(void)
+{
+    unsigned i;
+
+    for (i = 0; i < sizeof(open_files) / sizeof(open_files[0]); i++)
+        if (open_files[i].f)
+            open_files[i].stale = 1;
+}
+
+#define HOST_STALE_RC 0x24c6                /* the firmware's answer on such a file (camera, card157) */
+
+static FILE *host_fopen(const char *path, const char *mode);
+
 void *drv_fopen(const char *path, const char *mode)
+{
+    return opened(host_fopen(path, mode));
+}
+
+static FILE *host_fopen(const char *path, const char *mode)
 {
     char p[512];
     FILE *f;
@@ -115,6 +166,8 @@ u32 drv_fread(void *buf, u32 size, u32 n, void *fp)
 
 u32 drv_fwrite(const void *buf, u32 size, u32 n, void *fp)
 {
+    if (stale(fp, 0))
+        return 0;
     host_written += size * n;               /* the tests check how much a flush writes */
     return fwrite(buf, size, n, fp);
 }
@@ -123,13 +176,15 @@ int host_fclose_rc;                         /* what drv_fclose answers (0 - clos
 
 int drv_fclose(void *fp)
 {
+    int was = stale(fp, 1);
+
     fclose(fp);
-    return host_fclose_rc;
+    return was ? HOST_STALE_RC : host_fclose_rc;
 }
 
 u32 drv_fflush(void *fp)
 {
-    return fflush(fp);
+    return stale(fp, 0) ? HOST_STALE_RC : (u32)fflush(fp);
 }
 
 void drv_sleep(u32 ms)

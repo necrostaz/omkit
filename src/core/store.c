@@ -276,8 +276,8 @@ static void save(omk_store *s)
         drv_remove(path);                   /* "w" does not truncate here: an old file of another length would keep it */
         fp = drv_fopen(path, "wb");
     }
-    if (!fp) {
-        s->in_place[seq & 1] = 0;
+    if (!fp) {                              /* no card, or the card's file module refuses now (the camera's PC mode):
+                                               the file is as it was - in place still holds for the next try */
         core_card_write(0, path);
         if (!s->failing)                    /* once: without a card it fails on every try */
             log_printf(OMK_LOG_WARN, "store %s: cannot open %s", s->name, path);
@@ -293,7 +293,9 @@ static void save(omk_store *s)
         save_failed(s);
         return;
     }
-    s->in_place[seq & 1] = w == s->flen;    /* a short write: the file is made again next time */
+    if (made)                               /* a file made short is made again next time; a rewrite in place keeps the
+                                               file's length whatever it took */
+        s->in_place[seq & 1] = w == s->flen;
     if (made && w == s->flen)
         log_printf(OMK_LOG_INFO, "store %s: %s made, %u bytes, rewritten in place from now on", s->name, path, s->flen);
     if (w != s->flen) {                     /* card full or failing: the other slot still has the last good version */

@@ -180,6 +180,19 @@ static void test_log(void)
     t = read_file("LOG/CORE.LOG", &m);
     CHECK(t && strstr(t, " I portion 4\r\n") && strstr(t, " I after the pause\r\n"));
     free(t);
+    /* the camera's PC mode: the open file no longer takes anything (0x24C6) - it is closed and the portion goes to a file
+     * opened anew, nothing lost and nothing stopped */
+    host_files_stale();
+    before = host_fopens;
+    log_printf(OMK_LOG_INFO, "after the pc mode");
+    log_flush();
+    CHECK(host_fopens == before + 1);
+    log_printf(OMK_LOG_INFO, "and on");
+    log_flush();
+    CHECK(host_fopens == before + 1);       /* the new file stays open */
+    t = read_file("LOG/CORE.LOG", &m);
+    CHECK(t && strstr(t, " I after the pc mode\r\n") && strstr(t, " I and on\r\n") && strstr(t, "(the open file): opened again"));
+    free(t);
     t = read_file("LOG/CORE.LOG", &n);      /* the length the later checks count from */
     free(t);
     /* a long line is cut, '~' at the end */

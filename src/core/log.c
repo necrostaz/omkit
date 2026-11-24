@@ -32,6 +32,7 @@
 #define LOG_RETRY_MIN_MS 1000               /* the pause after the first append that did not reach the card ... */
 #define LOG_RETRY_MAX_MS 60000              /* ... and the longest one: a card put back is noticed within a minute */
 #define LOG_HOLD_MS 30000                   /* the open file is closed after this long without a portion to write */
+#define LOG_FAILS_MAX 8                     /* portions a file opened anew does not take, in a row, before it is given up */
 
 typedef struct {
     const char *path;
@@ -48,7 +49,7 @@ typedef struct {                            /* a line being formatted */
 } line_buf;
 
 static char ring[RING_SIZE];
-static u32 head, tail, lost, lost_told, last_change, last_flush;
+static u32 head, tail, lost, lost_told, last_change, last_flush, dropped, dropped_told;
 static u32 retry_ms, retries;               /* the pause before log_service tries again (0 - the last append was taken);
                                                failed tries in a row */
 static int dirty, enabled = 1, level = OMK_LOG_INFO;
@@ -58,7 +59,7 @@ static int tee_level = OMK_LOG_OFF;
 static char log_path[OMK_PATH_MAX];
 static log_file core_file;
 static void *log_fp;                        /* the open log file, or 0 */
-static u32 fflush_told;                     /* fflush failures logged (the first only) */
+static u32 fails;                           /* portions a file opened anew did not take, in a row */
 static u32 last_write;                      /* when the last portion was written to it */
 
 void log_setup(int on, int lvl)
@@ -254,46 +255,62 @@ void log_banner(const char *fmt, ...)
     va_end(ap);
 }
 
-/* Appends ring[f->done, h) to the file. 0 - the card is not there now: try again later */
+/* Appends ring[f->done, h) to the file. 0 - the card does not take it now: try again later (log_flush's pause).
+ *
+ * The open file may stop working while it is open: the camera's PC mode (USB, MTP) gave every call on it the firmware's
+ * error 9414 (0x24C6: fwrite took 0 bytes, fflush and fclose returned it - camera, card157), while a file opened anew
+ * worked. So a portion the open file does not take closes it and goes once more to a file opened anew; only a file
+ * opened anew that does not take it is a failure of the card: the text stays in the ring and is tried again after the
+ * pause, and after LOG_FAILS_MAX such failures in a row (a full or failing card) the file is given up for this run -
+ * the text from then on is counted as lost. A portion that fwrite took but fflush did not is written again (its text
+ * twice rather than lost) */
 static int append(log_file *f, u32 h)
 {
-    u32 n = h - f->done, w, rc;
-    void *fp;
+    u32 n, w, rc, pass;
+    int fresh;
 
-    if (f->state == FILE_STOPPED || !n)
+    if (f->state == FILE_STOPPED || h == f->done)
         return 1;
     core_card_write(1, f->path);
-    if (!log_fp) {
-        if (f->state == FILE_NEW)
-            omk_dir(LOG_DIR);               /* the card may have been formatted since boot */
-        log_fp = drv_fopen(f->path, "ab");  /* opens or creates, at the end */
-        if (!log_fp) {
-            core_card_write(0, f->path);
-            if (!retries)                   /* the first of a row of failures: the reason for the debug service's RAM
+    for (pass = 0; pass < 2; pass++) {
+        n = h - f->done;
+        fresh = !log_fp;
+        if (fresh) {
+            if (f->state == FILE_NEW)
+                omk_dir(LOG_DIR);           /* the card may have been formatted since boot */
+            log_fp = drv_fopen(f->path, "ab");  /* opens or creates, at the end */
+            if (!log_fp) {
+                core_card_write(0, f->path);
+                if (!retries)               /* the first of a row of failures: the reason for the debug service's RAM
                                                log (the card's file only gets it when it works again) */
-                log_printf(OMK_LOG_WARN, "log: cannot open %s: no card, or the card's file module refuses", f->path);
-            return 0;
+                    log_printf(OMK_LOG_WARN, "log: cannot open %s: no card, or the card's file module refuses", f->path);
+                return 0;
+            }
+            f->state = FILE_OPEN;
         }
-    }
-    fp = log_fp;
-    w = write_ring(fp, f->done, n);
-    f->state = FILE_OPEN;
-    rc = drv_fflush(fp);                    /* the length and the clusters to the card now, as fclose would */
-    if (rc) {                               /* the firmware's error: the file is opened again for the next portion */
+        w = write_ring(log_fp, f->done, n);
+        rc = drv_fflush(log_fp);            /* the length and the clusters to the card now, as fclose would */
+        if (!rc)
+            f->done += w;
+        last_write = omk_ms();
+        if (w == n && !rc) {
+            core_card_write(0, f->path);
+            fails = 0;
+            return 1;
+        }
         log_close();
-        if (!fflush_told++)
-            log_printf(OMK_LOG_WARN, "log: fflush of %s returned %x, the file is opened again", f->path, rc);
+        log_printf(OMK_LOG_WARN, "log: %s took %u of %u bytes, fflush %x (%s file): %s", f->path, w, n, rc,
+                   fresh ? "a new" : "the open", fresh ? "tried again later" : "opened again");
+        if (fresh)
+            break;
     }
-    last_write = omk_ms();
     core_card_write(0, f->path);
-    f->done += w;
-    if (w < n) {                            /* card full or failing: stop rather than retry forever */
-        log_close();
+    if (++fails >= LOG_FAILS_MAX) {         /* a full or failing card: not tried for ever */
         f->state = FILE_STOPPED;
-        f->done = h;
-        log_printf(OMK_LOG_ERROR, "log: %s took %u of %u bytes, no more writes to it", f->path, w, n);
+        log_printf(OMK_LOG_ERROR, "log: %s failed %u times in a row, no more writes to it in this run", f->path, fails);
+        return 1;
     }
-    return 1;
+    return 0;
 }
 
 /* Service loop (and the card-off gate) only: file calls */
@@ -312,7 +329,12 @@ void log_flush(void)
         omk_path(log_path, LOG_DIR, LOG_NAME);
     core_file.path = log_path;
     ok = append(&core_file, h);
-    free_to = core_file.state != FILE_STOPPED ? core_file.done : h;   /* the ring is free up to what the file has */
+    free_to = core_file.done;               /* the ring is free up to what the file has */
+    if (core_file.state == FILE_STOPPED) {  /* given up: the text not written is dropped */
+        if (h != core_file.done)
+            dropped += h - core_file.done;
+        core_file.done = free_to = h;
+    }
     st = drv_lock();
     tail = free_to;
     if (!ok)
@@ -330,6 +352,10 @@ void log_flush(void)
     if (lost != lost_told) {
         log_printf(OMK_LOG_WARN, "log: %u lines lost, the buffer was full", lost - lost_told);
         lost_told = lost;
+    }
+    if (dropped != dropped_told) {          /* for the debug service's RAM log: the card's file is given up */
+        log_printf(OMK_LOG_WARN, "log: %u bytes not written, the file was given up", dropped - dropped_told);
+        dropped_told = dropped;
     }
 }
 
