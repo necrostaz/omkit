@@ -21,6 +21,8 @@ f_ev_wait = 0x60051143;                 /* OlyEvWt */
 f_ev_set = 0x60051078;                  /* OlyEvSt */
 f_ev_clear = 0x6005123a;                /* OlyEvCl */
 f_fseek = 0x606aa646;
+/* the camera clock's date and time, the way the file system stamps a file (0x606b9746): a0 the buffer (16 bytes) */
+f_date = 0x60111291;
 f_ftell = 0x606aa5dc;
 f_sleep = 0x60051a2b;
 f_setting_read = 0x602f4c5b;

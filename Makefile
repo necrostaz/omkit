@@ -19,6 +19,17 @@ LD_SCRIPTS := src/core/core.ld src/platform/$(PLATFORM)/fw.ld
 
 all: $(OUT)/CORE.BIN
 
+# The branch and commit of the build, in core's log at every start (tools/build_id.sh; BUILD_ID=... overrides it). The
+# header is rewritten only when the text changes, so an unchanged tree is not rebuilt
+BUILD_ID ?= $(shell sh tools/build_id.sh)
+$(OUT)/build_id.h: FORCE
+	@mkdir -p $(OUT)
+	@echo '#define OMK_BUILD "$(BUILD_ID)"' > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+$(OUT)/main.o: $(OUT)/build_id.h
+$(OUT)/main.o: CFLAGS += -include $(OUT)/build_id.h
+FORCE:
+
 # The MN10300 toolchain must be there before anything is compiled for the camera
 toolchain-check:
 	@command -v $(TC)gcc >/dev/null 2>&1 || { echo "OMKit: no MN10300 compiler $(TC)gcc: build it with toolchain/build-toolchain.sh, or pass TC=<prefix>/bin/mn10300-elf- (docs/build.md)" >&2; exit 1; }
@@ -179,4 +190,4 @@ test: test-host test-tools test-data test-apps
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all clean card toolchain-check test test-hello test-host test-tools test-data test-apps
+.PHONY: all clean card toolchain-check FORCE test test-hello test-host test-tools test-data test-apps

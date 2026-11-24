@@ -7,6 +7,7 @@
 	.global	_start, _drv_fopen, _drv_fread, _drv_fwrite, _drv_fclose, _drv_sleep, _drv_ticks, _drv_setting_read
 	.global	_drv_ev_create, _drv_ev_wait, _drv_ev_set, _drv_ev_clear
 	.global	_drv_key_api, _drv_app_event
+	.global	_drv_date
 	.global	_drv_mkdir, _drv_exists, _drv_dcache_inv_fw, _drv_fflush, _drv_remove, _drv_fseek, _drv_ftell, _drv_cpu, _drv_lock, _drv_unlock, _drv_fwheap_alloc, _drv_fwheap_free
 	.global	_drv_tramp_pm, _drv_orig_pm, _drv_tramp_s1
 	.global	_drv_tramp_off, _drv_tramp_card, _drv_tramp_sleep, _drv_tramp_gate, _drv_tramp_wake
@@ -179,6 +180,16 @@ _drv_remove:
 	mov	d0,a0
 	add	-4,sp
 	call	f_remove,[d2,a2,a3],24
+	add	4,sp
+	rets
+
+# The camera clock's date and time, as the file system stamps files (0x606b9746: call 0x60111291,[],4 with a0 a buffer on
+# its stack): u16 year, bytes month, day, hour, minute, second, hundredths; the clock code also reads the half-word at +8
+# (0x600725cd), so the buffer is 16 bytes
+_drv_date:
+	mov	d0,a0
+	add	-4,sp
+	call	f_date,[],4
 	add	4,sp
 	rets
 

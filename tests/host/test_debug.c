@@ -213,7 +213,7 @@ static void start(const char *ini)
     write_file("OMKIT.INI", ini);
     CHECK(cfg_load() == 1);
     dbg_setup("RUN00001");
-    log_setup(1, OMK_LOG_INFO, 0);
+    log_setup(1, OMK_LOG_INFO);
     dbg_start();
 }
 

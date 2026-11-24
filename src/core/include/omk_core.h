@@ -27,7 +27,7 @@ u32 str_len(const char *s);
 #define OMK_PATH_MAX 64
 int omk_path(char *out, const char *dir, const char *name);   /* OMKit root + [dir\] + name; -1 - too long */
 /* The OMKit folder keeps only OMKIT.INI, CORE.BIN and MODULES; the rest goes into folders */
-#define LOG_DIR "LOG"                       /* CORE.LOG and the logs of each power-on */
+#define LOG_DIR "LOG"                       /* CORE.LOG, the log of the runs one after another */
 #define STORE_DIR "STORE"                   /* the stores of core and the modules */
 int omk_dir(const char *dir);               /* OMKit root + dir made if missing: 0, or -1 */
 void api_res_batch(int on);                 /* api.c: 1 - module_init runs, its resource reads share one open file */

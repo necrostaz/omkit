@@ -15,8 +15,6 @@ static const char cfg_template[] =
     "log = on\r\n"
     "; error | warn | info | debug - how much detail\r\n"
     "log_level = info\r\n"
-    "; on - also write a separate log for every power-on, OMKIT\\LOG\\XXXXXXXX.LOG\r\n"
-    "run_logs = off\r\n"
     "; on - if the arena runs out of space, take small module buffers (up to 16K) from the firmware heap.\r\n"
     "; Requires fw_heap_limit. The heap is shared with shooting: enable only if the arena is too small for modules\r\n"
     "fw_heap = off\r\n"

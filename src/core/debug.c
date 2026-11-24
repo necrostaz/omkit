@@ -602,6 +602,8 @@ static void job_run(u32 now)
 
     if ((kind == J_WBEGIN || kind == J_WDATA || kind == J_WCOMMIT || kind == J_WABORT) && drv_card_busy())
         return;                             /* the camera writes a picture: as every write of core, later */
+    if (kind != J_SNAP)
+        log_close();                        /* a file job may read or replace the log file: not while it is open */
     job.state = DBG_J_RUNNING;
     switch (kind) {
     case J_SNAP:
