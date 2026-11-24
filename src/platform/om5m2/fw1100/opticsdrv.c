@@ -1860,12 +1860,13 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
 {
     u32 k, m, v, sd[OL_LANES], mean[OL_LANES];
 
-    log_printf(r->fallback ? OMK_LOG_WARN : OMK_LOG_INFO, "optics: job %u: layer %s, route %s: reduction %u us (d0 %x), small "
-               "frame %ux%u (asked %ux%u) pitch %u, %u bytes at %08x (%s)%s", n, drv_optics_sub_name(r->sub),
-               r->route == DRV_OPTICS_403 ? "403" : "pair", r->t_down, r->down_rc, r->l_wh & 0xffff, r->l_wh >> 16,
-               r->l_asked & 0xffff, r->l_asked >> 16, r->l_pitch, r->l_len, r->l_bus, r->l_kind == OP_BUS_WINDOW ?
-               "window" : r->l_kind == OP_BUS_DIRECT ? "direct" : "-", r->fallback ? "; the chain LEFT OUT: the plain pass "
-               "to the outputs" : "");
+    log_printf(OMK_LOG_INFO, "optics: job %u: layer %s, route %s: reduction %u us (d0 %x), small frame %ux%u (asked %ux%u) "
+               "pitch %u, %u bytes at %08x (%s)", n, drv_optics_sub_name(r->sub), r->route == DRV_OPTICS_403 ? "403" :
+               "pair", r->t_down, r->down_rc, r->l_wh & 0xffff, r->l_wh >> 16, r->l_asked & 0xffff, r->l_asked >> 16,
+               r->l_pitch, r->l_len, r->l_bus, r->l_kind == OP_BUS_WINDOW ? "window" : r->l_kind == OP_BUS_DIRECT ?
+               "direct" : "-");
+    if (r->fallback)
+        log_printf(OMK_LOG_WARN, "optics: job %u: the chain LEFT OUT (%s): the plain pass to the outputs", n, op_err(r->err));
     if (r->sub >= DRV_OPTICS_L1 && r->w_task)
         log_printf(OMK_LOG_INFO, "optics: job %u: layer read %u us, sources and Gaussians %u us, written %u us; window maps "
                    "%u (%u not released); bytes Y %u Cb %u Cr %u", n, r->t_lread, r->t_calc, r->t_lwrite, r->maps,

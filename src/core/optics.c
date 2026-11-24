@@ -406,13 +406,14 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
     c->cached = (u32)opt_int("read_cached", 0, 0, 1);
     fl = (216 * 5184 + 50 * c->width) / (100 * c->width);   /* optlayer.h's ol_floor_sigma for 5184 */
     log_printf(OMK_LOG_INFO, "optics: layer: route %s, width %u (cells of %u px; the transport alone blurs by sigma ~%u px), "
-               "bytes %s; Bloom %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5), Halation %u (threshold %u, sigma %u + "
-               "%u at %u%%, gain %u%% at 5, colour Cb %d%% Cr %d%%, dark %u%%); picture read %s, %u ms%s", c->route ==
-               DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width, fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" :
-               t, sb, c->tb, c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, cfg_int("optics", "bloom_gain", 150), sh,
-               c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256, cfg_int("optics", "halation_gain", 200),
-               c->hcb * 100 / 256, c->hcr * 100 / 256, c->dark * 100 / 256, c->read ? "on" : "off", c->read_us / 1000,
-               c->cached ? " through the CACHED view" : "");
+               "bytes %s; picture read %s, %u ms%s", c->route == DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width,
+               fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" : t, c->read ? "on" : "off", c->read_us / 1000, c->cached ?
+               " through the CACHED view" : "");
+    log_printf(OMK_LOG_INFO, "optics: layer: Bloom %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5)", sb, c->tb,
+               c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, cfg_int("optics", "bloom_gain", 150));
+    log_printf(OMK_LOG_INFO, "optics: layer: Halation %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb %d%% "
+               "Cr %d%%, dark %u%%)", sh, c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256,
+               cfg_int("optics", "halation_gain", 200), c->hcb * 100 / 256, c->hcr * 100 / 256, c->dark * 100 / 256);
     for (i = 0; i < 4; i++) {
         u32 v = i == 0 ? c->sb & 0xffff : i == 1 ? c->sb >> 16 : i == 2 ? c->sh & 0xffff : c->sh >> 16;
 
