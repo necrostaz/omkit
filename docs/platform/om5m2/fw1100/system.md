@@ -91,9 +91,11 @@ execution addresses in the cached view unless they start with `0xa`/`0xb` (uncac
 | Crash record | `0x62ad5580 + 0x40 * cpu` | `+0` task (written only by the NMI handler), `+4` sp, `+8` psw, `+0xc` pc, `+0x10` DbgSup result, `+0x20..+0x3c` registers. Written through the cache: empty after a restart | code, camera | `drv.c` (`drv_crash_read`) |
 | Subprocessor watchdog | `0x60022a47(n)` | Writes `n` to `0x98e0008c` and command `0x20041001` to `0x98e000a4`; 1 = restart soon | code | |
 | `SYS_WDT` task | entry `0x6005b44a`, table entry `0x60038e18` | Feeds every 3 s, limit 10 s (`0x6005b3fd`) | code | |
-| Run on another CPU | `0x60056380(d0 cpu, a0 function, a1 argument)` | In the target's interrupt context | code | not used |
+| Run on another CPU | `0x60056380(d0 cpu, a0 function, a1 argument)` | In the target's interrupt context (interrupt 169); a full ring drops the call | code | not used |
+| Run on another CPU, in a task | `0x60056757` | In the target's `CPUCALL_CPUn` task (priority 51, 2 KiB stack): waits are allowed there | code | not used |
+| Restart on request | `0x60058ae0` | Writes the cause to `0x8ff000b0`, then `1` to `0x99200400`. Nothing clears the word at startup, so it keeps the last such restart | code | |
 | Startup timeline | records `0xa26e1400`, count u16 `0xa26e13fc` | 24-byte records `{char name[20]; u32 time}`, up to 196, time in microseconds (`0x9890014c` scale); written by `0x6004559d` | code, camera | `drv.c` (`drv_boot_event`) |
-| Task descriptor table | `0x60038b94..0x60039ca4` | 28-byte records `{id, 0, 0, entry, priority, stack, 0}` | code | |
+| Task descriptor table | CPU 0 `0x60038b5c..0x60039cc0` (158 records), CPU 1 `0x6003c9a8..0x6003d1f8` (75), CPU 2 `0x6003db10..0x6003deac` (32) | 28-byte records `{id, attribute, exinf, entry, priority, stack size, stack}`, ending at id 0 | code | |
 | Object id constants | `0x6004132c..0x60041c1a` | Task and queue numbers read with `movhu (abs)`; file server queue `(0x60041830)` = 34, its task `(0x60041364)` = 16, power task queue `(0x60041800)` = 10 | code, emulator | |
 
 ## 4. RTOS services
