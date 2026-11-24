@@ -343,12 +343,11 @@ static void job_read(void)
         job_end(DBG_E_OPEN);
         return;
     }
-    drv_fseek(fp, 0xffffffffu);             /* past the end: the firmware stops at the end - the size */
-    job.extra = drv_ftell(fp);
-    n = 0;
-    if (job.arg[0] < job.extra && !drv_fseek(fp, job.arg[0]))
+    n = 0;                                  /* a seek past the end is not relied on (camera, card152: it left 0) */
+    if (!job.arg[0] || (!drv_fseek(fp, job.arg[0]) && drv_ftell(fp) == job.arg[0]))
         n = drv_fread(xfer, 1, job.arg[1], fp);
     drv_fclose(fp);
+    job.extra = job.arg[0] + n;             /* read up to here: a piece shorter than asked is the end of the file */
     job.bytes = n;
     job.crc = crc32_update(0, xfer, n);
     job_end(DBG_E_OK);
@@ -377,7 +376,9 @@ static void job_list(void)
                 break;
             }
             mem_set(xfer + n * DBG_LIST_REC, 0, DBG_LIST_REC);
-            mem_copy(xfer + n * DBG_LIST_REC, e, 16);
+            mem_copy(xfer + n * DBG_LIST_REC, e, 4);            /* attributes */
+            mem_copy(xfer + n * DBG_LIST_REC + 4, e + 16, 4);   /* size */
+            mem_copy(xfer + n * DBG_LIST_REC + 8, e + 4, 8);    /* DOS date << 16 | time: +4 made, +8 changed */
             for (k = 0; k < DBG_LIST_REC - 17 && e[24 + k]; k++)
                 xfer[n * DBG_LIST_REC + 16 + k] = e[24 + k];
             n++;

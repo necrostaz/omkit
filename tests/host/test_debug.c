@@ -294,6 +294,31 @@ static void test_proto(void)
     r = call(DBG_OP_GET, DBG_XFER, 0, r.p[2], 0);
     CHECK(r.code == 0x2001 && !memcmp(host_ptp_out, "[debug]", 7));
     CHECK(call(DBG_OP_GET, DBG_XFER, 0, 100000, 0).code == 0x201d);
+    /* the next piece from an offset; past the end - nothing, no error (the tool stops at a short piece) */
+    CHECK(call(DBG_OP_CMD, DBG_READ, 1, 6, 0).code == 0x2001 && job_wait() == 0);
+    r = call(DBG_OP_CMD, DBG_STATUS, 0, 0, 0);
+    CHECK(r.p[2] == 6 && r.p[4] == 7);
+    r = call(DBG_OP_GET, DBG_XFER, 0, 6, 0);
+    CHECK(r.code == 0x2001 && !memcmp(host_ptp_out, "debug]", 6));
+    CHECK(call(DBG_OP_CMD, DBG_READ, 100000, 10, 0).code == 0x2001 && job_wait() == 0);
+    CHECK(call(DBG_OP_CMD, DBG_STATUS, 0, 0, 0).p[2] == 0);
+    /* a folder: attributes, size (the firmware's entry +16), times, name */
+    host_find = 1;
+    CHECK(put(DBG_PATH, 0, "OMKIT", 5).code == 0x2001 && call(DBG_OP_CMD, DBG_LIST, 0, 0, 0).code == 0x2001);
+    CHECK(job_wait() == 0);
+    r = call(DBG_OP_CMD, DBG_STATUS, 0, 0, 0);
+    CHECK(r.p[2] >= DBG_LIST_REC && r.p[2] % DBG_LIST_REC == 0 && !(r.p[4] >> 31));
+    r = call(DBG_OP_GET, DBG_XFER, 0, r.p[2], 0);
+    {
+        u32 i, found = 0;
+
+        for (i = 0; i < host_ptp_out_n; i += DBG_LIST_REC)
+            if (!strcmp((char *)host_ptp_out + i + 16, "OMKIT.INI"))
+                found = *(u32 *)(host_ptp_out + i) == 0x20 && *(u32 *)(host_ptp_out + i + 4) == (u32)file_size("OMKIT.INI") &&
+                        *(u32 *)(host_ptp_out + i + 12) == 0x5d787263;
+        CHECK(found);
+    }
+    host_find = 0;
     CHECK(call(DBG_OP_CMD, DBG_SNAP, 0, 0, 0).code == 0x2001 && job_wait() == 0);
     r = call(DBG_OP_CMD, DBG_STATUS, 0, 0, 0);
     CHECK(r.p[4] == 2 && r.p[2] == DBG_SNAP_HEAD + 2 * DBG_SNAP_TASK + DBG_SNAP_OBJ);

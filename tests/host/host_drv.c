@@ -2,6 +2,7 @@
  * As on the camera, wb mode does not truncate an existing file. Firmware heap: three classes on top of malloc. */
 #include <stdio.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #ifdef _WIN32
 #include <direct.h>
 #endif
@@ -529,23 +530,70 @@ void *drv_fopen_long(const char *path, const char *mode)
     return drv_fopen(path, "r");            /* the host's file system takes long names as they are */
 }
 
+/* Folder listing: off unless a test sets host_find (the older tests expect nothing found). Then the files of the mask's
+ * folder, as the firmware's entry has them: +0 attributes (0x10 a folder), +4 made, +8 changed (DOS), +16 size, +24 name.
+ * One listing at a time; the mask's pattern is not matched (the debug service lists *.*) */
+int host_find;
+static struct {
+    DIR *d;
+    char dir[512];
+} find;
+
+static int find_entry(void *entry)
+{
+    struct dirent *e;
+    struct stat st;
+    char p[1024];
+    u8 *b = entry;
+
+    while ((e = readdir(find.d)) != 0) {
+        if (e->d_name[0] == '.')
+            continue;
+        snprintf(p, sizeof(p), "%s/%s", find.dir, e->d_name);
+        if (stat(p, &st))
+            continue;
+        *(u32 *)b = S_ISDIR(st.st_mode) ? 0x10 : 0x20;
+        *(u32 *)(b + 4) = *(u32 *)(b + 8) = 0x5d787263;
+        *(u32 *)(b + 16) = (u32)st.st_size;
+        snprintf((char *)b + 24, DRV_FIND_ENTRY - 24, "%s", e->d_name);
+        return 0;
+    }
+    return -1;
+}
+
 int drv_findfirst(const char *mask, void *entry)
 {
-    (void)mask;
-    (void)entry;
-    return -1;                              /* no folder listing on the host: nothing found */
+    char *slash;
+
+    if (!host_find || find.d)
+        return -1;                          /* no folder listing on the host: nothing found */
+    host_path(find.dir, mask);
+    slash = strrchr(find.dir, '/');
+    if (slash)
+        *slash = 0;
+    find.d = opendir(find.dir);
+    if (!find.d)
+        return -1;
+    if (find_entry(entry)) {
+        closedir(find.d);
+        find.d = 0;
+        return -1;
+    }
+    return 1;
 }
 
 int drv_findnext(int handle, void *entry)
 {
     (void)handle;
-    (void)entry;
-    return -1;
+    return find.d ? find_entry(entry) : -1;
 }
 
 int drv_findclose(int handle)
 {
     (void)handle;
+    if (find.d)
+        closedir(find.d);
+    find.d = 0;
     return 0;
 }
 

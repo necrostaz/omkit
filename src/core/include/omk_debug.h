@@ -33,7 +33,8 @@ enum {                                      /* HELLO's p4 */
 #define DBG_STAGE 16384                     /* the most a GET of BANK or MEM sends */
 #define DBG_XFER_SIZE 65536                 /* the job buffer: READ, LIST, SNAP, WDATA pieces */
 #define DBG_PATH_MAX 63
-#define DBG_LIST_REC 64                     /* LIST: {u32 attributes, u32 size, u32 time words +8, +12, char name[48]} */
+#define DBG_LIST_REC 64                     /* LIST: {u32 attributes, u32 size, u32 made, u32 changed (DOS date << 16 | time),
+                                               char name[48]} */
 #define DBG_SNAP_TASK 92                    /* SNAP: a task, the fields of drv_task in their order */
 #define DBG_SNAP_OBJ 16
 #define DBG_SNAP_HEAD 36

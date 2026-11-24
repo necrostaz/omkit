@@ -69,8 +69,10 @@ class Formats(unittest.TestCase):
         self.assertEqual(d["objects"][0]["kind"], 0x20)
         lst = struct.pack("<4I", 0x10, 0, 1, 2) + b"100OLYMP".ljust(48, b"\0") + struct.pack("<4I", 0x20, 12345, 1, 2)
         lst += b"P1010001.ORF".ljust(48, b"\0")
+        lst = lst[:76] + struct.pack("<I", 0x5D787263) + lst[80:]   # the second entry changed: as the camera wrote CORE.LOG
         e = omkdebug.parse_list(lst)
         self.assertEqual([(x["name"], x["dir"], x["size"]) for x in e], [("100OLYMP", True, 0), ("P1010001.ORF", False, 12345)])
+        self.assertEqual(e[1]["changed"], "2026-11-24 14:19:06")
 
 
 if __name__ == "__main__":

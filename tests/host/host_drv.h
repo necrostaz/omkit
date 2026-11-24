@@ -40,5 +40,6 @@ extern drv_task host_tasks[4];
 extern u32 host_ntasks, host_app;
 extern int host_ui;
 extern int host_in_task;
+extern int host_find;                   /* 1 - drv_findfirst lists the host folder */
 
 #endif
