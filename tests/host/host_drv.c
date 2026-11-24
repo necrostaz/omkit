@@ -38,7 +38,7 @@ static void host_path(char *out, const char *path)
             out[i] = '/';
 }
 
-u32 host_written, host_fopens;
+u32 host_written, host_fopens, host_removes, host_inplace;
 int host_no_card;                       /* 1 - no file opens, as without a card */
 
 void *drv_fopen(const char *path, const char *mode)
@@ -50,6 +50,11 @@ void *drv_fopen(const char *path, const char *mode)
     host_fopens++;
     if (host_no_card)
         return 0;
+    if (mode[0] == 'r' && mode[1] == '+') {   /* the firmware: no truncation, made if not there */
+        host_inplace++;
+        f = fopen(p, "r+b");
+        return f ? f : fopen(p, "w+b");
+    }
     if (mode[0] == 'r')
         return fopen(p, "rb");
     if (mode[0] == 'a')                     /* the firmware: open or create, at the end */
@@ -63,6 +68,7 @@ int drv_remove(const char *path)
     char p[512];
 
     host_path(p, path);
+    host_removes++;
     return remove(p);
 }
 
@@ -113,9 +119,12 @@ u32 drv_fwrite(const void *buf, u32 size, u32 n, void *fp)
     return fwrite(buf, size, n, fp);
 }
 
-void drv_fclose(void *fp)
+int host_fclose_rc;                         /* what drv_fclose answers (0 - closed), the file is closed anyway */
+
+int drv_fclose(void *fp)
 {
     fclose(fp);
+    return host_fclose_rc;
 }
 
 u32 drv_fflush(void *fp)
@@ -411,6 +420,13 @@ void drv_wake(void)
 int drv_wait_state(void)
 {
     return 1;
+}
+
+drv_date_t host_date = {2026, 11, 24, 15, 2, 11, 0, {0}};
+
+void drv_date(drv_date_t *d)
+{
+    *d = host_date;
 }
 
 int drv_rtc(u32 *sec, u32 *frac1024)

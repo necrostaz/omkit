@@ -17,6 +17,9 @@ extern unsigned char host_canvas[2][1152 * 480];
 extern int host_install_rc;              /* what drv_ev_install returns */
 extern u32 host_installs[8];             /* how many times the event hook was installed */
 extern u32 host_fopens;                  /* drv_fopen calls */
+extern u32 host_removes, host_inplace;   /* drv_remove calls; drv_fopen calls in r+ (a rewrite in place) */
+extern drv_date_t host_date;            /* what drv_date gives */
+extern int host_fclose_rc;               /* drv_fclose's answer */
 extern int host_no_card;                 /* 1 - drv_fopen fails, as without a card */
 extern int host_wakes;                   /* drv_wake calls */
 extern int host_isp_ok, host_isp_busy;   /* drv_isp_install works; drv_isp_set answers -2 this many times */
