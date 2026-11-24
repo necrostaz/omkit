@@ -15,6 +15,10 @@ int look_name(omk_mod *m, const char *text);
 int look_art(omk_mod *m, u32 index, const void *data, u32 size);
 int look_edits(omk_mod *m, const omk_look_edits *e);
 int look_grain(omk_mod *m, u32 entry, s32 tile, u32 level);
+int look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 count);   /* API 20 */
+/* The optics rows' strengths of the entry the look's owner has chosen (OMK_OPTICS_* order), for the look's stills; core
+ * task. 1 - the look is active and its owner gave them (out filled), 0 - none (out zeros) */
+int look_optics_now(u8 *out);
 const char *cani_check(const u8 *b, u32 n);    /* 0 - a drawing core accepts, or why not */
 void look_drop_module(omk_mod *m);          /* the owner failed module_init: release the service */
 void look_service(u32 now);                 /* core loop while running: the user's choices to the owner */

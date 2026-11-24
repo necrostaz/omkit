@@ -93,7 +93,7 @@ fi
 # presets. "first" leaves the look on with an edited preset in the store kept in the folder; the others are later
 # power-ons from that store
 mkdir "$tmp/filmlook"
-for what in first again leftlook notnatural gone notlisted; do
+for what in first again leftlook notnatural gone notlisted format2; do
     out=$("$BIN/test_filmlook" "$tmp/filmlook" resources/modules/filmlook/presets "$what" 2>&1)
     if [ "$out" = ok ]; then pass "filmlook start: $what"; else fail "filmlook start: $what"; echo "$out" | sed 's/^/        /'; fi
 done
@@ -105,8 +105,8 @@ out=$("$BIN/test_filmlook" "$tmp/filmedits" resources/modules/filmlook/presets e
 if [ "$out" = ok ]; then pass "filmlook edits: the blocks and the pace"; else fail "filmlook edits"; echo "$out" | sed 's/^/        /'; fi
 
 # The driver's plain C parts (src/platform/om5m2/fw1100): the grain texture's fill by rows against the word-by-word
-# one and the definition; the editors' quarter sine table against the full one it replaced
-for t in test_texfill test_edtrig; do
+# one and the definition; the editors' quarter sine table against the full one it replaced; the column's switches
+for t in test_texfill test_edtrig test_rowsw; do
     if out=$("$BIN/$t" 2>&1) && [ "$out" = ok ]; then pass "driver: ${t#test_}"; else fail "driver: ${t#test_}"; echo "$out" | sed 's/^/        /'; fi
 done
 

@@ -615,6 +615,12 @@ int look_grain(omk_mod *m, u32 entry, s32 tile, u32 level)
     return -2;
 }
 
+int look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 count)
+{
+    (void)m, (void)entry, (void)strength, (void)count;
+    return -2;
+}
+
 void look_drop_module(omk_mod *m)
 {
     (void)m;
