@@ -13,19 +13,20 @@ Basis labels: [README.md](README.md#basis-labels).
 |---|---|---|
 | Kernel | uITRON 4.0 services (`dly_tsk`, `slp_tsk`, `wup_tsk`, `set_flg`, `wai_flg`, `sig_sem`, `loc_mtx`, `get_tim`, ...), one kernel control block per CPU, shared code | code |
 | Tick | 1 ms; timeouts are in milliseconds | inference (the firmware prints kernel time as milliseconds) |
-| Priorities | Smaller number = higher priority. Most firmware service tasks run at 55; `core` runs at 66, below them | code |
+| Priorities | Smaller number = higher priority. Most firmware service tasks run at 55 (93 of the 158 static tasks of CPU 0); the three still recording tasks run at 54, one task at 56; `core` runs at 66, below them | code |
 | Object ids | `cpu << 12 | n`; bit 15 marks an "L class" object; the block is found in the kernel of that CPU | code |
 | Error codes | As in the specification: -17 `E_PAR`, -18 `E_ID`, -25 `E_CTX`, -41 `E_OBJ`, -42 `E_NOEXS`, -43 `E_QOVR`, -50 `E_TMOUT`. The `Oly*` wrappers return -1 on failure (-2 for a timeout) and record the failure in the firmware's error log | code |
 | Service table | None: services are called directly. Every wrapper is labelled with its name string and calls one kernel function | code |
 
 ## 2. Tasks
 
-- **Static tasks** come from a configuration table per CPU: 158 / 69 / 32 entries on CPUs 0 / 1 / 2 (code). A live count on
+- **Static tasks** come from a configuration table per CPU: 158 / 75 / 32 entries on CPUs 0 / 1 / 2 (code). A live count on
   the camera: 166 / 75 / 32 tasks (camera, task dump).
 - **Dynamic tasks** are created by the firmware's `acre_Task` wrapper: name (up to 16 characters, kept in a per-CPU table of
   64 names), entry, priority, stack size, stack (0: from the kernel pool), start now or later (code). It fills the new
   stack with `0xdeadbeef` except its top 32 bytes, which makes the stack high-water mark readable later. Priorities 8..11
-  are replaced by the wrapper (code; why is not known).
+  are replaced by the wrapper with 45, 46, 54 and 55 (code; why is not known). When the name table is full, the wrapper
+  returns -1 although the task was created (code).
 - Tasks created by the plain kernel call have no name in that table.
 
 Known tasks that matter to OMKit (firmware 1.1; ids may differ in other versions):
@@ -36,13 +37,13 @@ Known tasks that matter to OMKit (firmware 1.1; ids may differ in other versions
 | `FILEFGND` | `0x11` | 55 | 2 KiB | 0 | File system foreground work | camera (task dump) |
 | `GUI_TASK` | `0xa7` | 55 | 16 KiB | 0 | User interface | camera (task dump) |
 | `CAM_APP` | | | | 0 | The camera application state machine; runs power-off and sleep | camera (task dump), code |
-| Power task | | 55 (54 while doing periodic work) | | 0 | Serves power messages (queue 10): switch parts off and on | code |
+| `BCHK_MAIN` (power task) | `0x0b` | 55 (54 while doing periodic work) | 1.25 KiB | 0 | Serves power messages (queue 10): switch parts off and on | code |
 | Sleep server | | 55 | 2 KiB, in SRAM | 0 | Runs the light-sleep loop (queue 72) | code |
-| `SYS_WDT` | | 55 | | 0 | Feeds the watchdog every 3 s | code |
+| `SYS_WDT` | `0x19` | 55 | 1 KiB | 0 | Feeds the watchdog every 3 s; the limit is 10 s. It runs at 55 like most service tasks, so a task above 55 that computes without waiting holds it up | code |
 | `FIRMUP_CLI`, `FIRMUP_SRV`, `FIRMUP_LED` | 89, 18, 118 | 45, 55, 25 | 2, 2, 1 KiB | 0 | Firmware update from the card: client, service, lamp | code |
 | `USRSTART_LOAD`, `USRSTART2..5` | 47, 43..46 | 55 | 1-2 KiB | 0 | Startup: section loading and system start | code |
-| `REC_IMA`, `REC_FIL`, `REC_MAI` | `0x20`, `0x1f`, `0x21` | | | 0 | Still recording | code |
-| `REC_MAI_CPU2`, `REC_PV1_CPU2`, `REC_VIE_CPU2` | `0x2012..0x2014` | | | 2 | Still recording, second half | code |
+| `REC_IMAGE`, `REC_FILE`, `REC_MAIN` | `0x20`, `0x1f`, `0x21` | 54 | 13.75, 4.5, 4 KiB | 0 | Still recording; `REC_IMAGE` takes each picture's processing job from its queue and runs it synchronously | code, camera |
+| `REC_MAIN_CPU2`, `REC_PRE_V1_CPU2`, `REC_VIEW_CPU2` | `0x2012..0x2014` | 55, 26, 25 | 8 KiB each | 2 | Still recording, second half | code |
 | `C3D_MAIN` | | | | 1 | Vector/3D drawing for the graphic editors | camera |
 | `OMK_LOAD` | dynamic | 66 | 2 KiB from the kernel pool | 0 | Created by the OMKit loader; becomes the `core` task | camera |
 

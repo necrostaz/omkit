@@ -349,4 +349,49 @@ int drv_mutex_read(u32 cpu, u32 i, drv_obj *o);
 enum { DRV_UI_HALF = 1, DRV_UI_TRANSIENT = 2 };
 int drv_ui_probe(u32 *app, u32 *keys);
 
+/* The debug service (core/debug.c, core 1.40).
+ * drv_keep_area: memory that outlives a reset of the camera (not a power-off or the battery taken out), outside the
+ * arena: uncached, written by tasks of CPU 0 only. 0 - none on this platform.
+ * drv_ptp_add: a vendor operation of the USB picture transfer protocol (PTP) - code, data phase (0 none, 1 to the
+ * computer, 2 from it), the handler - registered at every USB connection from then on, without a session; 0, -1 the table
+ * is full or the code is there already. drv_ptp_install: the registration hook, once (0, or a code as drv_code_jump).
+ * The handlers run in the firmware's PTP task (CPU 0, priority 55, about 1 KB of stack for them): short, no waits, no
+ * card. drv_ptp_send: data to the computer, in pieces (the first one with the total length; pieces of odd length only
+ * last), from a buffer that drv_ptp_buffer_ok accepts: 1 sent, 0 refused. drv_ptp_recv_len: the length of the data the
+ * computer sends (once per operation of phase 2); drv_ptp_recv: len bytes of it into the buffer, 1 or 0.
+ * drv_ptp_history: the firmware's own record of the last PTP operations, copied (bytes, 0 - none).
+ * drv_mem_readable: where to read len bytes of addr, if that is memory a read cannot fault on (RAM; the cached alias is
+ * turned into the uncached one), or 0 - not allowed.
+ * drv_rename: a file in the same folder gets the new name (the target must not exist): 0 or the firmware's error */
+#define DRV_PTP_PHASE_NONE 0
+#define DRV_PTP_PHASE_OUT 1                 /* data to the computer */
+#define DRV_PTP_PHASE_IN 2                  /* data from the computer */
+typedef struct {
+    u32 code, n, p[5];                      /* operation or response code, parameters used, parameters */
+} drv_ptp_msg;
+typedef void (*drv_ptp_fn)(const drv_ptp_msg *req, drv_ptp_msg *resp);
+int drv_keep_area(void **base, u32 *size);
+int drv_ptp_add(u32 code, u32 phase, drv_ptp_fn fn);
+int drv_ptp_install(void);
+int drv_ptp_buffer_ok(const void *buf);
+int drv_ptp_send(const void *buf, u32 len, u32 total);
+u32 drv_ptp_recv_len(void);
+int drv_ptp_recv(void *buf, u32 len);
+u32 drv_ptp_history(void *out, u32 max);
+const volatile u8 *drv_mem_readable(u32 addr, u32 len);
+int drv_rename(const char *from, const char *to);
+
+/* The test scenario (core/shoot.c), core task only, never under drv_lock.
+ * drv_shutter: the shutter button half (DRV_SHUTTER_HALF) or fully (DRV_SHUTTER_FULL) pressed (down 1) or released (0) -
+ * by the button's own path (DRV_SHUTTER_KEYS: the key image of the key task, as a real press) or by the events of the
+ * Wi-Fi remote (DRV_SHUTTER_WIFI); the firmware's answer (keys), 0 (wifi), -1 bad arguments.
+ * drv_look_choose: as the user in the picture mode screen - entry `index` and the look on (on 1), or the look off (on 0);
+ * core's look service tells the owner at its next loop. 0; -1 no look or a bad index; -4 the stored picture mode is not
+ * the base one (as look_set). drv_look_find: the index of the entry of that name (case not minded), -1 none */
+enum { DRV_SHUTTER_HALF = 0, DRV_SHUTTER_FULL = 1 };
+enum { DRV_SHUTTER_KEYS = 0, DRV_SHUTTER_WIFI = 1 };
+int drv_shutter(u32 key, int down, u32 path);
+int drv_look_choose(int on, u32 index);
+int drv_look_find(const char *name);
+
 #endif

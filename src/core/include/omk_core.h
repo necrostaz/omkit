@@ -5,7 +5,7 @@
 #include "omk_drv.h"
 #include "omk_mem.h"
 
-#define CORE_VERSION "1.39"
+#define CORE_VERSION "1.43"
 
 /* Milliseconds since camera start. The driver counter wraps every 1073 s, so call this at least once every 17 minutes */
 u32 omk_ms(void);
@@ -40,6 +40,9 @@ u32 crc32_update(u32 crc, const void *data, u32 n);           /* start with 0 */
 int core_in_task(void);                     /* main.c: 1 - the caller is the core task (by its stack) */
 void core_mark_ended(void);                 /* main.c: the run reached the end of a power-off */
 int core_prev_ended(void);                  /* main.c: 1 - the previous run ended with a power-off (or it is not known) */
+/* debug.c: core is about to write to the card (begin 1) or is done (0) - the log, a store, a file of the debug service;
+ * what - the path. Snapshots of the file tasks around it when the debug service is on; nothing otherwise */
+void core_card_write(int begin, const char *what);
 
 /* grain.c: the look's grain - the tile containers, the slot and the driver's hooks; its work from the core loop */
 void grain_service(u32 now);

@@ -6,7 +6,8 @@
  * names and value names from component 0x106). The profile lines are not there, and the camera does not announce the
  * function (PTP 0x970B), so Workspace does not offer it. Four jumps, all in code that CPU 0 runs (USB tasks 0x28.., the
  * application task for the parse), installed once - sections 9 and 10 are never loaded again:
- *  - 0x614ba920, the vendor operation registration (it runs at every USB connection, after clearing the list): 0x970B too;
+ *  - 0x614ba920, the vendor operation registration (it runs at every USB connection, after clearing the list): 0x970B too,
+ *    through the driver's table of operations (ptp.c, shared with the debug service);
  *  - 0x6160a694, ID -> table B entry: our entry, only for the value parse (return address 0x6160a850);
  *  - 0x6160a7b7, the miss of name -> ID: our names;
  *  - 0x6160a087, a parsed line about to be applied: the profile lines go through drv_imp_apply.
@@ -16,6 +17,8 @@
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
+
+int drv_ptp_add_raw(u32 code, u32 phase, void *handler);   /* ptp.c */
 
 #define NAME_BASE 0xae563750u               /* component 0x106: setting names, 52 bytes each */
 #define VALUE_BASE 0xae589740u              /* value lists {s32 value, char name[52]}: offsets from here (mod 2^32) */
@@ -192,12 +195,11 @@ int drv_imp_apply(u32 id, u32 value, u32 slot)
     return 0;
 }
 
-void drv_tramp_imp_reg(void);               /* thunks.s */
+void drv_h970b(void);                       /* thunks.s */
 void drv_tramp_imp_id(void);
 void drv_tramp_imp_name(void);
 void drv_tramp_imp_apply(void);
 
-#define SITE_REG 0x614ba920
 #define SITE_ID 0x6160a694
 #define SITE_NAME 0x6160a7b7
 #define SITE_APPLY 0x6160a087
@@ -264,7 +266,6 @@ static u32 list_off(u32 list)
 /* Core task, with the profiles' install. 0 or a code; nothing is changed unless all is as expected */
 int drv_imp_install(void)
 {
-    static const u8 reg_site[5] = {0xfc, 0xcc, 0x0c, 0x97, 0x00};    /* mov 0x970c,d0 */
     static const u8 id_site[5] = {0xfc, 0xdc, 0x88, 0xb8, 0x60};     /* mov 0x6160b888,a0 */
     static const u8 name_site[5] = {0xf1, 0xd8, 0x1c, 0xdf, 0xf0};   /* mov a2,d0; exthu d0; ret [d2,d3,a2,a3],24 */
     static const u8 apply_site[5] = {0x58, 0x48, 0xfa, 0xc8, 0x00};  /* mov (72,sp),d0; cmp 256,d0 */
@@ -311,7 +312,9 @@ int drv_imp_install(void)
         return 20 + rc;
     if ((rc = drv_code_jump(SITE_NAME, name_site, (void *)drv_tramp_imp_name)) != 0)
         return 30 + rc;
-    if ((rc = drv_code_jump(SITE_REG, reg_site, (void *)drv_tramp_imp_reg)) != 0)
+    if (drv_ptp_add_raw(0x970b, DRV_PTP_PHASE_NONE, (void *)drv_h970b))
+        return 49;
+    if ((rc = drv_ptp_install()) != 0)
         return 40 + rc;
     return 0;
 }

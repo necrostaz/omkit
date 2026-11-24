@@ -9,6 +9,7 @@ extern u32 host_fw_total[3], host_fw_out[3];   /* firmware heap: blocks per clas
 extern const char *host_dir;
 extern int host_canvas_ok;               /* 0 - no screen */
 extern u32 host_prof, host_prof_seq, host_prof_ui, host_prof_base, host_prof_installs;   /* drv_prof_* */
+extern u32 host_prof_takes;              /* drv_prof_stats: the pictures counted */
 extern int host_prof_install_rc;
 extern int host_power_pending;            /* 1 - the firmware lever flag is set */
 extern int host_canvas_evf;              /* 1 - viewfinder: canvas 639 x 479 in the same buffers */
@@ -30,5 +31,24 @@ extern u32 host_opt_crumb[DRV_OPTICS_CRUMB];
 extern int host_opt_worker_rc;           /* what drv_optics_worker answers (0 - running) */
 extern u32 host_opt_workers;             /* drv_optics_worker calls */
 extern int host_ui_state;                /* what drv_ui_probe answers (0 - a lasting state) */   /* the crumbs: [0] the magic, the rest as the driver's */
+/* The debug service */
+typedef struct {
+    u32 code, phase;
+    drv_ptp_fn fn;
+} host_ptp_op;
+extern unsigned char host_keep[0x20080];
+extern u32 host_keep_size;
+extern host_ptp_op host_ptp[8];
+extern u32 host_ptp_n;
+extern int host_ptp_installs;
+extern unsigned char host_ptp_out[1 << 17];
+extern u32 host_ptp_out_n, host_ptp_total, host_ptp_sends;
+extern const unsigned char *host_ptp_in;
+extern u32 host_ptp_in_n;
+extern unsigned char host_mem[4096];
+extern drv_task host_tasks[4];
+extern u32 host_ntasks, host_app;
+extern int host_in_task;
+extern int host_find;                   /* 1 - drv_findfirst lists the host folder */
 
 #endif

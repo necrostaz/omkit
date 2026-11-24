@@ -69,8 +69,9 @@
  * flag (op_delegate). The step waits the firmware's way, as for an ISP pass, and does not return while the worker may
  * touch the picture (op_delegate's comment has the limits).
  * The crumbs: the step and W, H3 write where they are (the job, its substage, the phase, and every phase reached) into
- * 64 bytes past the arena's end, 0xa377ffc0 (drv.c leaves them out of the arena; the firmware does not use the region,
- * checked word by word on the camera), through the uncached alias: if the memory outlives a reset, core reads at the
+ * the last 128 bytes of the arena's region, 0xa377ff80..0xa3780000 (drv.c's ARENA_TAIL leaves them out of the arena, with
+ * the debug service's memory below them; the firmware does not use the region, checked word by word on the camera),
+ * through the uncached alias: if the memory outlives a reset, core reads at the
  * next start where the step was (drv_optics_crumb). core writes a heartbeat there too, so a start can tell "memory kept,
  * the step not reached" from "memory lost".
  *
@@ -157,7 +158,7 @@
                                                n & 0xff): read only, plain words */
 #define ROWS 4                              /* jobs listed and not ended at once (as graindrv.c's rows) */
 #define SUBS DRV_OPTICS_SUBS
-#define CRUMB 0xa377ff80u                   /* drv.c: the last 128 bytes below the arena's end (ARENA_TAIL) */
+#define CRUMB 0xa377ff80u                   /* drv.c: the region's last 128 bytes, out of the arena (ARENA_TAIL) */
 #define CRUMB_MAGIC 0x4f435242u             /* 'OCRB' */
 enum { CR_MAGIC, CR_BOOT, CR_BEAT, CR_STATE, CR_TICKS, CR_PHASES, CR_LISTED, CR_ENDED, CR_PSW, CR_SP, CR_SP_MIN, CR_TASK,
        CR_STK, CR_STKSZ, CR_MODE, CR_WORK, CR_W_LOOPS, CR_W_EMPTY, CR_W_FAST, CR_W_NAPS, CR_W_RC, CR_W_PHASE,
