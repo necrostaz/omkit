@@ -54,5 +54,17 @@ int core_card_ok(void);                     /* 0 - core writes nothing to the ca
 /* A mark, a snapshot of the watched tasks and the window of snapshots after it (core task; nothing while the service is
  * off): for another service's moments worth a look after a reset */
 void dbg_event(const char *what, const char *arg);
+/* Where the core task is (DBG_W_*): before every service of its loop, in a card write, at each snapshot's task - one
+ * word of the bank header past the cache (DH_SPARE: where << 24 | ms & 0xffffff). A core task that stops (card159: its
+ * heartbeat stopped 4 s before the worker task's) leaves the place in RAM, read at the next start and over USB */
+enum {
+    DBG_W_NONE, DBG_W_WAIT, DBG_W_POWER, DBG_W_PROF, DBG_W_SHOOT, DBG_W_STORE, DBG_W_MEM, DBG_W_STACK, DBG_W_EV,
+    DBG_W_LOOK, DBG_W_ISP, DBG_W_GRAIN, DBG_W_OPTICS, DBG_W_MODULES, DBG_W_TASKDUMP, DBG_W_DEBUG, DBG_W_LOG,
+    DBG_W_CARD_BEGIN, DBG_W_CARD_END, DBG_W_SNAPSHOT,  /* a card write by core began, ended; a snapshot */
+    DBG_W_TASK = 0x40                       /* + n: a snapshot reads its n-th watched task */
+};
+void dbg_where(u32 where);
+/* [debug] stuck_mem's words into the log now (core task; nothing without the key): why - the reason in the log line */
+void dbg_mem_dump(const char *why);
 
 #endif

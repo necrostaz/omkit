@@ -433,6 +433,7 @@ static void sch_service(u32 now, int busy, u32 ended)
         log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s given to the next press%s", sch.k + 1, sch.n,
                    drv_optics_sub_name(sch.sub[sch.k]), sch.k + 1 == sch.n ? " (the last entry: kept)" : "");
     dbg_event("optics: schedule", drv_optics_sub_name(sch.sub[sch.k]));
+    dbg_mem_dump("a press of the schedule ended, the camera settled");   /* the same words as when stuck, to compare */
 }
 
 /* The bisection, core loop: the substage under test armed; passed - the next one saved, then armed */

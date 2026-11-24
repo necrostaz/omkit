@@ -530,6 +530,7 @@ static void test_stuck(void)
     CHECK(n > 0 && strstr(t, "debug: mem a0001010: 13121110 17161514 1b1a1918 1f1e1d1c"));
     CHECK(n > 0 && strstr(t, "debug: mem 60001010: 13121110 00000000 00000000 00000000"));
     CHECK(n > 0 && !strstr(t, "debug: mem a0001020"));     /* once a stay; the range after the bad one left out */
+    CHECK(n > 0 && strstr(t, "debug: stuck_mem words (stuck)"));
     free(t);
 }
 

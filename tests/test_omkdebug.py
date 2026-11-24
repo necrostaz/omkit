@@ -62,6 +62,11 @@ class Formats(unittest.TestCase):
                                  (omkdebug.GAP, len(good[4])), (1, 105), (omkdebug.GAP, 2)])
         self.assertIn("not whole records", omkdebug.format_record(*recs[2][1:], {}))
 
+    def test_where(self):
+        self.assertEqual(omkdebug.where_text(0), "no place recorded")
+        self.assertIn("at: optics, 85076 ms", omkdebug.where_text(12 << 24 | 85076))
+        self.assertIn("watched task 3", omkdebug.where_text(0x43 << 24 | 5))
+
     def test_snapshot_with_names(self):
         names = {}
         m = struct.pack("<HH", 0x51, 0) + b"FILECLBK".ljust(20, b"\0") + struct.pack("<HH", 0x9F, 0) + b"OMK_LOAD".ljust(20, b"\0")

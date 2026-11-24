@@ -32,7 +32,7 @@ enabled = on
 | `window_ms` | number, ms | `1000` | 0..10000: after each write of `core` to the card, and after an event of another service of `core` (the optics layer's probe: a substage armed or passed, its worker task made, a job of its own listed or ended - a mark with the event's text first), snapshots for this long ... |
 | `window_every` | number, ms | `50` | 10..1000: ... this often (only changes are kept) |
 | `stuck_ms` | number, ms | `1000` | the camera's application in a state that normally lasts a moment (half-press, a transition) for longer than this: snapshots every 500 ms, at most 20 |
-| `stuck_mem` | text | empty | `ADDR:LEN, ...`: up to 6 ranges of RAM (4-aligned, at most 256 bytes each, as `mem` may read them) whose words go into the log once when the application gets stuck as above - the firmware's state at that moment, kept on the card even if the RAM is lost afterwards (the battery taken out) |
+| `stuck_mem` | text | empty | `ADDR:LEN, ...`: up to 10 ranges of RAM (4-aligned, at most 256 bytes each, as `mem` may read them) whose words go into the log once when the application gets stuck as above - the firmware's state at that moment, kept on the card even if the RAM is lost afterwards (the battery taken out) |
 
 The first lines of `CORE.LOG` (or of the RAM log) say what the service found:
 

@@ -77,7 +77,18 @@ class Refused(Exception):
 # ---------------------------------------------------------------------------------------------------------------
 # Formats (src/core/include/omk_dring.h, omk_debug.h)
 HEAD_WORDS = ("magic", "version", "boot", "size", "tail", "head", "seq", "lost", "run0", "run1", "beat", "flags",
-              "cause", "snap_ms", "crc", "spare")
+              "cause", "snap_ms", "crc", "where")
+# The core task's place in its loop (omk_debug.h DBG_W_*): the bank header's last word, where << 24 | ms & 0xffffff
+WHERE = ["-", "waiting", "power", "profiles", "scenario", "stores", "memory", "stack", "events", "look", "isp", "grain",
+         "optics", "modules", "task dump", "debug service", "log", "a card write begun", "a card write ended", "a snapshot"]
+
+
+def where_text(w: int) -> str:
+    if not w:
+        return "no place recorded"
+    k = w >> 24
+    place = f"a snapshot, watched task {k - 0x40}" if k >= 0x40 else WHERE[k] if k < len(WHERE) else str(k)
+    return f"the core task last at: {place}, {w & 0xFFFFFF} ms (mod 2^24)"
 
 
 def parse_header(b: bytes) -> dict:
@@ -692,7 +703,8 @@ def run(cam, a) -> int:
             for i, h in enumerate(banks["banks"]):
                 print(f"bank {i}: {'valid' if h['valid'] else 'not valid'}, power-on {h['boot']} run {h['run']}, "
                       f"{(h['head'] - h['tail']) % 2**32} bytes, records up to {h['seq']}, lost {h['lost']}, "
-                      f"heartbeat {h['beat']} ms, {'ended with a power-off' if h['ended'] else 'did not end'}")
+                      f"heartbeat {h['beat']} ms, {where_text(h['where'])}, "
+                      f"{'ended with a power-off' if h['ended'] else 'did not end'}")
             return 0
         which = 1 if a.cmd == "postmortem" else 0
         if which and banks["prev"] == 0xFF:
@@ -1073,7 +1085,7 @@ class Session:
             names: dict = {}
             recs = list(parse_records(data, start, h["version"]))
             gaps = [r for r in recs if r[1] == GAP]
-            lines = [f"# power-on {h['boot']} run {h['run']}: heartbeat {h['beat']} ms, "
+            lines = [f"# power-on {h['boot']} run {h['run']}: heartbeat {h['beat']} ms, {where_text(h['where'])}, "
                      f"{'ended with a power-off' if h['ended'] else 'did NOT end with a power-off'}, lost {h['lost']}, "
                      f"ring version {h['version']}, {len(data)} bytes from the tail, {len(gaps)} damaged places "
                      f"({sum(r[4] for r in gaps)} bytes)"]

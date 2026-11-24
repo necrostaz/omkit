@@ -326,6 +326,7 @@ void core_main(void)
     for (tick = SERVICE_MS;;) {
         u32 now;
 
+        dbg_where(DBG_W_WAIT);
         drv_wait(tick);                     /* the power hooks cut it short */
         now = omk_ms();
         tick = SERVICE_MS;
@@ -333,6 +334,7 @@ void core_main(void)
             wait_told = 1;
             log_printf(OMK_LOG_WARN, "core: the event flag wait fails or returns at once again and again, plain sleep from now on");
         }
+        dbg_where(DBG_W_POWER);
         if (!power_service(now)) {
             shoot_power_lost();             /* keys released, the scenario waits for the camera to shoot again */
             continue;                       /* power-off or sleep: no card, no module work */
@@ -342,8 +344,10 @@ void core_main(void)
             if (loaded)
                 shoot_setup(now);
         }
+        dbg_where(DBG_W_PROF);
         prof_service(now);                  /* first: a new profile's live view block is published right after a wake-up by
                                                the profile change, before the store's writes */
+        dbg_where(DBG_W_SHOOT);
         tick = shoot_service(now, SERVICE_MS);   /* sooner while a test scenario runs */
         busy = drv_card_busy() || drv_prof_take_recent();
         if (busy && !deferred)
@@ -354,19 +358,31 @@ void core_main(void)
                        deferred);
             deferred = 0;
         }
+        dbg_where(DBG_W_STORE);
         if (!busy)
             store_service(now);
+        dbg_where(DBG_W_MEM);
         mem_service(now);
+        dbg_where(DBG_W_STACK);
         stack_service(now);
+        dbg_where(DBG_W_EV);
         ev_service(now);
+        dbg_where(DBG_W_LOOK);
         look_service(now);
+        dbg_where(DBG_W_ISP);
         isp_service(now);
+        dbg_where(DBG_W_GRAIN);
         grain_service(now);
+        dbg_where(DBG_W_OPTICS);
         optics_service(now);
+        dbg_where(DBG_W_MODULES);
         modules_tick(now);
+        dbg_where(DBG_W_TASKDUMP);
         taskdump_service(now);
+        dbg_where(DBG_W_DEBUG);
         dbg_service(now);
         tick = dbg_tick(tick);
+        dbg_where(DBG_W_LOG);
         if (!busy)
             log_service(now);
     }
