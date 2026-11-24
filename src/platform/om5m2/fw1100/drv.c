@@ -42,6 +42,7 @@ static const struct {
     {0x606ab659, {0x3d, 0x51, 0xcd, 0xa4, 0xf5, 0xf0, 0x24, 0xa0}},   /* exists */
     {0x606aa646, {0x87, 0x82, 0x93, 0xdd, 0x1b, 0xea, 0x00, 0x00}},   /* fseek */
     {0x606aa5dc, {0x93, 0xdd, 0x87, 0xea, 0x00, 0x00, 0x00, 0x08}},   /* ftell */
+    {0x60111291, {0xdd, 0xe7, 0x12, 0xf6, 0xff, 0xa0, 0x14, 0xdf}},   /* the clock's date and time */
     {0x602dd18d, {0xf8, 0xfe, 0xfc, 0x80, 0x6f, 0xdd, 0x39, 0x3f}},   /* callback of setting 111 */
     {0x608442e6, {0xf1, 0xe7, 0xf1, 0xe2, 0x3c, 0x20, 0x08, 0x43}},   /* data cache range invalidation */
     {0x60051ace, {0x93, 0xf1, 0xe6, 0x82, 0xfc, 0xac, 0xe4, 0x1f}},   /* acre_Event1 */
@@ -375,6 +376,8 @@ const char *drv_power_reason(u32 reason)
         return "battery";
     case 10:
         return "quick sleep";
+    case 11:
+        return "reboot (a restart request)";
     }
     return 0;
 }
@@ -450,6 +453,20 @@ int drv_ui_probe(u32 *app, u32 *keys)
 int drv_key_api(u32 event, u32 state);     /* thunks.s */
 void drv_app_event(u32 event, u32 arg);
 
+/* The reboot request: 0x041B006B into the application's queue (0x60046624), as the firmware's PTP operation 0x970A
+ * (0x614bed6b -> 0x614beec2) and the Wi-Fi page exec_reboot.cgi (0x6142e328) post it. The event becomes the HFW event
+ * 0x14f (table 0x60bc774c) and the application's OLY_WIFI_REQ_BOOT 0x01060011 (table 0x60fb1e8c); the PC sub-application's
+ * common table (0x60f8951c) runs 0x60d1629b for it in any of its states: CameraCommon::shutDown(1, 11, 0) in the
+ * application's task - startShutDown's reason 11 is mode 0 with a wake-up alarm of 1000 ms (table 0x60b7e16c). Shooting,
+ * playback and the menus have no entry for it (static reading of E148 1.1) */
+#define EV_REBOOT_REQUEST 0x041B006B
+
+int drv_restart_request(void)
+{
+    drv_app_event(EV_REBOOT_REQUEST, 0);
+    return 0;
+}
+
 int drv_shutter(u32 key, int down, u32 path)
 {
     if (key > DRV_SHUTTER_FULL)
@@ -466,6 +483,28 @@ int drv_shutter(u32 key, int down, u32 path)
 /* Media busy flags: the camera's power code waits while (0x61e418f0) = 1 or (0x61e418f4) != 0
  * before sleep. A hypothesis that this is the camera's own card work (a picture being written); core's writes do not set
  * them. Read through the cache on CPU 0, like the firmware */
+/* The firmware's open file (the pointer fopen gives, F = slot + 16 in a pool of 6 slots, (0x62151c98)): +0 u16 1 - in use
+ * (0x606ba8d1), +296 u16 the file's number from the counter (0x62151ec0), new at every fopen (0x606b9b16, 0x606ba8ef). A
+ * mount or an unmount of the card frees every file of the drive without writing anything (0x606b99c4: unmount 0x60698259,
+ * mount 0x6068d81f) and its own check (0x606b9a5e) then refuses the pointer with 0x9414 - until the slot is given to the
+ * next fopen, which takes the freed slot first (LIFO, 0x606b9821). The number tells the two apart. Static reading of
+ * E148 1.1; the refusal - camera, card157 (the PC mode over USB). Read by the core task on CPU 0, where the file task runs */
+u32 drv_file_id(void *fp)
+{
+    const volatile u16 *f = (const volatile u16 *)fp;
+
+    if (!fp || f[0] != 1)
+        return 0;
+    return 0x10000u | f[296 / 2];
+}
+
+/* The volume of drive 0 (C:) mounted: the u16 the file system's mount sets to 1 (0x606983ab) and its unmount to 0
+ * (0x6069829d), the bit 0x10000 of the media state request 0x2000f (0x606961ff); read past the cache, as it is kept */
+int drv_card_mounted(void)
+{
+    return *(const volatile u16 *)0xa26423c8 == 1;
+}
+
 int drv_card_busy(void)
 {
     return *(const volatile u32 *)0x61e418f0 == 1 || *(const volatile u32 *)0x61e418f4 != 0;

@@ -5,7 +5,10 @@
 #include "omk_drv.h"
 #include "omk_mem.h"
 
-#define CORE_VERSION "1.43"
+#define CORE_VERSION "1.44"
+#ifndef CORE_BUILD                          /* the Makefile: git branch@commit of the build, "-dirty" with changes */
+#define CORE_BUILD "unknown"
+#endif
 
 /* Milliseconds since camera start. The driver counter wraps every 1073 s, so call this at least once every 17 minutes */
 u32 omk_ms(void);
@@ -20,6 +23,10 @@ int cfg_size(const char *section, const char *key, u32 *out);   /* bytes, suffix
 u32 cfg_count(void);
 void cfg_entry(u32 i, const char **section, const char **key, const char **value);
 u32 cfg_bad_lines(u32 *first);          /* how many lines failed to parse, and the number of the first one */
+/* A one-shot file of the OMKit folder with keys of one section (no header, or that section's), read after OMKIT.INI:
+ * its keys win. 1 read (wrong: its lines not understood), 0 not there, -1 longer than 1 KB (not used). Once per start */
+int cfg_once(const char *name, const char *section, u32 *wrong);
+void cfg_once_drop(void);                   /* its keys forgotten (it could not be consumed) */
 
 int str_ieq(const char *a, const char *b);
 u32 str_len(const char *s);
@@ -27,7 +34,7 @@ u32 str_len(const char *s);
 #define OMK_PATH_MAX 64
 int omk_path(char *out, const char *dir, const char *name);   /* OMKit root + [dir\] + name; -1 - too long */
 /* The OMKit folder keeps only OMKIT.INI, CORE.BIN and MODULES; the rest goes into folders */
-#define LOG_DIR "LOG"                       /* CORE.LOG and the logs of each power-on */
+#define LOG_DIR "LOG"                       /* CORE.LOG, the log of the runs one after another */
 #define STORE_DIR "STORE"                   /* the stores of core and the modules */
 int omk_dir(const char *dir);               /* OMKit root + dir made if missing: 0, or -1 */
 void api_res_batch(int on);                 /* api.c: 1 - module_init runs, its resource reads share one open file */

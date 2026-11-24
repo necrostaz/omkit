@@ -26,7 +26,7 @@ void *drv_fopen(const char *path, const char *mode);   /* wb does not truncate t
 void *drv_fopen_long(const char *path, const char *mode);
 u32 drv_fread(void *buf, u32 size, u32 n, void *fp);
 u32 drv_fwrite(const void *buf, u32 size, u32 n, void *fp);
-void drv_fclose(void *fp);
+int drv_fclose(void *fp);                  /* 0 - closed; otherwise the firmware's error code */
 /* Files of a folder (core task, CPU 0 only): mask "C:\DIR\*.EXT" (a subfolder, not the root), entry 280 bytes zeroed before
  * every call - +0 u32 FAT attributes (0x10 a folder), +16 u32 size, +24 the name (the long one if there is one).
  * findfirst: a handle or -1 (nothing; then no findclose); findnext: 0 or -1 the end; findclose after every good findfirst */
@@ -51,6 +51,13 @@ int drv_wait_init(int on);
 int drv_wait(u32 ms);
 void drv_wake(void);
 int drv_wait_state(void);                   /* > 0 the flag, 0 not made, < 0 given up */
+/* The camera clock's date and time, as the firmware stamps files (CPU 0, a task) */
+typedef struct {
+    u16 year;
+    u8 month, day, hour, minute, second, hundredths;
+    u8 more[8];                             /* the firmware's own: it reads a half-word at +8 */
+} drv_date_t;
+void drv_date(drv_date_t *d);
 /* Subprocessor clock, counts during sleep: seconds and 1/1024 s. 0, or -1 if not readable */
 int drv_rtc(u32 *sec, u32 *frac1024);
 u32 drv_ticks(void);                    /* microseconds, 30 bits, wraps every 1073 s */
@@ -302,6 +309,12 @@ void drv_prof_flush(void);
 int drv_prof_mono_matrix_get(u32 filter, u32 level, s16 *matrix);   /* the camera's own, also while replaced */
 /* The camera itself is using the card (the media busy flags its own power code waits for): core postpones its writes */
 int drv_card_busy(void);
+/* An open file of the firmware stays valid only while the card stays mounted: a mount or an unmount (the camera's PC
+ * mode, USB) frees every open file without a write, and the freed slot goes to the next fopen of anyone. drv_file_id:
+ * the file's identity - nonzero while it is open, another value for another opening; 0 - freed. drv_card_mounted: the
+ * card's volume is mounted (1) */
+u32 drv_file_id(void *fp);
+int drv_card_mounted(void);
 
 /* Kernel tasks and objects of the three CPUs for the task dump (core/taskdump.c). Read only, no
  * locks, core task only. The tasks of other CPUs are read past the cache: a word they wrote a moment ago may still be old.
@@ -312,7 +325,8 @@ int drv_card_busy(void);
  * (semaphore, event flag, mutex): 0, -1 kind not known to the driver, -2 no such object. drv_mutex_read: mutex slot i of
  * cpu: 1 exists, 0 empty, -1 no more.
  * drv_ui_probe: the application state and the raw input byte; DRV_UI_HALF or DRV_UI_TRANSIENT for the states that should
- * last a moment only, 0 another state, -1 not readable */
+ * last a moment only, 0 another state, -1 not readable. DRV_APP_SHOOTING: the application state of shooting, idle (the
+ * camera after every picture of the test scenario; in the MTP mode of USB the state is not readable) */
 #define DRV_TASK_RETS 6
 #define DRV_TASK_NAME 20
 enum { DRV_TS_RUN = 1, DRV_TS_RDY = 2, DRV_TS_WAI = 4, DRV_TS_SUS = 8, DRV_TS_DMT = 16 };   /* uITRON 4.0 TTS_*: WAI | SUS both */
@@ -347,6 +361,7 @@ int drv_task_current(u32 cpu);
 int drv_obj_read(u32 kind, u32 id, drv_obj *o);
 int drv_mutex_read(u32 cpu, u32 i, drv_obj *o);
 enum { DRV_UI_HALF = 1, DRV_UI_TRANSIENT = 2 };
+#define DRV_APP_SHOOTING 0x5100
 int drv_ui_probe(u32 *app, u32 *keys);
 
 /* The debug service (core/debug.c, core 1.40).
@@ -393,5 +408,12 @@ enum { DRV_SHUTTER_KEYS = 0, DRV_SHUTTER_WIFI = 1 };
 int drv_shutter(u32 key, int down, u32 path);
 int drv_look_choose(int on, u32 index);
 int drv_look_find(const char *name);
+
+/* The restart (the debug service): the firmware's own reboot request, as its PTP operation 0x970A and the Wi-Fi remote's
+ * reboot page post it - an event to the application, which, in the PC mode of USB (MTP), does an ordinary power-off with
+ * the reason "reboot" (settings saved, the card unmounted, the power hooks run in the application's task) and a wake-up
+ * alarm of 1 s. Outside the PC mode the application ignores it. Core task only, never under drv_lock. 0 posted, -1 not on
+ * this platform */
+int drv_restart_request(void);
 
 #endif

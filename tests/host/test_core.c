@@ -74,10 +74,10 @@ static void test_cfg_template(void)
     CHECK(cfg_load() == 0);
     t = read_file("OMKIT.INI", &n);
     CHECK(t && strstr(t, "[core]") && strstr(t, "log_level = info"));
+    CHECK(t && !strstr(t, "run_logs"));     /* the per-power-on log is gone (core 1.42): not in the sample */
     free(t);
     CHECK(cfg_bool("core", "log", 0) == 1);
     CHECK(!strcmp(cfg_str("CORE", "LOG_LEVEL", "?"), "info"));
-    CHECK(cfg_bool("core", "run_logs", 1) == 0);
 }
 
 /* The same cfg module cannot be loaded twice, so parsing is checked in a second process: mode "cfg" */
@@ -132,25 +132,29 @@ static void test_log(void)
 {
     long n, m;
     char *t;
-    u32 before;
+    u32 before, removes = host_removes;
     int i;
 
-    log_setup(1, OMK_LOG_INFO, "C:\\OMKIT\\LOG\\12345678.LOG");
+    /* the log of the runs before is there: this run is appended to it, the file is never removed */
+    omk_dir(LOG_DIR);
+    write_file("LOG/CORE.LOG", "the run before\r\n");
+    log_setup(1, OMK_LOG_INFO);
+    log_banner("======== OMKit core %s, run %s ========", "1.0", "12345678");
     log_printf(OMK_LOG_INFO, "hex %08x %X dec %d %u str %s chr %c", 0xab, 0xbeef, -42, 7u, "abc", 'z');
     log_printf(OMK_LOG_DEBUG, "hidden");
     log_printf(OMK_LOG_WARN, "warned");
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
-    CHECK(t && strstr(t, " I hex 000000ab BEEF dec -42 7 str abc chr z\r\n") && !strstr(t, "hidden"));
+    CHECK(t && !strncmp(t, "the run before\r\n\r\n", 18) && strstr(t, " I ======== OMKit core 1.0, run 12345678 ========\r\n"));
+    CHECK(t && strstr(t, " I hex 000000ab BEEF dec -42 7 str abc chr z\r\n") && !strstr(t, "hidden") &&
+          strstr(t, " W warned\r\n"));
+    CHECK(host_removes == removes);
     free(t);
-    t = read_file("LOG/12345678.LOG", &m);
-    CHECK(t && strstr(t, " W warned\r\n") && m == n);
-    free(t);
-    /* a flush appends only what is new: one line, to each of the two files */
+    /* a flush appends only what is new: one line */
     before = host_written;
     log_printf(OMK_LOG_INFO, "second");
     log_flush();
-    CHECK(host_written - before == 2 * (8 + 3 + 6 + 2));
+    CHECK(host_written - before == 8 + 3 + 6 + 2);
     t = read_file("LOG/CORE.LOG", &m);
     CHECK(t && m == n + 19 && strstr(t, " I second\r\n") && strstr(t, "hex 000000ab"));
     free(t);
@@ -158,6 +162,51 @@ static void test_log(void)
     before = host_fopens;
     log_flush();
     CHECK(host_fopens == before);
+    /* the file stays open between portions (an fopen walks its FAT chain on the camera): one open for many; closed after
+     * 30 s without a portion, and opened again by the next one */
+    before = host_fopens;
+    for (i = 0; i < 5; i++) {
+        log_printf(OMK_LOG_INFO, "portion %d", i);
+        drv_sleep(1000);
+        log_service(omk_ms());
+    }
+    CHECK(host_fopens == before);
+    drv_sleep(31000);
+    log_service(omk_ms());                  /* nothing to write for 30 s: closed */
+    log_printf(OMK_LOG_INFO, "after the pause");
+    drv_sleep(600);
+    log_service(omk_ms());
+    CHECK(host_fopens == before + 1);
+    t = read_file("LOG/CORE.LOG", &m);
+    CHECK(t && strstr(t, " I portion 4\r\n") && strstr(t, " I after the pause\r\n"));
+    free(t);
+    /* the camera's PC mode: the open file no longer takes anything (0x9414) - it is closed and the portion goes to a file
+     * opened anew, nothing lost and nothing stopped */
+    host_files_stale();
+    before = host_fopens;
+    log_printf(OMK_LOG_INFO, "after the pc mode");
+    log_flush();
+    CHECK(host_fopens == before + 1);
+    log_printf(OMK_LOG_INFO, "and on");
+    log_flush();
+    CHECK(host_fopens == before + 1);       /* the new file stays open */
+    t = read_file("LOG/CORE.LOG", &m);
+    CHECK(t && strstr(t, " I after the pc mode\r\n") && strstr(t, " I and on\r\n") && strstr(t, "was closed by the firmware (the card was mounted again), opened again"));
+    free(t);
+    /* the volume not mounted (USB Storage): nothing is opened or written until it is again */
+    host_unmounted = 1;
+    before = host_fopens;
+    log_close();
+    log_printf(OMK_LOG_INFO, "while unmounted");
+    log_flush();
+    CHECK(host_fopens == before);
+    host_unmounted = 0;
+    log_retry_now();
+    log_flush();
+    CHECK(host_fopens == before + 1);
+    t = read_file("LOG/CORE.LOG", &n);      /* the length the later checks count from */
+    CHECK(t && strstr(t, "while unmounted"));
+    free(t);
     /* a long line is cut, '~' at the end */
     {
         char longs[400];
@@ -172,15 +221,14 @@ static void test_log(void)
         free(t);
     }
     /* the ring full while nothing is written: whole lines are dropped and counted, the rest arrives intact */
-    log_setup(1, OMK_LOG_INFO, "C:\\OMKIT\\LOG\\ABCDEF01.LOG");
     for (i = 0; i < 700; i++)
         log_printf(OMK_LOG_INFO, "line %04d ..................................................", i);
     log_flush();
-    t = read_file("LOG/ABCDEF01.LOG", &m);
+    t = read_file("LOG/CORE.LOG", &m);
     CHECK(t && strstr(t, "line 0000 ") && !strstr(t, "line 0699 "));
     free(t);
     log_flush();                            /* the warning itself */
-    t = read_file("LOG/ABCDEF01.LOG", &m);
+    t = read_file("LOG/CORE.LOG", &m);
     CHECK(t && strstr(t, "lines lost, the buffer was full\r\n"));
     free(t);
     /* after a flush the ring has room again: 700 lines with flushes on the way, nothing lost */
@@ -190,12 +238,12 @@ static void test_log(void)
             log_flush();
     }
     log_flush();
-    t = read_file("LOG/ABCDEF01.LOG", &m);
+    t = read_file("LOG/CORE.LOG", &m);
     CHECK(t && strstr(t, "next 0000 ") && strstr(t, "next 0699 ") && strstr(t, "next 0350 "));
     free(t);
-    log_setup(0, OMK_LOG_DEBUG, 0);
+    log_setup(0, OMK_LOG_DEBUG);
     log_printf(OMK_LOG_ERROR, "off");
-    log_setup(1, OMK_LOG_INFO, 0);
+    log_setup(1, OMK_LOG_INFO);
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
     CHECK(t && !strstr(t, "off"));
@@ -235,7 +283,7 @@ static void test_store(void)
     store_service(t0 + 1000);                       /* 1 s after the change: too early */
     CHECK(file_size("STORE/TEST.STA") == -1);
     store_service(t0 + 1600);
-    CHECK(file_size("STORE/TEST.STA") == 20 + 8 + 4);  /* persistent key only */
+    CHECK(file_size("STORE/TEST.STA") == 512);  /* the fixed length: 20 + 256 rounded up to a sector */
 
     memset(big, 'x', sizeof(big));
     CHECK(store_set(s, 3, big, 200, OMK_STORE_PERSIST) == 0);
@@ -245,7 +293,7 @@ static void test_store(void)
     store_info(s, &keys, &used, &seq);
     CHECK(keys == 3 && seq == 1);
     store_service(t0 + 5000);
-    CHECK(file_size("STORE/TEST.STB") == 20 + 8 + 4 + 8 + 152);
+    CHECK(file_size("STORE/TEST.STB") == 512);
     CHECK(store_del(s, 2) == 0 && store_del(s, 2) == -1);
 
     /* the same history with a new run: version 2 is loaded from TEST.STB; each slot file is opened once */
@@ -278,8 +326,8 @@ static void test_store(void)
     store_service(t0 + 20000);
     store_info(s, &keys, &used, &seq);
     CHECK(seq == 2 && keys == 4);
-    /* the slot held a longer version before (192 bytes): the new one replaces it whole, no old tail */
-    CHECK(file_size("STORE/TEST.STB") == 20 + 4 * 12);
+    /* the slot held a longer version before (192 bytes): the file keeps its length, zeros after the records */
+    CHECK(file_size("STORE/TEST.STB") == 512);
 
     /* the newer version in the first slot (TEST.STA, version 3), an intact older one in the second: the first slot's
      * records are the ones loaded although the second file is read after it, and neither file is opened twice */
@@ -287,7 +335,7 @@ static void test_store(void)
     CHECK(store_set(s, 1, &v, 4, OMK_STORE_PERSIST) == 0);
     store_service(t0 + 30000);
     store_info(s, &keys, &used, &seq);
-    CHECK(seq == 3 && file_size("STORE/TEST.STA") == 20 + 4 * 12);
+    CHECK(seq == 3 && file_size("STORE/TEST.STA") == 512);
     opens = host_fopens;
     s = store_open("TEST", 256);
     CHECK(host_fopens == opens + 2);
@@ -296,6 +344,67 @@ static void test_store(void)
     CHECK(seq == 3 && keys == 4 && store_get(s, 1, &v, 4) == 4 && v == 99);
     i = -1;
     CHECK(store_get(s, 12, &i, 4) == 4 && i == 2);
+
+    /* both slot files have the fixed length: saves rewrite them in place (r+), nothing is removed or made */
+    {
+        u32 removes = host_removes, inplace = host_inplace;
+
+        for (i = 0; i < 4; i++) {
+            v = 100 + i;
+            store_set(s, 1, &v, 4, OMK_STORE_PERSIST);
+            store_service(t0 + 40000 + 2000 * i);
+        }
+        CHECK(host_removes == removes && host_inplace == inplace + 4);
+        CHECK(file_size("STORE/TEST.STA") == 512 && file_size("STORE/TEST.STB") == 512);
+    }
+
+    /* the files of an older core (the exact length of their records) are read as they are; each is made again once,
+     * in its fixed length, at its first save, and rewritten in place after that */
+    {
+        static const unsigned char rec[8 + 4] = {1, 0, OMK_STORE_PERSIST, 0, 4, 0, 0, 0, 42, 0, 0, 0};
+        unsigned char img[20 + sizeof(rec)];
+        u32 h[5] = {0x534b4d4f, 1 | 1 << 16, 5, sizeof(rec), 0}, removes, inplace;
+        char p[512];
+        FILE *f;
+
+        h[4] = crc32_update(0, rec, sizeof(rec));
+        memcpy(img, h, 20);
+        memcpy(img + 20, rec, sizeof(rec));
+        snprintf(p, sizeof(p), "%s/STORE/OLD.STA", host_dir);
+        f = fopen(p, "wb");
+        fwrite(img, 1, sizeof(img), f);
+        fclose(f);
+        s = store_open("OLD", 64);
+        store_info(s, &keys, &used, &seq);
+        v = 0;
+        CHECK(seq == 5 && keys == 1 && store_get(s, 1, &v, 4) == 4 && v == 42);
+        removes = host_removes;
+        inplace = host_inplace;
+        for (i = 0; i < 3; i++) {           /* versions 6 (STB, not there), 7 (STA, the old length), 8 (STB) */
+            v = 50 + i;
+            store_set(s, 1, &v, 4, OMK_STORE_PERSIST);
+            store_service(t0 + 60000 + 2000 * i);
+        }
+        CHECK(host_removes == removes + 2 && host_inplace == inplace + 1);
+        CHECK(file_size("STORE/OLD.STA") == 512 && file_size("STORE/OLD.STB") == 512);
+        s = store_open("OLD", 64);
+        store_info(s, &keys, &used, &seq);
+        v = 0;
+        CHECK(seq == 8 && store_get(s, 1, &v, 4) == 4 && v == 52);
+
+        /* the firmware refuses the close (its file module failing): the save counts as failed, the version is not
+         * taken, and it is tried again */
+        host_fclose_rc = 0x0a0f;
+        v = 60;
+        store_set(s, 1, &v, 4, OMK_STORE_PERSIST);
+        store_service(t0 + 70000);
+        store_info(s, &keys, &used, &seq);
+        CHECK(seq == 8);
+        host_fclose_rc = 0;
+        store_service(t0 + 70000 + 3000);   /* the first pause of a failing save: 3 s */
+        store_info(s, &keys, &used, &seq);
+        CHECK(seq == 9);
+    }
 }
 
 /* No card: the log and a store try again with a growing pause, not at every loop; the card back - all is written */
@@ -307,6 +416,7 @@ static void test_backoff(void)
     char *t;
 
     log_flush();
+    log_close();                            /* the card goes away with the camera's power (sleep): the file is closed */
     log_printf(OMK_LOG_INFO, "kept while the card is away");
     host_no_card = 1;
     before = host_fopens;
@@ -331,8 +441,11 @@ static void test_backoff(void)
     log_printf(OMK_LOG_INFO, "after the card came back");
     before = host_fopens;
     drv_sleep(600);
-    log_service(omk_ms());                  /* no pause left: written when the log goes quiet, as always */
-    CHECK(host_fopens == before + 1);
+    log_service(omk_ms());                  /* no pause left: written when the log goes quiet, as always, to the */
+    CHECK(host_fopens == before);           /* file still open */
+    t = read_file("LOG/CORE.LOG", &n);
+    CHECK(t && strstr(t, "after the card came back"));
+    free(t);
 
     s = store_open("BACK", 64);
     CHECK(s && store_set(s, 1, &v, 4, OMK_STORE_PERSIST) == 0);
@@ -350,12 +463,12 @@ static void test_backoff(void)
     CHECK(file_size("STORE/BACK.STA") == -1);
     store_retry_now();
     store_service(omk_ms());
-    CHECK(file_size("STORE/BACK.STA") == 20 + 8 + 4);
+    CHECK(file_size("STORE/BACK.STA") == 512);
     v = 2;                                  /* a save that worked ended the pauses: the next change after 1.5 s */
     CHECK(store_set(s, 1, &v, 4, OMK_STORE_PERSIST) == 0);
     drv_sleep(1600);
     store_service(omk_ms());
-    CHECK(file_size("STORE/BACK.STB") == 20 + 8 + 4);
+    CHECK(file_size("STORE/BACK.STB") == 512);
 
     /* a value that keeps changing, each time within the 1.5 s delay: saved all the same, 12 s after the first change
      * not saved yet, and then every 12 s - not at every change, and not never */
@@ -431,7 +544,7 @@ static void test_mem(void)
 
     host_region_size = 64 * 1024;
     mem_init();
-    log_setup(1, OMK_LOG_DEBUG, 0);
+    log_setup(1, OMK_LOG_DEBUG);
     mem_arena(&total, &used, &full);
     CHECK(total == 65504 && used == 0 && full == 65488);
 
@@ -589,7 +702,7 @@ static void test_power(void)
     char *t;
     long len;
 
-    log_setup(1, OMK_LOG_DEBUG, 0);
+    log_setup(1, OMK_LOG_DEBUG);
     power_install();
     now = now_after(0);
     CHECK(power_service(now) == 1 && power_running());
@@ -707,7 +820,7 @@ static void test_power(void)
  *       file and "armed" in the store, both on the card, when the driver gets it; a read reported - armed again after the
  *       next report; power-off with the arming not taken;
  *   2 - the run before ended without a power-off while armed: counted as a reset, no arming any more in run 7;
- *   3 - [optics] run = 8: starts again, arms. The log file grows over the phases (log_keep_previous is main.c's) */
+ *   3 - [optics] run = 8: starts again, arms. The log file grows over the phases (one log for all power-ons) */
 static int opt_arm_ok;
 static int opt_store_armed(void);
 
@@ -764,8 +877,7 @@ static void test_optics(int phase)
     omk_dir(STORE_DIR);
     write_file("OMKIT.INI", phase < 3 ? "[optics]\nprobe = 2\nrun = 7\n" : "[optics]\nprobe = 2\nrun = 8\n");
     CHECK(cfg_load() == 1);
-    log_setup(1, OMK_LOG_INFO, 0);
-    log_keep_previous();
+    log_setup(1, OMK_LOG_INFO);
     host_prev_ended = phase != 2;
     memset(&host_opt, 0, sizeof(host_opt));
     host_opt_on_arm = opt_on_arm;
@@ -834,8 +946,7 @@ static void test_bisect(int phase)
         write_file("OMKIT.INI", phase < 7 ? "[optics]\nprobe = 1\nbisect = 3\nbisect_from = C3\n" :
                                             "[optics]\nprobe = 1\nbisect = 4\nbisect_from = W0\n");
         CHECK(cfg_load() == 1);
-        log_setup(1, OMK_LOG_INFO, 0);
-        log_keep_previous();
+        log_setup(1, OMK_LOG_INFO);
         host_prev_ended = phase == 4 || phase == 7;
         host_opt_worker_rc = phase == 7 ? 4 : 0;
         host_opt_workers = 0;
@@ -872,8 +983,7 @@ static void test_bisect(int phase)
     }
     write_file("OMKIT.INI", phase < 3 ? "[optics]\nprobe = 1\nbisect = 1\n" : "[optics]\nprobe = 1\nbisect = 2\n");
     CHECK(cfg_load() == 1);
-    log_setup(1, OMK_LOG_INFO, 0);
-    log_keep_previous();
+    log_setup(1, OMK_LOG_INFO);
     host_prev_ended = phase != 2;
     memset(&host_opt, 0, sizeof(host_opt));
     if (phase == 2) {                       /* the step's crumbs left by the run before */

@@ -17,11 +17,33 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `core` presses the shutter button by its own path in the camera and chooses a preset of the film look or a profile
   before each step, as the user would. For testing presets
   ([docs/config.md](docs/config.md#10-shoot-the-test-scenario)).
+- **A test session over USB.** With `[debug] write = on`, the computer restarts the camera over USB by the firmware's own
+  reboot request (a normal power-off that keeps the settings and unmounts the card, then a wake-up alarm), starts or
+  stops the test scenario, and reads the build that runs (`INFO`); `omkdebug.py session` does a whole session: files,
+  scenario, restart, the pictures and the logs ([docs/debug.md](docs/debug.md#6-a-test-session)). A scenario waits until
+  the camera shoots (`[shoot] arm_wait`), and `OMKIT\SHOOT.RUN` starts one at the next power-on only, removed before it
+  runs ([docs/config.md](docs/config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)).
+- The log names the build at each power-on: `OMKit core <version> (branch@commit)`.
 
 ### Changed
 
+- **A reset during a card write no longer breaks the card's volume.** The stores' copies have a fixed length
+  and are rewritten in place, so a save changes neither the FAT nor the allocation bitmap nor more than one directory
+  entry, and the log is no longer removed and made again at every start. Before, a reset in the middle of a save could
+  leave a half-written directory entry set in `OMKIT\STORE` (Windows hid the folder until `chkdsk /f`). The copies of an
+  older core are made again once, in the new length, at their first save; the settings in them are kept.
+- **One log for all power-ons.** `OMKIT\LOG\CORE.LOG` is appended to from one start to the next; each
+  power-on begins with a header line - the build (branch and commit), the run id, the camera clock's date and time - and
+  a line with the versions of the loaded modules. The log is written through an open file, so an append costs the
+  same however long the file is; a file the camera closed itself (it mounts the card again in its PC mode over USB) is
+  opened again. `run_logs` is gone (ignored if still in `OMKIT.INI`); old
+  `XXXXXXXX.LOG` files are left on the card.
 - **core 1.42** has both the debug service and the test scenario. Its image with the stack may now end at `0x634a0000`
   (was `0x63490000`); the module arena still starts at the image's real end.
+- **core 1.43** adds the test session over USB (restart over USB, the one-shot scenario `OMKIT\SHOOT.RUN`, the build
+  in the log's first line and in `INFO`) and fixes writing files over USB, which failed since core 1.40.
+- **core 1.44** keeps the card's volume whole across resets during a save (the stores rewritten in place) and keeps one
+  `CORE.LOG` for all power-ons.
 
 ## [0.1.0] - 2026-11-20
 

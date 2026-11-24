@@ -238,4 +238,5 @@ What to look for:
 
 Change, build, copy the `.OMM`, switch the camera off and on. If the module resets the camera at start, the camera keeps
 restarting while it is enabled: hold the bypass key (OK) at power-on or take the card out, then set `MYMOD = off` or
-remove the file. With `run_logs = on` in `[core]`, every power-on also gets its own log `OMKIT\LOG\<run id>.LOG`.
+remove the file. Every power-on is appended to `OMKIT\LOG\CORE.LOG` from its header line `======== OMKit core ...`,
+which also names the run and the modules' versions.

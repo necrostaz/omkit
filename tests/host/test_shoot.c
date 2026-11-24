@@ -30,6 +30,7 @@ static struct {
     char trace[512];
     u32 looks[8], nlooks, profs[8], nprofs, look_count;
     int look_on;
+    int usb;                                /* in a mode of USB (MTP): the application state is not readable */
 } cam;
 
 void modules_power(u32 event);              /* power.c's call to the modules (module.c is not in this program) */
@@ -76,6 +77,8 @@ int drv_ui_probe(u32 *app, u32 *keys)
     u32 now = now_ms();
 
     *keys = 0;
+    if (cam.usb)
+        return -1;
     if (!cam.no_half && ((cam.down[0] && now - cam.half_since >= 100) || (stuck_until && now < stuck_until))) {
         *app = 0x5101;
         return DRV_UI_HALF;
@@ -239,13 +242,23 @@ static void test_ways_out(void)
     for (i = 0; i < 3000 && !cam.down[1]; i++)
         run(10, 0);
     CHECK(cam.down[0] && cam.down[1]);
-    shoot_power_lost();
+    shoot_power_lost();                     /* a power-off began (the cable out in the PC mode, cancelled by the lever) */
     shoot_status(&si);
-    CHECK(si.state == SHOOT_FAILED);
+    CHECK(si.state == SHOOT_RUNNING && si.waiting);
     CHECK(all_released());
     CHECK(strstr(cam.trace, "F1 F0 H0 ") != 0);
-    shoot_power_lost();                     /* nothing running: nothing sent */
+    shoot_power_lost();                     /* again while it lasts: nothing more sent */
     CHECK(cam.releases == 2);
+    cam.usb = 1;                            /* not shooting for a while, then shooting again: the picture taken again */
+    run(5000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_RUNNING && si.waiting && cam.presses == 2);
+    cam.usb = 0;
+    run(60000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_DONE && si.taken == 2 && si.failed == 0 && all_released());
+    shoot_power_lost();                     /* nothing running: nothing sent */
+    CHECK(cam.releases == 6);
 }
 
 /* The half-press state stays after the release: the watchdog releases once more, the picture counts */
@@ -296,6 +309,70 @@ static void test_bad_presets(void)
     CHECK(si.taken == 2 && cam.nlooks == 1 && cam.looks[0] == 0xff);
 }
 
+/* A start while the camera does not shoot (USB): nothing is pressed until it does, then the scenario runs; and the time
+ * limit of that wait (arm_wait = 20000 in the test's OMKIT.INI) */
+static void test_armed(void)
+{
+    shoot_info si;
+
+    reset_cam();
+    cam.usb = 1;
+    CHECK(shoot_start("keep", 0) == 0);
+    run(15000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_RUNNING && si.waiting && cam.presses == 0);
+    cam.usb = 0;
+    run(1000, 1);
+    shoot_status(&si);
+    CHECK(si.waiting && cam.presses == 0);  /* ARM_SETTLE: two seconds of shooting first */
+    run(60000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_DONE && !si.waiting && si.taken == 2 && all_released());
+    reset_cam();
+    cam.usb = 1;
+    CHECK(shoot_start("keep", 0) == 0);
+    run(30000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_FAILED && cam.presses == 0);
+}
+
+static int exists(const char *name)
+{
+    char p[512];
+    FILE *f;
+
+    snprintf(p, sizeof(p), "%s/%s", host_dir, name);
+    f = fopen(p, "rb");
+    if (f)
+        fclose(f);
+    return f != 0;
+}
+
+/* SHOOT.RUN of the OMKit folder: its keys over those of OMKIT.INI, removed before the scenario starts; a header of another
+ * section is a line not understood and its keys are not used */
+static void test_once(void)
+{
+    shoot_info si;
+    char p[512];
+    FILE *f;
+
+    reset_cam();
+    snprintf(p, sizeof(p), "%s/SHOOT.RUN", host_dir);
+    f = fopen(p, "wb");
+    fprintf(f, "; one picture\r\n[shoot]\r\nsteps = keep\r\nshots = 1\r\nstart_delay = 0\r\n[core]\r\nlog = off\r\n");
+    fclose(f);
+    shoot_setup(now_ms());
+    CHECK(!exists("SHOOT.RUN"));
+    CHECK(!str_ieq(cfg_str("core", "log", "none"), "off") && !cfg_str("shoot", "log", 0));
+    CHECK(str_ieq(cfg_str("shoot", "shots", ""), "1"));
+    run(60000, 1);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_DONE && si.taken == 1 && si.total == 1);
+    shoot_setup(now_ms());                  /* once per start: nothing more */
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_DONE && si.taken == 1);
+}
+
 int main(int argc, char **argv)
 {
     int wifi = argc > 2 && !strcmp(argv[2], "wifi");
@@ -308,11 +385,11 @@ int main(int argc, char **argv)
     if (!f)
         return 2;
     fprintf(f, "[shoot]\r\nshots = 2\r\ninterval = 1000\r\nsettle = 500\r\nhalf = 1000\r\nhold = 150\r\nwrite = 5000\r\n"
-               "trigger = %s\r\n", wifi ? "wifi" : "keys");
+               "arm_wait = 20000\r\ntrigger = %s\r\n", wifi ? "wifi" : "keys");
     fclose(f);
     mem_init();
     CHECK(cfg_load() == 1);
-    log_setup(0, OMK_LOG_DEBUG, 0);
+    log_setup(0, OMK_LOG_DEBUG);
     test_parse();
     test_done(wifi);
     if (!wifi) {
@@ -321,6 +398,8 @@ int main(int argc, char **argv)
         test_stuck();
         test_no_half();
         test_bad_presets();
+        test_armed();
+        test_once();
     }
     if (failed)
         fprintf(stderr, "%d checks failed\n", failed);

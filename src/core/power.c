@@ -124,6 +124,7 @@ void power_hook(u32 kind, u32 arg)
             core_mark_ended();
             store_save_all();
             log_flush();
+            log_close();
         }
         break;
     case POWER_HOOK_SLEEP_GATE:
@@ -185,6 +186,7 @@ static void handle(u32 s, u32 r, u32 now)
         else
             log_printf(OMK_LOG_INFO, "power-off: reason %u, %u ms after the hook", r, ms_since(since_ticks));
         modules_power(OMK_POWER_OFF);       /* they update their stores in memory: the card-off gate saves them */
+        log_close();                        /* no card writes until the card-off gate, which opens it once more */
         break;
     case POWER_SLEEP:
         sleep_ticks = since_ticks;
@@ -192,6 +194,7 @@ static void handle(u32 s, u32 r, u32 now)
         sleep_rtc = drv_rtc(&sleep_sec, &sleep_frac);
         log_printf(OMK_LOG_INFO, "sleep: card writes stopped, %u ms after the hook", ms_since(since_ticks));
         modules_power(OMK_POWER_SLEEP);
+        log_close();                        /* the card may be away after the sleep */
         break;
     default:
         if (handled == POWER_SLEEP && r != TIMED_OUT) {

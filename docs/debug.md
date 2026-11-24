@@ -11,7 +11,9 @@
 - optionally, `core` writes nothing to the card at all (the log and the stores stay in RAM), so that the card is out of
   the picture while a problem is looked for;
 - optionally, the computer writes files of the `OMKIT` folder (a new `CORE.BIN`, modules, presets, `OMKIT.INI`), each
-  one checked by a CRC-32 read back from the card before it replaces the old file.
+  one checked by a CRC-32 read back from the card before it replaces the old file, restarts the camera so that they
+  run, and starts or stops the test scenario ([config.md](config.md#10-shoot-the-test-scenario)): a whole test session
+  from the computer (section 6).
 
 ## 1. Turning it on
 
@@ -24,7 +26,7 @@ enabled = on
 |---|---|---|---|
 | `enabled` | switch | `off` | the service; everything below needs it |
 | `card_writes` | switch | `on` | `off` - `core` writes nothing to the card: no log file, no store saved, no module file written; all of it stays in RAM. The stores are still read at power-on. The next power-on then does not know how the last one ended, and changes made in the camera's OMKit menus are not kept across a power-off |
-| `write` | switch | `off` | `on` - the computer may write files of the `OMKIT` folder (section 4) |
+| `write` | switch | `off` | `on` - the computer may write files of the `OMKIT` folder (section 4), restart the camera and start or stop the test scenario (section 6) |
 | `ring_level` | text | `debug` | how much of the log the RAM ring keeps: `error`, `warn`, `info`, `debug`. The card's log keeps `[core] log_level` as before |
 | `tasks` | text | the card and recording tasks | firmware task names whose state each snapshot records, separated by commas, at most 11 (the `core` task is always added) |
 | `window_ms` | number, ms | `1000` | 0..10000: after each write of `core` to the card, snapshots for this long ... |
@@ -49,10 +51,10 @@ Read this before you turn the service on.
   `OMKIT` and `DCIM` folders of the card. No password or pairing is asked: USB is the trust boundary, as for the
   camera's own MTP access to your pictures.
 - **With `write = on` as well, anyone connected can replace the files of the `OMKIT` folder**, including `CORE.BIN`,
-  which runs at the next start. Keep `write` off unless you update the camera this way yourself, and turn it off
-  again afterwards.
+  which runs at the next start, restart the camera, and start the test scenario, which presses the shutter button.
+  Keep `write` off unless you update the camera this way yourself, and turn it off again afterwards.
 - Nothing else is written: no other folder of the card, no camera memory, no firmware, no camera setting. The service
-  runs no commands of the firmware's debug shell and has no way to shoot or change settings.
+  runs no commands of the firmware's debug shell and changes no setting; it shoots only by the test scenario.
 - Off (the default), the service registers nothing on USB and does not touch the RAM ring.
 
 ## 3. The computer: `tools/omkdebug.py`
@@ -74,8 +76,11 @@ python tools/omkdebug.py ls OMKIT\LOG          a folder of the card
 python tools/omkdebug.py get OMKIT\LOG\CORE.LOG
 python tools/omkdebug.py pictures -n 2 -o out  the last two pictures (JPEG and ORF)
 python tools/omkdebug.py put build/CORE.BIN OMKIT\CORE.BIN      needs write = on
-python tools/omkdebug.py restart               not available yet: asks you to switch the camera off and on, then
-                                               waits for it and checks it is a new power-on
+python tools/omkdebug.py info                  the build that runs (branch@commit), this run's name, the scenario
+python tools/omkdebug.py restart               the camera restarts (write = on) and the tool waits for its new run
+python tools/omkdebug.py shoot start "look:1, stock"   the test scenario: it waits until the cable is out
+python tools/omkdebug.py shoot status
+python tools/omkdebug.py session --help        a whole test session (section 6)
 ```
 
 Windows lists the camera's pictures over MTP as soon as it connects; that reads the card, as always with MTP.
@@ -97,10 +102,49 @@ for its state (`STATUS`) and then for its result.
 
 | Operation | Sub-commands (`p1`) |
 |---|---|
-| `0x9E00` (no data) | 1 `HELLO` (p1 `OMKD`, p2 protocol 1, p3 core version, p4 flags, p5 power-on), 2 `STATUS` (p1 job, state, number; p2 result; p3 bytes; p4 CRC-32; p5 extra), 3 `LEVEL`, 4 `MARK`, 5 `SNAP`, 0x10 `READ` (offset, length), 0x11 `LIST` (from), 0x20 `WBEGIN` (size, CRC-32), 0x22 `WCOMMIT`, 0x23 `WABORT`, 0x30 `RESTART` (not available: the job fails); 0x40-0x4F kept free for camera control |
-| `0x9E01` (to the computer) | 1 `BANKS` (both RAM bank headers), 2 `BANK` (bank, position, length: raw records), 3 `MEM` (address, length up to 16 KB), 4 `HIST`, 5 `XFER` (offset, length: a job's result) |
-| `0x9E02` (from the computer) | 1 `PATH` (the card path of the next job), 0x21 `WDATA` (offset: a piece of the file being written) |
+| `0x9E00` (no data) | 1 `HELLO` (p1 `OMKD`, p2 protocol 1, p3 core version, p4 flags: 64 `RESTART` works, 128 `SHOOT`, 256 `INFO`; p5 power-on), 2 `STATUS` (p1 job, state, number; p2 result; p3 bytes; p4 CRC-32; p5 extra), 3 `LEVEL`, 4 `MARK`, 5 `SNAP`, 0x10 `READ` (offset, length), 0x11 `LIST` (from), 0x20 `WBEGIN` (size, CRC-32), 0x22 `WCOMMIT`, 0x23 `WABORT`, 0x30 `RESTART` (p2 `RBT!`; the job ends, the request follows 500 ms later: p5 of `STATUS`), 0x31 `SHOOT` (p2 0 state - at once: p1 state and waiting << 8, p2 pictures planned, p3 made, p4 not seen made, p5 step and steps << 16; 1 start, 2 stop - jobs); 0x40-0x4F kept free for camera control |
+| `0x9E01` (to the computer) | 1 `BANKS` (both RAM bank headers), 2 `BANK` (bank, position, length: raw records), 3 `MEM` (address, length up to 16 KB), 4 `HIST`, 5 `XFER` (offset, length: a job's result), 6 `INFO` (text, `key=value` lines: `core`, `build`, `run`, `power-on`, `restart`, `shoot`...) |
+| `0x9E02` (from the computer) | 1 `PATH` (the card path of the next job), 2 `TEXT` (the steps of the next `SHOOT` start, up to 255 printable characters), 0x21 `WDATA` (offset: a piece of the file being written) |
 
 Responses: `0x2001` OK, `0x2002` failed, `0x2005` no such sub-command, `0x200F` the write key is off, `0x2019` a job is
-running, `0x201D` a parameter out of range. The formats of the RAM banks, records and snapshots are described in
-`src/core/include/omk_dring.h` and `omk_debug.h`; `tools/omkdebug.py` reads them all.
+running, `0x201D` a parameter out of range. Job results (`STATUS` p2): 0 ok, 1 bad path, 2 cannot open, 3 card i/o, 4 size
+differs, 5 CRC differs, 6 rename failed, 7 wrong state (a file open, a power-off or a restart under way), 8 timeout, 9
+card, 10 restart not available (core 1.40-1.42), 11 a step not understood, 12 busy (a scenario runs or shoots).
+
+The formats of the RAM banks, records and snapshots are described in `src/core/include/omk_dring.h` and `omk_debug.h`;
+`tools/omkdebug.py` reads them all.
+
+## 6. A test session
+
+With `write = on`, a computer runs a whole test of a new build without touching the camera's buttons:
+
+```text
+python tools/omkdebug.py session --put build/CORE.BIN --put OMKIT.INI --scenario "look:Kodak Portra 400, stock" ^
+    --restart --wait --pull-log --pull-pictures 2 -o run1
+```
+
+| Step | What happens | Checked |
+|---|---|---|
+| connect | waits for the camera in the MTP mode | the debug service answers; `write = on` when files are to be written |
+| `--put` | each file into the `OMKIT` folder (a `.OMM` into `OMKIT\MODULES`; `FILE=OMKIT\PATH` for another place) | its CRC-32 read back from the card |
+| `--scenario` | with `--restart`: the file `OMKIT\SHOOT.RUN` ([config.md](config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)), which runs once at the next start (`--shots`, `--start-delay` go into it); without: the scenario starts now over USB | the steps are checked by the camera |
+| `--restart` | the camera restarts and comes back | it left USB, then answers with a new run; the build that runs is the one of the `CORE.BIN` put |
+| `--wait` | the scenario runs once the camera shoots: the tool asks you to take the cable out and to put it back when the pictures are made (or `--usb-off CMD --usb-on CMD` switch a hub's port off and on, for `--offline` seconds) | the camera comes back in the same run; the scenario's result |
+| `--pull-log`, `--pull-pictures N` | the RAM log (`ramlog.txt`), `CORE.LOG` and the last N pictures into the output folder | each piece's CRC-32 |
+
+Every step has a time limit (`--connect-timeout`, `--restart-timeout`, `--scenario-timeout`); the first step that fails
+ends the session with its reason and the exit status 1.
+
+**The restart.** `core` asks the camera's firmware to restart the way its own USB and Wi-Fi reboot requests do: the
+firmware does an ordinary power-off - it saves the settings, finishes and unmounts the card, `core` does its last save as
+for the power lever - and sets a wake-up alarm of one second, after which the camera starts from scratch: the new
+`CORE.BIN`, modules and `OMKIT.INI` run. The firmware takes this request only while the camera is connected in the MTP
+mode; elsewhere it ignores it and `core` logs `the reboot request was not taken`. `omkdebug.py restart --ptp` sends the
+firmware's own request without `core`. Switching the camera off with its lever while the cable is in does **not** restart
+it: with a charging source the camera only stops and charges, and the lever brings it back without a new start; take the
+battery out for a cold start.
+
+**The USB mode after the restart.** The camera comes back with the cable in, so it shows its USB dialog again: choose
+MTP (the tool waits and reminds you). With the camera's USB mode set to MTP rather than to asking, it should connect
+without the dialog (not tried yet). It does not take pictures in the MTP mode, which is why the cable has to go out for
+the scenario.
