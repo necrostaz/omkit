@@ -174,7 +174,7 @@ $(TEST)/test_optwork: src/platform/$(PLATFORM)/optwork.h tests/host/test_optwork
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_optwork.c -o $@
 
-$(TEST)/test_optlayer: src/platform/$(PLATFORM)/optlayer.h tests/host/test_optlayer.c src/sdk/include/omk_types.h
+$(TEST)/test_optlayer: src/platform/$(PLATFORM)/optlayer.h tests/host/test_optlayer.c tests/host/optlayer_ref.h src/sdk/include/omk_types.h
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_optlayer.c -o $@
 

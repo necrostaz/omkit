@@ -883,9 +883,10 @@ int drv_optics_layer(const drv_optics_layer_cfg *c)
     return host_opt_layer_rc;
 }
 
-u32 drv_optics_layer_floor(u32 W, u32 *wsize)
+u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf)
 {
     *wsize = 0;
+    *wbuf = 0;
     return host_opt_layer.width ? (216 * W + 50 * host_opt_layer.width) / (100 * host_opt_layer.width) : 0;
 }
 

@@ -101,8 +101,16 @@
  *
  * Memory: the step touches the arena block below (its uncached address), the job's handle (through the cache, on the job's
  * CPU, as the firmware's steps do), the picture through the window, and the stack; the firmware only through the thunks of
- * thunks.s. No core variables, no tables in .rodata. The worker also has its work buffer (an arena block of its own
- * lines, used through the cache of CPU 0 only, as its stack). The core task reports (drv_optics_service). */
+ * thunks.s. No core variables, no tables in .rodata - but one: the bench's array (op_bench_core), which only the worker
+ * touches, on CPU 0, through its cache. The worker also has its work buffer (an arena block of its own lines, used
+ * through the cache of CPU 0 only, as its stack). The core task reports (drv_optics_service).
+ *
+ * L4's time, a job (the log's lines; optlayer.h has how each part is made cheap): the picture's read in its budget
+ * (read_ms), the layer read, the sources, the Gaussians (rows and columns apart, and the share of the values the rows'
+ * ranges left to work on), the layer written; one row of the picture timed alone (read; read with the sums; through the
+ * cached view too with read_cached) and a bench (a box row on the stack, in the work buffer, in core's memory; a loop
+ * with and without a multiplication). Between the parts and the Gaussians' passes the worker gives the CPU away when
+ * OPT_YIELD_US passed (op_pace), and stops there if asked. */
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
@@ -273,6 +281,15 @@ typedef struct {
     u32 order;                              /* py | pcb << 8 | pcr << 16 used */
     u32 maps, unmaps_bad;
     u32 t_lread, t_calc, t_lwrite;          /* the worker: the layer read, the sources and Gaussians, the layer written */
+    u32 t_src, t_gb, t_gh;                  /* L4, us without the ticks given away: the sources, Bloom's and Halation's
+                                               Gaussians */
+    u32 g_us[2][2];                         /* ... the Gaussians' row and column passes: [Bloom, Halation][OL_ROWS, OL_COLS] */
+    u32 g_done, g_all;                      /* values the passes worked on (the rows' ranges), of the whole planes' */
+    u32 pr_read, pr_sums, pr_cread, pr_csums;   /* one row of the picture, us: read, read with the sums; the same through
+                                                   the cached view (read_cached); pr_err: no row probe */
+    u32 pr_err;
+    u32 bx_stack, bx_wbuf, bx_core;         /* the bench: a box row of OP_BENCH_N values OP_BENCH_REPS times, us */
+    u32 lp_plain, lp_mul;                   /* loops of OP_TURNS turns, us: plain, with a multiplication */
     u32 sig[4];                             /* the Gaussians, layer pixels Q8: Bloom 1, 2, Halation 1, 2 */
     u32 f_rows, f_passes, f_us, f_cells, f_maps, f_err;   /* the picture's read: rows, passes, us, rows of cells reached */
     u32 lanes[1 + 4 * OL_LANES];            /* L1: ol_lanes_t */
@@ -1089,34 +1106,116 @@ static void op_unmap(volatile op_rec_t *r, u32 win)
         r->unmaps_bad++;
 }
 
-/* The planes in the work buffer (cached, CPU 0 only); 0 - the layer does not fit it */
+/* The planes and tables in the work buffer (cached, CPU 0 only; ol_layout); 0 - the layer does not fit it */
 static int op_planes(volatile op_t *o, ol_t *L, u32 lw, u32 lh)
 {
-    u8 *b = (u8 *)o->wbuf;
-    u32 n = lw * lh, m = lw > lh ? lw : lh;
-
-    if (!b || 512 + OL_ENC + 6 * n + 2 * (m + 2) + n + lh + lw + 64 > o->wsize)
+    mem_set(L, 0, sizeof(*L));
+    if (!o->wbuf || ol_layout(L, o->wbuf, lw, lh) > o->wbuf + o->wsize)
         return 0;
-    L->lw = lw;
-    L->lh = lh;
-    L->lin = (const u16 *)b;
-    b += 512;
-    L->enc = b;
-    b += OL_ENC;
-    L->pb = (u16 *)b;
-    b += 2 * n;
-    L->ph = (u16 *)b;
-    b += 2 * n;
-    L->pc = (u16 *)b;
-    b += 2 * n;
-    L->tmp = (u16 *)b;
-    b += 2 * (m + 2);
-    L->y = b;
-    b += n;
-    L->nrow = b;
-    b += lh;
-    L->cwp = b;
     return 1;
+}
+
+/* The bench (L4, before the read; cheap: ~1 ms each): the row pass of a box (r 1) over OP_BENCH_N values,
+ * OP_BENCH_REPS times, in three places - the worker's stack, the work buffer, an array of core's (all three through the
+ * cache of CPU 0; only the worker touches the array) - so the log tells whether the work buffer is slower than memory
+ * the CPU surely caches. Then loops of OP_TURNS turns, plain and with a multiplication (the compiler's two nops before
+ * it): the cost of the multiplication the Gaussians make two of a value */
+#define OP_BENCH_N 324
+#define OP_BENCH_REPS 8
+#define OP_BENCH_TMP (OP_BENCH_N + 2 * 1 + 6)
+#define OP_TURNS 10000
+static u16 op_bench_core[OP_BENCH_N + OP_BENCH_TMP] __attribute__((aligned(16)));
+
+static u32 op_bench_box(u16 *v, u16 *tmp)
+{
+    u32 i, ia, ib, t;
+
+    for (i = 0; i < OP_BENCH_N; i++)
+        v[i] = (u16)(i * 13 & 4095);
+    ol_box_weights(1, 128, &ia, &ib);
+    t = drv_ticks();
+    for (i = 0; i < OP_BENCH_REPS; i++)
+        ol_box_row(v, OP_BENCH_N, 0, OP_BENCH_N, 1, ia, ib, tmp);
+    return drv_ticks_since(t);
+}
+
+static u32 __attribute__((noinline)) op_bench_stack(void)
+{
+    u16 v[OP_BENCH_N + OP_BENCH_TMP] __attribute__((aligned(4)));
+
+    return op_bench_box(v, v + OP_BENCH_N);
+}
+
+static u32 __attribute__((noinline)) op_loop_plain(u32 n, u32 a)
+{
+    u32 b = 1;
+
+    do {
+        b = b + a + 1;
+    } while (--n);
+    return b;
+}
+
+static u32 __attribute__((noinline)) op_loop_mul(u32 n, u32 a)
+{
+    u32 b = 1;
+
+    do {
+        b = b * a + 1;
+    } while (--n);
+    return b;
+}
+
+static void op_bench(volatile op_rec_t *r, ol_t *L)
+{
+    u32 t;
+
+    r->bx_stack = op_bench_stack();
+    if (L->lw * L->lh >= OP_BENCH_N + OP_BENCH_TMP)
+        r->bx_wbuf = op_bench_box(L->pc, L->pc + OP_BENCH_N);   /* the second Gaussian's plane: not in use yet */
+    r->bx_core = op_bench_box(op_bench_core, op_bench_core + OP_BENCH_N);
+    t = drv_ticks();
+    op_loop_plain(OP_TURNS, r->job | 3);
+    r->lp_plain = drv_ticks_since(t);
+    t = drv_ticks();
+    op_loop_mul(OP_TURNS, r->job | 3);
+    r->lp_mul = drv_ticks_since(t);
+}
+
+/* One row of the picture timed (L4, before the read, out of its budget): the first row, words read with their sum,
+ * then read into the sums (into scratch: the column sums' array) - past the cache; with read_cached also through the
+ * cached view, the cache written back and dropped before, between and after (a line kept from the first read would
+ * make the second one cheaper) */
+static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
+{
+    u32 base, win, t, n = r->width / 2, sum;
+    u16 *db = (u16 *)L->acc, *dh = db + L->lw;
+
+    base = op_map(r, r->bus, 2 * r->width, &win);
+    if (!base) {
+        r->pr_err = r->err ? r->err : OE_MAP;
+        r->err = 0;                         /* the probe only */
+        return;
+    }
+    t = drv_ticks();
+    sum = op_read_sum((const volatile u32 *)base, n, 0);
+    r->pr_read = drv_ticks_since(t);
+    t = drv_ticks();
+    ol_read_row(L, (const volatile u32 *)base, db, dh);
+    r->pr_sums = drv_ticks_since(t);
+    if (o->cfg.cached && win) {
+        drv_fw_cache_flush();
+        t = drv_ticks();
+        sum += op_read_sum((const volatile u32 *)(base - OP_UNCACHED), n, 0);
+        r->pr_cread = drv_ticks_since(t);
+        drv_fw_cache_flush();
+        t = drv_ticks();
+        ol_read_row(L, (const volatile u32 *)(base - OP_UNCACHED), db, dh);
+        r->pr_csums = drv_ticks_since(t);
+        drv_fw_cache_flush();               /* no line of the picture stays in the cache */
+    }
+    r->rd_sum = sum;
+    op_unmap(r, win);
 }
 
 /* The picture's rows read into the sources (L4, [optics] read): passes of rows at offsets in the cells' height by bit
@@ -1127,12 +1226,16 @@ static int op_planes(volatile op_t *o, ol_t *L, u32 lw, u32 lh)
 static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const ol_par_t *P, pace_t *p)
 {
     u32 W = r->width, H = r->height, rb = r->pitch * 2, lw = L->lw, lh = L->lh, chmin, j, off, bank, b0, b1, rows, left;
-    u32 t0 = drv_ticks(), budget = o->cfg.read_us, done = 0, slice, ts, cy, y, bus, win, base, q, k, cached = o->cfg.cached;
+    u32 t0, budget = o->cfg.read_us, done = 0, slice, ts, cy, y, bus, win, base, q, k, cached = o->cfg.cached;
+
     if (ol_columns(L->cwp, W, lw)) {
         r->f_err = 1;
         return;
     }
     L->shift = ol_read_shift(L->cwp, lw, 16);
+    ol_read_table(L, P);
+    op_row_probe(o, r, L);                  /* out of the read's budget */
+    t0 = drv_ticks();
     chmin = H / lh;
     b0 = r->bus >> 27;
     b1 = (r->bus + rb * (H - 1) + 2 * W - 1) >> 27;
@@ -1186,7 +1289,7 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
                     if (drv_ticks_since(ts) >= slice || op_pace(p))
                         goto bank_end;
                     k = base ? base | (bus & OP_BANK_MASK) : op_direct(bus);
-                    ol_read_row(L, P, (const volatile u32 *)(cached ? k - OP_UNCACHED : k), cy);
+                    ol_read_cells(L, (const volatile u32 *)(cached ? k - OP_UNCACHED : k), cy);
                     r->f_rows++;
                 }
             }
@@ -1205,6 +1308,25 @@ out:
     r->f_us = drv_ticks_since(t0);
 }
 
+/* The Gaussians' pace (ol_t's callback, after each pass): the pass's time without the ticks given away into us[part],
+ * then op_pace - the CPU given away when due, the stop and abandon words looked at */
+typedef struct {
+    pace_t *p;
+    u32 t;                                  /* the end of the last mark (after its tick given away) */
+    u32 us[2];                              /* OL_ROWS, OL_COLS */
+} op_gpace_t;
+
+static u32 op_gpace(void *ctx, u32 part)
+{
+    op_gpace_t *g = ctx;
+    u32 stop;
+
+    g->us[part & 1] += drv_ticks_since(g->t);
+    stop = (u32)op_pace(g->p);
+    g->t = drv_ticks();
+    return stop;
+}
+
 /* The worker's part from L1 on: the layer read (L1: its words' statistics), written neutral (L2), the pattern (L3), or
  * the effect (L4). The stop and abandon words between rows: nothing of the layer or the picture touched after either */
 static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
@@ -1212,7 +1334,9 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     ol_t L;
     ol_par_t P;
     ol_lanes_t ln;
+    op_gpace_t gp;
     u32 lw = r->l_wh & 0xffff, lh = r->l_wh >> 16, lp = r->l_pitch * 4, sub = r->sub, x, yy, i, w, base, win, t, fl;
+    u32 k, t1, s0, s1, stop = 0;
     volatile u32 *row;
 
     op_crumb(r->job, sub, P_LAYER);
@@ -1298,21 +1422,40 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
         L.pb[i] = L.ph[i] = 0;
     for (i = 0; i < lh; i++)
         L.nrow[i] = 0;
+    ol_word_tables(&L, &P);
+    op_bench(r, &L);
     if (o->cfg.read && (P.gb || P.gh))
         op_frame_read(o, r, &L, &P, p);
-    if (p->stop && (p->stop[0] | p->stop[1])) {
+    if (op_pace(p)) {
         r->err = OE_STOPPED;
         goto out;
     }
+    s0 = p->slept;
     t = drv_ticks();
     ol_sources(&L, &P);
-    if (P.gb)
-        ol_blur2(&L, L.pb, P.sb1, P.sb2, P.mixb);
-    op_pace(p);
-    if (P.gh)
-        ol_blur2(&L, L.ph, P.sh1, P.sh2, P.mixh);
-    r->t_calc = drv_ticks_since(t);
-    if (op_pace(p)) {
+    r->t_src = drv_ticks_since(t);
+    gp.p = p;
+    L.pace = op_gpace;
+    L.ctx = &gp;
+    for (k = 0; k < 2 && !stop; k++) {      /* Bloom, Halation; after each pass the CPU given away when it is due */
+        if (!(k ? P.gh : P.gb))
+            continue;
+        gp.us[OL_ROWS] = gp.us[OL_COLS] = 0;
+        s1 = p->slept;
+        gp.t = t1 = drv_ticks();
+        stop = k ? ol_blur2(&L, L.ph, P.sh1, P.sh2, P.mixh) : ol_blur2(&L, L.pb, P.sb1, P.sb2, P.mixb);
+        t1 = drv_ticks_since(t1) - (p->slept - s1);
+        if (k)
+            r->t_gh = t1;
+        else
+            r->t_gb = t1;
+        r->g_us[k][OL_ROWS] = gp.us[OL_ROWS];
+        r->g_us[k][OL_COLS] = gp.us[OL_COLS];
+    }
+    r->g_done = L.done;
+    r->g_all = L.all;
+    r->t_calc = drv_ticks_since(t) - (p->slept - s0);
+    if (stop || op_pace(p)) {
         r->err = OE_STOPPED;
         goto out;
     }
@@ -1320,13 +1463,8 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     base = op_map(r, r->l_bus, lp * lh, &win);
     if (!base)
         goto out;
-    for (yy = 0, i = 0; yy < lh; yy++) {
-        if (p->stop && (p->stop[0] | p->stop[1]))
-            break;
-        row = (volatile u32 *)(base + yy * lp);
-        for (x = 0; x < lw; x++, i++)
-            row[x] = ol_word(&L, &P, i);
-    }
+    for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++, i += lw)
+        ol_words(&L, &P, i, (volatile u32 *)(base + yy * lp), lw);
     drv_fw_cache_flush();
     op_unmap(r, win);
     r->t_lwrite = drv_ticks_since(t);
@@ -1617,6 +1755,7 @@ int drv_optics_layer(const drv_optics_layer_cfg *c)
     volatile op_t *o = op();
     u32 i, k, lw, sz;
     u8 *b;
+    ol_t L;
 
     if (rc >= 0)
         return rc;
@@ -1630,7 +1769,7 @@ int drv_optics_layer(const drv_optics_layer_cfg *c)
     if (*(volatile u8 *)(SIZE_SITE + 5 + DRV_UNCACHED) != 0x08)
         return rc = 3;
     lw = c->width;
-    sz = 512 + OL_ENC + 7 * lw * lw + 2 * (lw + 2) + 2 * lw + 64;   /* the planes of a square picture (the largest) */
+    sz = (u32)ol_layout(&L, 0, lw, lw) + 64;   /* the planes of a square picture (the largest) and the tables */
     b = mem_alloc_for(MEM_OWNER_CORE, sz, MEM_LINES);
     if (!b)
         return rc = 2;
@@ -1648,12 +1787,13 @@ int drv_optics_layer(const drv_optics_layer_cfg *c)
 }
 
 /* Core task: the layer's state for the log at start: the transport's smallest sigma for a picture W wide, the work
- * buffer's bytes */
-u32 drv_optics_layer_floor(u32 W, u32 *wsize)
+ * buffer's bytes and its (cached) address */
+u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf)
 {
     volatile op_t *o = op();
 
     *wsize = o ? o->wsize : 0;
+    *wbuf = o ? o->wbuf : 0;
     return o && o->layer_on ? ol_floor_sigma(W, o->cfg.width) : 0;
 }
 
@@ -1879,6 +2019,21 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                    "of cells reached, %u us, %u maps%s", n, r->f_rows, r->f_passes, r->f_cells, r->l_wh >> 16, r->f_us,
                    r->f_maps, r->f_err == 1 ? " - layer too small for the picture, not read" : r->f_err == 2 ?
                    " - no window, the rest from the layer" : "");
+        log_printf(OMK_LOG_INFO, "optics: job %u: calc: sources %u us, Bloom %u us (rows %u, columns %u), Halation %u us "
+                   "(rows %u, columns %u); the passes on %u of %u values (%u%%)", n, r->t_src, r->t_gb, r->g_us[0][0],
+                   r->g_us[0][1], r->t_gh, r->g_us[1][0], r->g_us[1][1], r->g_done, r->g_all,
+                   r->g_all >= 100 ? r->g_done / (r->g_all / 100) : 0);
+        if (r->pr_err)
+            log_printf(OMK_LOG_WARN, "optics: job %u: picture row not timed: %s", n, op_err(r->pr_err));
+        else if (r->pr_read || r->pr_sums)
+            log_printf(OMK_LOG_INFO, "optics: job %u: picture row: read %u us, read and sums %u us (%u words, past the cache)",
+                       n, r->pr_read, r->pr_sums, r->width / 2);
+        if (r->pr_cread || r->pr_csums)
+            log_printf(OMK_LOG_INFO, "optics: job %u: picture row through the cached view: read %u us, read and sums %u us", n,
+                       r->pr_cread, r->pr_csums);
+        log_printf(OMK_LOG_INFO, "optics: job %u: bench: a box row of %u values x %u: stack %u us, work buffer %u us, core's "
+                   "memory %u us; %u turns: plain %u us, with a multiplication %u us", n, OP_BENCH_N, OP_BENCH_REPS,
+                   r->bx_stack, r->bx_wbuf, r->bx_core, OP_TURNS, r->lp_plain, r->lp_mul);
     }
     if (r->sub != DRV_OPTICS_L1 || !r->lanes[0])
         return;

@@ -287,8 +287,8 @@ typedef struct {
 } drv_optics_layer_cfg;
 int drv_optics_layer(const drv_optics_layer_cfg *c);
 /* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize
- * the worker's buffer */
-u32 drv_optics_layer_floor(u32 W, u32 *wsize);
+ * the worker's buffer, *wbuf its address (the cached one) */
+u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf);
 void drv_optics_arm(void);
 void drv_optics_service(drv_optics_info *st);
 /* The bisection (core 1.34): drv_optics_sub - the substage of the jobs listed from now on (after install: N, no step);

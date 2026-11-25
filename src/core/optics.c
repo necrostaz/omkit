@@ -469,7 +469,7 @@ void optics_setup(void)
         return;
     }
     if (layer) {
-        u32 ws;
+        u32 ws, wb;
 
         rc = drv_optics_layer(&lc);
         if (rc) {
@@ -477,8 +477,8 @@ void optics_setup(void)
             if (!lv)
                 return;
         } else {
-            drv_optics_layer_floor(5184, &ws);
-            log_printf(OMK_LOG_INFO, "optics: layer set up: the size hook in, the worker's buffer %u bytes", ws);
+            drv_optics_layer_floor(5184, &ws, &wb);
+            log_printf(OMK_LOG_INFO, "optics: layer set up: the size hook in, the worker's buffer %u bytes at %08x", ws, wb);
             if (!run && !sch.n && lv)
                 sub = DRV_OPTICS_L4;        /* a strength with the probe's level: the layer's work */
         }
