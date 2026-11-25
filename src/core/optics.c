@@ -63,6 +63,8 @@
  *   halation_cb, halation_cr               the halation's colour: Cb, Cr a unit of its Y, percent (signed)
  *   halation_dark                          less halation on bright places: percent
  *   read, read_ms, read_cached             the picture's rows read for the sources, the time a job, the cached view
+ *   layer_cached                           the layer read and written (L4) through the window's cached view, written
+ *                                          back before the window is released
  * The smallest sigma the transport gives (the ISP's reduction and enlargement) is logged at start; a sigma below it
  * comes out as it (a warning).
  *
@@ -404,11 +406,14 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
     c->read = (u32)opt_int("read", 1, 0, 1);
     c->read_us = (u32)opt_int("read_ms", 100, 0, 250) * 1000;
     c->cached = (u32)opt_int("read_cached", 0, 0, 1);
+    c->lcached = (u32)opt_int("layer_cached", 0, 0, 1);
     fl = (216 * 5184 + 50 * c->width) / (100 * c->width);   /* optlayer.h's ol_floor_sigma for 5184 */
     log_printf(OMK_LOG_INFO, "optics: layer: route %s, width %u (cells of %u px; the transport alone blurs by sigma ~%u px), "
                "bytes %s; picture read %s, %u ms%s", c->route == DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width,
                fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" : t, c->read ? "on" : "off", c->read_us / 1000, c->cached ?
                " through the CACHED view" : "");
+    log_printf(OMK_LOG_INFO, "optics: layer: the layer read and written %s", c->lcached ? "through the CACHED view (written "
+               "back before the window is released)" : "past the cache");
     log_printf(OMK_LOG_INFO, "optics: layer: Bloom %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5)", sb, c->tb,
                c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, cfg_int("optics", "bloom_gain", 150));
     log_printf(OMK_LOG_INFO, "optics: layer: Halation %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb %d%% "
@@ -473,12 +478,14 @@ void optics_setup(void)
 
         rc = drv_optics_layer(&lc);
         if (rc) {
-            log_printf(OMK_LOG_ERROR, "optics: the layer not set up, code %d: no Bloom and Halation", rc);
+            log_printf(OMK_LOG_ERROR, "optics: the layer not set up, code %d%s: no Bloom and Halation", rc, rc >= 30 &&
+                       rc < 62 ? " (a CPU kernel of the layer does not give what plain C gives)" : "");
             if (!lv)
                 return;
         } else {
             drv_optics_layer_floor(5184, &ws, &wb);
-            log_printf(OMK_LOG_INFO, "optics: layer set up: the size hook in, the worker's buffer %u bytes at %08x", ws, wb);
+            log_printf(OMK_LOG_INFO, "optics: layer set up: the size hook in, the worker's buffer %u bytes at %08x; the "
+                       "CPU kernels (the extension unit's multiplies, the read's loops) checked against plain C", ws, wb);
             if (!run && !sch.n && lv)
                 sub = DRV_OPTICS_L4;        /* a strength with the probe's level: the layer's work */
         }

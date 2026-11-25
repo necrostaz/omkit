@@ -24,14 +24,18 @@
  * enlargement smooth anyway (ol_cpu_sigma).
  *
  * The cost. The CPU is a base MN10300 (8 registers; the compiler uses no indexed addressing and puts two nops before
- * every multiplication), so the loops here are written for few live values and no test inside them:
+ * every multiplication). Its own mul and mulu are slow (the camera: 10000 turns of a loop with mulu 1.5..2.9 ms against
+ * 0.2 ms without, some 25..50 cycles a multiplication); the firmware multiplies with its extension unit instead (udf00,
+ * udf01 - thousands of places against a few mul), and so do the loops here (OL_MUL, ol_mulhi). The loops are written
+ * for few live values and no test inside them:
  * - a row pass runs over a copy of the row padded with its edge values (or with zeros past the row's non-zero range),
  *   so the loop has no edge test; a column pass goes row by row - the columns' sums in acc[], the input rows it still
  *   needs in a ring - so no loop steps through memory by a row's length (a data cache line is 16 bytes);
  * - each row keeps the range of columns that may be non-zero; a pass works on that range widened by its box, the rest
  *   stays 0 (exactly what the box gives there), so the dark parts of the layer cost next to nothing;
  * - the read of the picture's rows adds one table word a pixel (the excess of Bloom in the low half, of Halation in
- *   the high half);
+ *   the high half); with cells of 8 words (a layer 324 wide on 5184) a cell's words go through one unrolled assembly
+ *   loop (ol_read_pack);
  * - the layer's word takes the per-code parts (Halation's weight by darkness, the chroma) from tables, and a pixel
  *   with nothing added is the neutral word at once.
  * The arithmetic is the one of the first version (the host test compares the two): the same rounding and the same
@@ -43,10 +47,40 @@
 #define OL_ONE 4095                         /* linear light Q12: a code of 255 */
 #define OL_ENC 4096                         /* entries of enc[] */
 #define OL_LANES 4
+#define OL_READ_RUN 8                       /* words added in one u32 before its halves are split (16 OL_ONE < 65536) */
 #define OL_BOX_PASSES 3
 #define OL_SIGMA_MAX (32 * 256)             /* sigma in layer pixels, Q8: the plan's arithmetic stays in 32 bits */
 #define OL_R_MAX 31                         /* the largest box radius of a plan (OL_SIGMA_MAX gives 30) */
 #define OL_KERNEL __attribute__((noinline))  /* a loop of its own: the compiler keeps its few values in registers */
+
+/* The low word of a x b. On the camera the extension unit's multiply udf01 Dm,Dn (Dn = the low word of Dn x Dm, MULQU of
+ * the unit; MDR and the CPU's flags kept, the flags left undefined - hence "cc"): the firmware's own way to multiply.
+ * The unit's state (its high word, MCRH, MCRL) is saved and restored by the firmware's interrupt entry (0x60038885 calls
+ * 0x60030107, its exit 0x6003011c), so a task switch keeps it; udf01 does not need it anyway */
+#ifdef __mn10300__
+#define OL_MUL(a, b) ({                                                                                                     \
+    u32 ol_m_ = (a);                                                                                                        \
+    __asm__("udf01 %1,%0" : "+d"(ol_m_) : "d"((u32)(b)) : "cc");                                                          \
+    ol_m_;                                                                                                                  \
+})
+#else
+#define OL_MUL(a, b) ((u32)(a) * (u32)(b))
+#endif
+
+/* The high word of x m, both below 2^31 (the unit's signed multiply is then the unsigned one): udf00 Dm,Dn (MULQ: the
+ * low word to Dn, the high word to the unit's HI), then udf15 Dn,Dn (GETX: HI to Dn), as the firmware's FixMul16
+ * 0x5048367b of the OM-1 does. An interrupt between the two keeps HI (the interrupt entry saves it, see OL_MUL) */
+static inline u32 ol_mulhi(u32 x, u32 m)
+{
+#ifdef __mn10300__
+    u32 hi;
+
+    __asm__("udf00 %2,%0\n\tudf15 %1,%1" : "+d"(x), "=d"(hi) : "d"(m) : "cc");
+    return hi;
+#else
+    return (u32)(((unsigned long long)x * m) >> 32);
+#endif
+}
 
 typedef struct {
     u32 tb, th;                             /* thresholds, linear Q12 */
@@ -73,12 +107,16 @@ typedef struct {
                                                new ones after them */
     u8 *nrow;                               /* lh: rows of the picture read into each row of cells */
     u8 *cwp;                                /* lw: pixel pairs of the picture in each column of cells */
+    u16 *ry;                                /* lh: the picture's first row of each row of cells (ol_rows) */
     const u16 *lin;                         /* 256 */
     const u8 *enc;                          /* OL_ENC */
     u32 *tab;                               /* 256: the read's excess of Bloom | of Halation << 16 */
     u32 *cw;                                /* 256: a word's chroma bytes by the halation's Y code */
     u16 *wd;                                /* 256: Halation's weight by the darkness of the place, Q8, by its code */
     u32 shift;                              /* the read's sums are kept >> shift (u16) */
+    u32 c8;                                 /* 1 - every cell is OL_READ_RUN words wide: the read packs (ol_read_pack) */
+    u32 rbytes;                             /* 1 - the packing read loads bytes (the picture through the cache), 0 - words
+                                               (past it: each word read once) */
     u32 neutral, ys;                        /* the neutral word; the shift of Y in a word */
     u32 (*pace)(void *ctx, u32 part);       /* after each pass of a Gaussian (OL_ROWS, OL_COLS): not 0 - stop; 0 - none */
     void *ctx;
@@ -117,6 +155,8 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
     b += (2 * (lw + 2 * OL_R_MAX + 6) + 3) & ~3u;
     o->rng = (u16 *)b;
     b += 8 * lh;
+    o->ry = (u16 *)b;
+    b += (2 * lh + 3) & ~3u;
     o->y = (u8 *)b;
     b += n;
     o->nrow = (u8 *)b;
@@ -172,19 +212,36 @@ static OL_KERNEL void ol_copy16(u16 *d, const u16 *s, u32 n)
         *(u16 *)dw = *(const u16 *)sw;
 }
 
+/* n u16 values at d set to 0: by words where it can */
+static OL_KERNEL void ol_zero16(u16 *d, u32 n)
+{
+    u32 *dw, *de;
+
+    if (n && ((uptr)d & 2)) {
+        *d++ = 0;
+        n--;
+    }
+    dw = (u32 *)d;
+    for (de = dw + n / 2; dw != de;)
+        *dw++ = 0;
+    if (n & 1)
+        *(u16 *)dw = 0;
+}
+
 /* The pairs of picture pixels in each column of cells (width W, even, layer lw): cwp[cx]; 1 - a column has none or more
  * than 255 (the layer too small for the picture: not used) */
 static inline int ol_columns(u8 *cwp, u32 W, u32 lw)
 {
-    u32 p, cx = 0, acc = 0, n = 0;
+    u32 p, cx = 0, acc = 0, n = 0, edge = W;
 
     for (p = 0; p < W / 2; p++) {
         n++;
         acc += 2 * lw;                      /* the pair's right edge in cells x W */
-        if (acc >= (cx + 1) * W) {
+        if (acc >= edge) {                  /* edge: (cx + 1) W */
             if (n > 255)
                 return 1;
             cwp[cx++] = (u8)n;
+            edge += W;
             n = 0;
         }
     }
@@ -226,6 +283,19 @@ static inline void ol_read_table(ol_t *o, const ol_par_t *p)
     }
 }
 
+/* After ol_columns: whether every cell is OL_READ_RUN words wide (o->c8: the packing read), and the picture's first row
+ * of each row of cells, ry[cy] = cy H / lh (H the picture's height, below 65536) */
+static inline void ol_rows(ol_t *o, u32 H)
+{
+    u32 i;
+
+    for (i = 0, o->c8 = 1; i < o->lw; i++)
+        if (o->cwp[i] != OL_READ_RUN)
+            o->c8 = 0;
+    for (i = 0; i < o->lh; i++)
+        o->ry[i] = (u16)(i * H / o->lh);
+}
+
 /* The bit reversal of 4 bits: the order of a read's passes, each one halving the gaps the ones before left */
 static inline u32 ol_bitrev4(u32 j)
 {
@@ -244,7 +314,6 @@ static inline u32 ol_bitrev4(u32 j)
  * column, the excess over each threshold of its pixels, >> shift - the same sums as the excess added pixel by pixel.
  * Each word is read once (past the cache a read is the cost); the table is not written while this runs (it is made
  * before, in another function) */
-#define OL_READ_RUN 8                       /* words added in one u32 before its halves are split (16 OL_ONE < 65536) */
 static OL_KERNEL u32 ol_read_run(const volatile u32 *row, const volatile u32 *end, const u32 *tab)
 {
     u32 s = 0, w;
@@ -256,11 +325,73 @@ static OL_KERNEL u32 ol_read_run(const volatile u32 *row, const volatile u32 *en
     return s;
 }
 
+/* A row of cells of OL_READ_RUN words each (o->c8) into packed sums: out[cx] = the cell's excess of Bloom | of
+ * Halation << 16 (16 pixels: each half below 65536), for out .. end (at least one cell). bytes 1: the two Y bytes of a
+ * word loaded as bytes (through the cache a load costs the same, and no shift or mask is needed); 0: each word loaded
+ * once and split (past the cache each load goes to the bus). On the camera an unrolled loop of 8 (bytes) or 10 (words)
+ * instructions a word; the same sums as ol_read_run (drv_optics_layer checks the two against each other at start) */
+static OL_KERNEL void ol_read_pack(const volatile u32 *row, u32 *out, const u32 *end, const u32 *tab, u32 bytes)
+{
+#ifdef __mn10300__
+    u32 s, a, b;
+
+    if (bytes)
+        __asm__ __volatile__("1:\n\tclr %0\n\t"
+                             ".irp k,0,4,8,12,16,20,24,28\n\t"
+                             "movbu (\\k,%3),%1\n\tmovbu (\\k+2,%3),%2\n\t"
+                             "asl2 %1\n\tasl2 %2\n\t"
+                             "mov (%1,%5),%1\n\tmov (%2,%5),%2\n\t"
+                             "add %1,%0\n\tadd %2,%0\n\t"
+                             ".endr\n\t"
+                             "add 32,%3\n\tmov %0,(%4)\n\tinc4 %4\n\tcmp %6,%4\n\tbne 1b"
+                             : "=&d"(s), "=&d"(a), "=&d"(b), "+a"(row), "+a"(out)
+                             : "a"(tab), "a"(end)
+                             : "cc", "memory");
+    else
+        __asm__ __volatile__("1:\n\tclr %0\n\t"
+                             ".irp k,0,4,8,12,16,20,24,28\n\t"
+                             "mov (\\k,%3),%1\n\tmov %1,%2\n\t"
+                             "asl2 %1\n\tlsr 14,%2\n\t"
+                             "and 1020,%1\n\tand 1020,%2\n\t"
+                             "mov (%1,%5),%1\n\tmov (%2,%5),%2\n\t"
+                             "add %1,%0\n\tadd %2,%0\n\t"
+                             ".endr\n\t"
+                             "add 32,%3\n\tmov %0,(%4)\n\tinc4 %4\n\tcmp %6,%4\n\tbne 1b"
+                             : "=&d"(s), "=&d"(a), "=&d"(b), "+a"(row), "+a"(out)
+                             : "a"(tab), "a"(end)
+                             : "cc", "memory");
+#else
+    (void)bytes;
+    do {
+        *out++ = ol_read_run(row, row + OL_READ_RUN, tab);
+        row += OL_READ_RUN;
+    } while (out != end);
+#endif
+}
+
+/* The packed sums of ol_read_pack added into db[], dh[] (each half >> shift, as ol_read_row adds a run's halves) */
+static OL_KERNEL void ol_read_split(const u32 *s, u16 *db, u16 *dh, const u16 *de, u32 shift)
+{
+    do {
+        u32 v = *s++;
+
+        *db = (u16)(*db + ((v & 0xffff) >> shift));
+        *dh = (u16)(*dh + (v >> 16 >> shift));
+        db++;
+        dh++;
+    } while (db != de);
+}
+
 static OL_KERNEL void ol_read_row(const ol_t *o, const volatile u32 *row, u16 *db, u16 *dh)
 {
     const u8 *c = o->cwp, *ce = c + o->lw;
     u32 n, k, s, b, h;
 
+    if (o->c8) {                            /* o->acc: not in use while the picture is read */
+        ol_read_pack(row, o->acc, o->acc + o->lw, o->tab, o->rbytes);
+        ol_read_split(o->acc, db, dh, db + o->lw, o->shift);
+        return;
+    }
     do {
         n = *c++;
         b = h = 0;
@@ -287,23 +418,9 @@ static inline void ol_read_cells(ol_t *o, const volatile u32 *row, u32 cy)
         o->nrow[cy]++;
 }
 
-/* floor(x / d) by a reciprocal m = 0xffffffff / d + 1 (2 <= d): exact while x d < 2^32. On the camera the high word
- * of mulu (in mdr; the two nops as the compiler puts before a multiplication): the compiler's 64-bit product goes through
- * the stack */
-static inline u32 ol_divr(u32 x, u32 m)
-{
-#ifdef __mn10300__
-    u32 hi;
-
-    __asm__("nop\n\tnop\n\tmulu %2,%0\n\tmov mdr,%1" : "+d"(x), "=d"(hi) : "d"(m) : "cc", "mdr");
-    return hi;
-#else
-    return (u32)(((unsigned long long)x * m) >> 32);
-#endif
-}
-
-/* The means of a row of cells read k times: x << shift / (2 cwp k) by a reciprocal (exact, see ol_sources); the
- * reciprocal made again only where the column's pairs change (a layer 324 wide: never) */
+/* The means of a row of cells read k times: floor((x << shift) / d), d = 2 cwp k, as the high word of (x << shift) m with
+ * m = 0xffffffff / d + 1 - exact while (x << shift) d < 2^32 - and both factors below 2^31 for ol_mulhi (d >= 4: see
+ * ol_sources); the reciprocal made again only where the column's pairs change (a layer 324 wide: never) */
 static OL_KERNEL void ol_means_row(u16 *pb, u16 *ph, const u8 *cwp, const u8 *ce, u32 k, u32 shift)
 {
     u32 c = 0, m = 0;
@@ -314,25 +431,31 @@ static OL_KERNEL void ol_means_row(u16 *pb, u16 *ph, const u8 *cwp, const u8 *ce
             m = 0xffffffffu / (2 * c * k) + 1;
         }
         cwp++;
-        *pb = (u16)ol_divr((u32)*pb << shift, m);
-        *ph = (u16)ol_divr((u32)*ph << shift, m);
+        *pb = (u16)ol_mulhi((u32)*pb << shift, m);
+        *ph = (u16)ol_mulhi((u32)*ph << shift, m);
         pb++;
         ph++;
     } while (cwp != ce);
 }
 
 /* After the read (o->pb, o->ph hold sums where nrow > 0, anything elsewhere): the mean excess of a pixel, Q12, in every
- * cell - from the sums where the picture's rows were read, from the layer's Y elsewhere. The division by a reciprocal
- * is exact while (65535 << shift) 2 cwp nrow < 2^32 (ol_divr); a narrower layer (cells of more pairs) divides */
+ * cell - from the sums where the picture's rows were read, from the layer's Y elsewhere (through the read's table: the
+ * same excess as of a pixel). The division by a reciprocal is exact while (65535 << shift) 2 cwp nrow < 2^32
+ * (ol_means_row); a narrower layer (cells of more pairs) divides */
 static OL_KERNEL void ol_sources(ol_t *o, const ol_par_t *p)
 {
-    u32 cx, cy, i, l, d, k, cm = 0, recip, lw = o->lw;
+    u32 cx, cy, i, t, d, k, cm = 0, cn = 255, recip, lw = o->lw;
     u16 *pb = o->pb, *ph = o->ph;
+    const u8 *y;
 
-    for (cx = 0; cx < lw; cx++)
+    ol_read_table(o, p);
+    for (cx = 0; cx < lw; cx++) {
         if (o->cwp[cx] > cm)
             cm = o->cwp[cx];
-    recip = o->shift < 16 && cm && (65535u << o->shift) < 0xffffffffu / (2 * cm * 255);
+        if (o->cwp[cx] < cn)
+            cn = o->cwp[cx];
+    }
+    recip = o->shift < 16 && cn >= 2 && (65535u << o->shift) < 0xffffffffu / (2 * cm * 255);
     for (cy = 0, i = 0; cy < o->lh; cy++, i += lw) {
         k = o->nrow[cy];
         if (k && recip) {
@@ -344,10 +467,10 @@ static OL_KERNEL void ol_sources(ol_t *o, const ol_par_t *p)
                 ph[i + cx] = (u16)(((u32)ph[i + cx] << o->shift) / d);
             }
         } else {
-            for (cx = 0; cx < lw; cx++) {
-                l = o->lin[o->y[i + cx]];
-                pb[i + cx] = (u16)(l > p->tb ? l - p->tb : 0);
-                ph[i + cx] = (u16)(l > p->th ? l - p->th : 0);
+            for (cx = 0, y = o->y + i; cx < lw; cx++) {
+                t = o->tab[y[cx]];
+                pb[i + cx] = (u16)t;
+                ph[i + cx] = (u16)(t >> 16);
             }
         }
     }
@@ -420,19 +543,27 @@ static OL_KERNEL void ol_box_row(u16 *v, u32 n, u32 s, u32 e, u32 r, u32 ia, u32
     do {
         u32 l = *lo++, h = *hi++;
 
-        *out++ = (u16)((sum * ia + (l + h) * ib + 32768) >> 16);
+        *out++ = (u16)((OL_MUL(sum, ia) + OL_MUL(l + h, ib) + 32768) >> 16);
         sum += h - *lo;
     } while (out != end);
 }
 
-/* The non-zero range [x0, x1) of each row of a plane (x0 >= x1: the row is 0) */
-static inline void ol_ranges(ol_t *o, const u16 *plane)
+/* The non-zero range [x0, x1) of each row of a plane (x0 >= x1: the row is 0); a row looked at by words where it can
+ * be (most rows of a dark layer are 0) */
+static OL_KERNEL void ol_ranges(ol_t *o, const u16 *plane)
 {
-    u32 y, a, b, lw = o->lw;
+    u32 y, a, b, lw = o->lw, n2 = lw / 2;
     const u16 *row;
+    const u32 *w;
 
     for (y = 0, row = plane; y < o->lh; y++, row += lw) {
-        for (a = 0; a < lw && !row[a]; a++)
+        a = 0;
+        if (!(lw & 1) && !((uptr)row & 3)) {
+            for (w = (const u32 *)row; a < n2 && !w[a]; a++)
+                ;
+            a *= 2;
+        }
+        for (; a < lw && !row[a]; a++)
             ;
         for (b = lw; b > a && !row[b - 1]; b--)
             ;
@@ -445,14 +576,14 @@ static inline void ol_ranges(ol_t *o, const u16 *plane)
 static inline void ol_box_rows(ol_t *o, u16 *plane, u32 r, u32 ia, u32 ib)
 {
     u32 y, s, e, lw = o->lw;
-    u16 *rg = o->rng;
+    u16 *rg = o->rng, *row;
 
-    for (y = 0; y < o->lh; y++, rg += 2) {
+    for (y = 0, row = plane; y < o->lh; y++, rg += 2, row += lw) {
         if (rg[0] >= rg[1])
             continue;                       /* a row of 0 stays 0 */
         s = rg[0] > r + 1 ? rg[0] - r - 1 : 0;
         e = rg[1] + r + 1 < lw ? rg[1] + r + 1 : lw;
-        ol_box_row(plane + y * lw, lw, s, e, r, ia, ib, o->tmp);
+        ol_box_row(row, lw, s, e, r, ia, ib, o->tmp);
         rg[0] = (u16)s;
         rg[1] = (u16)e;
         o->done += e - s;
@@ -466,7 +597,7 @@ static OL_KERNEL void ol_cols_row(u16 *out, u16 *end, u32 *ac, const u16 *lo, co
     do {
         u32 v = *ac, h = *hi++;
 
-        *out++ = (u16)((v * ia + (*lo++ + h) * ib + 32768) >> 16);
+        *out++ = (u16)((OL_MUL(v, ia) + OL_MUL(*lo++ + h, ib) + 32768) >> 16);
         *ac++ = v + h - *lo1++;
     } while (out != end);
 }
@@ -487,8 +618,8 @@ static OL_KERNEL void ol_out_pairs(u32 *out, u32 *end, const u32 *ac, u32 ia, u3
     do {
         u32 a = *ac++, e = *out, v;
 
-        v = ((a & 0xffff) * ia + (e & 0xffff) * ib + 32768) >> 16;
-        *out++ = v | ((a >> 16) * ia + (e >> 16) * ib + 32768) >> 16 << 16;
+        v = (OL_MUL(a & 0xffff, ia) + OL_MUL(e & 0xffff, ib) + 32768) >> 16;
+        *out++ = v | (OL_MUL(a >> 16, ia) + OL_MUL(e >> 16, ib) + 32768) >> 16 << 16;
     } while (out != end);
 }
 
@@ -510,8 +641,9 @@ static OL_KERNEL void ol_acc_pairs(u32 *ac, u32 *end, const u32 *lo1, const u32 
 #define OL_PAIRS_R 7
 static inline void ol_box_cols(ol_t *o, u16 *plane, u32 r, u32 ia, u32 ib)
 {
-    u32 lw = o->lw, lh = o->lh, nr = r + 2, pairs = r <= OL_PAIRS_R && !(lw & 1), y, j, jl, jh, s, e, a, b;
-    u16 *rin = o->rng, *rout = o->rng + 2 * lh, *cur, *slot;
+    u32 lw = o->lw, lh = o->lh, nr = r + 2, pairs = r <= OL_PAIRS_R && !(lw & 1), y, j, jl, jh, s, e, a, b, rl, k;
+    u16 *rin = o->rng, *rout = o->rng + 2 * lh, *cur, *slot, *n1, *n2, *ring = o->ring, *rend, *last;
+    u16 rr[2 * (OL_R_MAX + 2)];             /* each ring row's range that may be non-zero (all of it at first) */
     const u16 *lo, *lo1, *hi;
     u32 *acc = o->acc;
 
@@ -536,7 +668,7 @@ static inline void ol_box_cols(ol_t *o, u16 *plane, u32 r, u32 ia, u32 ib)
         acc[j] = 0;
     for (j = 0; j <= 2 * r; j++) {          /* acc: the rows -r .. r, the ones above the first clamped to it */
         y = j <= r ? 0 : j - r < lh ? j - r : lh - 1;
-        cur = plane + y * lw;
+        cur = plane + OL_MUL(y, lw);
         s = rin[2 * y];
         e = rin[2 * y + 1];
         if (pairs) {
@@ -547,18 +679,31 @@ static inline void ol_box_cols(ol_t *o, u16 *plane, u32 r, u32 ia, u32 ib)
                 acc[s] += cur[s];
         }
     }
-    for (y = 0; y < lh; y++) {
-        cur = plane + y * lw;
-        slot = o->ring + (y % nr) * lw;
-        ol_copy16(slot, cur, lw);
+    rend = ring + OL_MUL(nr, lw);           /* the ring's row of y: y % nr, by a pointer that wraps */
+    rl = OL_MUL(r + 1, lw);
+    last = plane + OL_MUL(lh - 1, lw);
+    for (k = 0; k < nr; k++) {
+        rr[2 * k] = 0;
+        rr[2 * k + 1] = (u16)lw;
+    }
+    for (y = 0, k = 0, cur = plane, slot = ring; y < lh; y++, cur += lw, slot = n1, k = k + 1 == nr ? 0 : k + 1) {
+        if (rr[2 * k] < rr[2 * k + 1])      /* the row in the ring: its range copied, the rest 0 (as it is) */
+            ol_zero16(slot + rr[2 * k], rr[2 * k + 1] - rr[2 * k]);
+        a = rin[2 * y];
+        b = rin[2 * y + 1];
+        if (a < b)
+            ol_copy16(slot + a, cur + a, b - a);
+        rr[2 * k] = (u16)a;
+        rr[2 * k + 1] = (u16)b;
+        n1 = slot + lw == rend ? ring : slot + lw;  /* (y + 1) % nr - for y > r also (y - r - 1) % nr */
         s = rout[2 * y];
         e = rout[2 * y + 1];
         if (s >= e)
             continue;                       /* every input row of it 0: the row stays 0, acc too */
-        j = y + r + 1 < lh ? y + r + 1 : lh - 1;
-        hi = (j > y ? plane + j * lw : slot) + s;
-        lo = o->ring + ((y > r ? y - r - 1 : 0) % nr) * lw + s;
-        lo1 = o->ring + ((y > r ? y - r : 0) % nr) * lw + s;
+        n2 = n1 + lw == rend ? ring : n1 + lw;      /* (y + 2) % nr: for y > r (y - r) % nr */
+        hi = (y + r + 1 < lh ? cur + rl : y + 1 < lh ? last : slot) + s;  /* row min(y + r + 1, lh - 1) */
+        lo = (y > r ? n1 : ring) + s;
+        lo1 = (y > r ? n2 : ring) + s;
         if (pairs) {
             ol_ends_pairs((u32 *)(cur + s), (u32 *)(cur + e), (const u32 *)lo, (const u32 *)hi);
             ol_out_pairs((u32 *)(cur + s), (u32 *)(cur + e), acc + s / 2, ia, ib);
@@ -612,7 +757,7 @@ static inline u32 ol_blur2(ol_t *o, u16 *plane, u32 s1, u32 s2, u32 mix)
     if (ol_gauss(o, plane, s1) || ol_gauss(o, o->pc, s2))
         return 1;
     for (i = 0; i < n; i++)
-        plane[i] = (u16)(((u32)plane[i] * (256 - mix) + (u32)o->pc[i] * mix + 128) >> 8);
+        plane[i] = (u16)((OL_MUL(plane[i], 256 - mix) + OL_MUL(o->pc[i], mix) + 128) >> 8);
     return 0;
 }
 
@@ -668,10 +813,10 @@ static inline u32 ol_word_of(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32
 {
     u32 base = o->lin[c], t1, t2, e2;
 
-    t1 = base + (b * p->gb >> 8);
+    t1 = base + (OL_MUL(b, p->gb) >> 8);
     if (t1 > OL_ONE)
         t1 = OL_ONE;
-    t2 = t1 + ((h * p->gh >> 8) * o->wd[c] >> 8);
+    t2 = t1 + (OL_MUL(OL_MUL(h, p->gh) >> 8, o->wd[c]) >> 8);
     if (t2 > OL_ONE)
         t2 = OL_ONE;
     e2 = o->enc[t2];
@@ -689,18 +834,53 @@ static OL_KERNEL u32 ol_word_lit(const ol_t *o, const ol_par_t *p, u32 i)
     return ol_word_of(o, p, o->pb[i], o->ph[i], o->y[i]);
 }
 
-/* n words of the layer from pixel i into row (past the cache: each written once). Most of a layer gets nothing (no
- * source near): those words are the neutral one without the word's arithmetic */
+/* The first pixel from k on, below n, that gets something (pb or ph not 0); n - none. Two pixels a step where the planes
+ * allow it (most of a layer gets nothing) */
+static OL_KERNEL u32 ol_quiet(const u16 *pb, const u16 *ph, u32 k, u32 n)
+{
+    const u32 *wb, *wh, *we;
+
+    if (k < n && (((uptr)(pb + k) | (uptr)(ph + k)) & 2)) {
+        if (pb[k] | ph[k])
+            return k;
+        k++;
+    }
+    if (!(((uptr)(pb + k) | (uptr)(ph + k)) & 2)) {
+        wb = (const u32 *)(pb + k);
+        wh = (const u32 *)(ph + k);
+        for (we = wb + (n - k) / 2; wb != we && !(*wb | *wh); wb++)
+            wh++;
+        k = (u32)((const u16 *)wb - pb);
+    }
+    while (k < n && !(pb[k] | ph[k]))
+        k++;
+    return k;
+}
+
+/* d .. e (e > d) set to v */
+static OL_KERNEL void ol_fill32(volatile u32 *d, volatile u32 *e, u32 v)
+{
+    do {
+        *d++ = v;
+    } while (d != e);
+}
+
+/* n words of the layer from pixel i into row (each written once). Most of a layer gets nothing (no source near): those
+ * words are the neutral one, in runs, without the word's arithmetic */
 static OL_KERNEL void ol_words(const ol_t *o, const ol_par_t *p, u32 i, volatile u32 *row, u32 n)
 {
-    const u16 *pb = o->pb + i, *ph = o->ph + i, *pe = pb + n;
-    u32 nw = o->neutral;
+    const u16 *pb = o->pb + i, *ph = o->ph + i;
+    u32 k = 0, j;
 
-    do {
-        *row++ = (*pb | *ph) ? ol_word_lit(o, p, (u32)(pb - o->pb)) : nw;
-        pb++;
-        ph++;
-    } while (pb != pe);
+    while (k < n) {
+        j = ol_quiet(pb, ph, k, n);
+        if (j > k)
+            ol_fill32(row + k, row + j, o->neutral);
+        if (j == n)
+            break;
+        row[j] = ol_word_lit(o, p, i + j);
+        k = j + 1;
+    }
 }
 
 /* The test pattern (substage L3): eight bands across the layer; in band k < 4 byte k is 0x60 over the neutral word,

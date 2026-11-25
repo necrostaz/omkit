@@ -1099,7 +1099,8 @@ static void test_layer(int phase)
     write_file("OMKIT.INI", phase == 1 ? "[optics]\nbloom = 5\nhalation = 2\nbloom_sigma = 80\nbloom_sigma2 = 200\n"
                                          "bloom_mix = 25\nhalation_cb = -50\n" :
                                          "[optics]\nroute = 403\nlayer_bytes = 120\nlayer_width = 648\n"
-                                         "halation = 1\nhalation_sigma = 10\nschedule = L0, L1, l2, L4\n");
+                                         "halation = 1\nhalation_sigma = 10\nlayer_cached = 1\n"
+                                         "schedule = L0, L1, l2, L4\n");
     CHECK(cfg_load() == 1);
     log_setup(1, OMK_LOG_INFO);
     host_prev_ended = 1;
@@ -1118,14 +1119,18 @@ static void test_layer(int phase)
         CHECK(host_opt_layer.gb == 150 * 256 * 5 / 500 && host_opt_layer.gh == 200 * 256 * 2 / 500);
         CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 70 * 256 / 100);
         CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 100000 && host_opt_layer.cached == 0);
+        CHECK(host_opt_layer.lcached == 0);
     } else {
         CHECK(host_opt_sub == DRV_OPTICS_N);    /* the schedule's first entry later */
         CHECK(host_opt_layer.route == DRV_OPTICS_403 && host_opt_layer.width == 400);   /* 648 clamped to 400 */
         CHECK(host_opt_layer.order == (1u | 2u << 8 | 0u << 16) && host_opt_layer.gb == 0);
+        CHECK(host_opt_layer.lcached == 1);
     }
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
     CHECK(t && strstr(t, "optics: layer: route"));
+    CHECK(t && strstr(t, phase == 1 ? "the layer read and written past the cache" :
+                                      "the layer read and written through the CACHED view"));
     if (phase == 1)
         CHECK(t && strstr(t, "optics: probe level 0: a step in the look's stills on the mask route; the stills get L4"));
     else

@@ -288,8 +288,10 @@ typedef struct {
     u32 pr_read, pr_sums, pr_cread, pr_csums;   /* one row of the picture, us: read, read with the sums; the same through
                                                    the cached view (read_cached); pr_err: no row probe */
     u32 pr_err;
-    u32 bx_stack, bx_wbuf, bx_core;         /* the bench: a box row of OP_BENCH_N values OP_BENCH_REPS times, us */
-    u32 lp_plain, lp_mul;                   /* loops of OP_TURNS turns, us: plain, with a multiplication */
+    u32 bx_wbuf;                            /* the bench: a box row of OP_BENCH_N values OP_BENCH_REPS times, us */
+    u32 lp_plain, lp_mul, lp_udf, lp_hi;    /* loops of OP_TURNS turns, us: plain, mulu, udf01, udf00 + udf15 */
+    u32 lp_same;                            /* 1 - the loops of mulu and udf01 gave the same */
+    u32 lcached;                            /* 1 - the layer read and written through the window's cached view */
     u32 sig[4];                             /* the Gaussians, layer pixels Q8: Bloom 1, 2, Halation 1, 2 */
     u32 f_rows, f_passes, f_us, f_cells, f_maps, f_err;   /* the picture's read: rows, passes, us, rows of cells reached */
     u32 lanes[1 + 4 * OL_LANES];            /* L1: ol_lanes_t */
@@ -1116,15 +1118,14 @@ static int op_planes(volatile op_t *o, ol_t *L, u32 lw, u32 lh)
 }
 
 /* The bench (L4, before the read; cheap: ~1 ms each): the row pass of a box (r 1) over OP_BENCH_N values,
- * OP_BENCH_REPS times, in three places - the worker's stack, the work buffer, an array of core's (all three through the
- * cache of CPU 0; only the worker touches the array) - so the log tells whether the work buffer is slower than memory
- * the CPU surely caches. Then loops of OP_TURNS turns, plain and with a multiplication (the compiler's two nops before
- * it): the cost of the multiplication the Gaussians make two of a value */
+ * OP_BENCH_REPS times, in the work buffer (card164: the same time as on the stack and in core's memory - the memory does
+ * not slow it); then loops of OP_TURNS turns, b = b x a + 1: plain (an exclusive or for the multiplication), with the
+ * CPU's mulu (the compiler's two nops before it), with the extension unit's udf01 (OL_MUL) and with its udf00 + udf15
+ * (ol_mulhi, the high word: the means). The loops of mulu and udf01 must end with the same b */
 #define OP_BENCH_N 324
 #define OP_BENCH_REPS 8
 #define OP_BENCH_TMP (OP_BENCH_N + 2 * 1 + 6)
 #define OP_TURNS 10000
-static u16 op_bench_core[OP_BENCH_N + OP_BENCH_TMP] __attribute__((aligned(16)));
 
 static u32 op_bench_box(u16 *v, u16 *tmp)
 {
@@ -1137,13 +1138,6 @@ static u32 op_bench_box(u16 *v, u16 *tmp)
     for (i = 0; i < OP_BENCH_REPS; i++)
         ol_box_row(v, OP_BENCH_N, 0, OP_BENCH_N, 1, ia, ib, tmp);
     return drv_ticks_since(t);
-}
-
-static u32 __attribute__((noinline)) op_bench_stack(void)
-{
-    u16 v[OP_BENCH_N + OP_BENCH_TMP] __attribute__((aligned(4)));
-
-    return op_bench_box(v, v + OP_BENCH_N);
 }
 
 static u32 __attribute__((noipa)) op_loop_plain(u32 n, u32 a)
@@ -1166,32 +1160,57 @@ static u32 __attribute__((noipa)) op_loop_mul(u32 n, u32 a)
     return b;
 }
 
+static u32 __attribute__((noipa)) op_loop_udf(u32 n, u32 a)
+{
+    u32 b = 1;
+
+    do {
+        b = OL_MUL(b, a) + 1;
+    } while (--n);
+    return b;
+}
+
+static u32 __attribute__((noipa)) op_loop_hi(u32 n, u32 a)
+{
+    u32 b = 1;
+
+    do {
+        b = ol_mulhi(b & 0x7fffffff, a) + n;
+    } while (--n);
+    return b;
+}
+
 static void op_bench(volatile op_rec_t *r, ol_t *L)
 {
     volatile u32 sink;                      /* the loops' results kept: the compiler leaves no loop out */
-    u32 t;
+    u32 t, a = r->job | 0x10003, b;
 
-    r->bx_stack = op_bench_stack();
     if (L->lw * L->lh >= OP_BENCH_N + OP_BENCH_TMP)
         r->bx_wbuf = op_bench_box(L->pc, L->pc + OP_BENCH_N);   /* the second Gaussian's plane: not in use yet */
-    r->bx_core = op_bench_box(op_bench_core, op_bench_core + OP_BENCH_N);
     t = drv_ticks();
-    sink = op_loop_plain(OP_TURNS, r->job | 3);
+    sink = op_loop_plain(OP_TURNS, a);
     r->lp_plain = drv_ticks_since(t);
     t = drv_ticks();
-    sink = op_loop_mul(OP_TURNS, r->job | 3);
+    sink = b = op_loop_mul(OP_TURNS, a);
     r->lp_mul = drv_ticks_since(t);
+    t = drv_ticks();
+    sink = op_loop_udf(OP_TURNS, a);
+    r->lp_udf = drv_ticks_since(t);
+    r->lp_same = sink == b;
+    t = drv_ticks();
+    sink = op_loop_hi(OP_TURNS, a);
+    r->lp_hi = drv_ticks_since(t);
     (void)sink;
 }
 
 /* One row of the picture timed (L4, before the read, out of its budget): the first row, words read with their sum,
- * then read into the sums (into scratch: the column sums' array) - past the cache; with read_cached also through the
- * cached view, the cache written back and dropped before, between and after (a line kept from the first read would
- * make the second one cheaper) */
+ * then read into the sums (into scratch: the second Gaussian's plane, not in use yet) - past the cache, the packing read
+ * loading words; with read_cached also through the cached view, loading bytes, the cache written back and dropped
+ * before, between and after (a line kept from the first read would make the second one cheaper) */
 static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
 {
     u32 base, win, t, n = r->width / 2, sum;
-    u16 *db = (u16 *)L->acc, *dh = db + L->lw;
+    u16 *db = L->pc, *dh = db + L->lw;
 
     base = op_map(r, r->bus, 2 * r->width, &win);
     if (!base) {
@@ -1202,6 +1221,7 @@ static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
     t = drv_ticks();
     sum = op_read_sum((const volatile u32 *)base, n, 0);
     r->pr_read = drv_ticks_since(t);
+    L->rbytes = 0;
     t = drv_ticks();
     ol_read_row(L, (const volatile u32 *)base, db, dh);
     r->pr_sums = drv_ticks_since(t);
@@ -1211,6 +1231,7 @@ static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
         sum += op_read_sum((const volatile u32 *)(base - OP_UNCACHED), n, 0);
         r->pr_cread = drv_ticks_since(t);
         drv_fw_cache_flush();
+        L->rbytes = 1;
         t = drv_ticks();
         ol_read_row(L, (const volatile u32 *)(base - OP_UNCACHED), db, dh);
         r->pr_csums = drv_ticks_since(t);
@@ -1236,7 +1257,9 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
     }
     L->shift = ol_read_shift(L->cwp, lw, 16);
     ol_read_table(L, P);
+    ol_rows(L, H);
     op_row_probe(o, r, L);                  /* out of the read's budget */
+    L->rbytes = cached;                     /* through the cache the packing read loads bytes, past it words */
     t0 = drv_ticks();
     chmin = H / lh;
     b0 = r->bus >> 27;
@@ -1251,14 +1274,14 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
         r->f_passes++;
         left = 0;                           /* the pass's rows still to read, all banks */
         for (cy = 0; cy < lh; cy++)
-            if (cy * H / lh + off < H)
+            if (L->ry[cy] + off < H)
                 left++;
         for (bank = b0; bank <= b1; bank++) {
             if (drv_ticks_since(t0) >= budget)
                 goto out;
             for (cy = 0, rows = 0; cy < lh; cy++) {
-                y = cy * H / lh + off;
-                bus = r->bus + y * rb;
+                y = L->ry[cy] + off;
+                bus = r->bus + OL_MUL(y, rb);
                 if (y < H && bus >> 27 == bank && (bus + 2 * W - 1) >> 27 == bank)
                     rows++;
             }
@@ -1267,7 +1290,7 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
             slice = (budget - drv_ticks_since(t0)) / left * rows;
             left -= rows;
             for (cy = 0; cy < lh; cy++) {   /* the bank's first row: its window */
-                bus = r->bus + (cy * H / lh + off) * rb;
+                bus = r->bus + OL_MUL(L->ry[cy] + off, rb);
                 if (bus >> 27 == bank)
                     break;
             }
@@ -1284,8 +1307,8 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
             ts = drv_ticks();
             for (q = 0; q < 4; q++) {       /* the rows of cells 0, 4, 8, ..., then 2, 6, ..., 1, 5, ..., 3, 7, ... */
                 for (cy = (q == 1 ? 2 : q == 2 ? 1 : q); cy < lh; cy += 4) {
-                    y = cy * H / lh + off;
-                    bus = r->bus + y * rb;
+                    y = L->ry[cy] + off;
+                    bus = r->bus + OL_MUL(y, rb);
                     if (y >= H || bus >> 27 != bank || (bus + 2 * W - 1) >> 27 != bank)
                         continue;
                     if (drv_ticks_since(ts) >= slice || op_pace(p))
@@ -1308,6 +1331,17 @@ out:
         if (L->nrow[k])
             r->f_cells++;
     r->f_us = drv_ticks_since(t0);
+}
+
+/* The Y bytes of n layer words into y: p - the byte of Y in the first word (each byte loaded once) */
+static OL_KERNEL void op_layer_y(u8 *y, const volatile u8 *p, u32 n)
+{
+    u8 *e = y + n;
+
+    do {
+        *y++ = *p;
+        p += 4;
+    } while (y != e);
 }
 
 /* The Gaussians' pace (ol_t's callback, after each pass): the pass's time without the ticks given away into us[part],
@@ -1338,7 +1372,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     ol_lanes_t ln;
     op_gpace_t gp;
     u32 lw = r->l_wh & 0xffff, lh = r->l_wh >> 16, lp = r->l_pitch * 4, sub = r->sub, x, yy, i, w, base, win, t, fl;
-    u32 k, t1, s0, s1, stop = 0;
+    u32 k, t1, s0, s1, stop = 0, lc;
     volatile u32 *row;
 
     op_crumb(r->job, sub, P_LAYER);
@@ -1377,18 +1411,33 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     base = op_map(r, r->l_bus, lp * lh, &win);
     if (!base)
         goto out;
+    lc = sub == DRV_OPTICS_L4 && o->cfg.lcached && win;    /* only a window has the cached view */
+    r->lcached = lc;
+    if (lc) {
+        drv_fw_cache_flush();               /* no line left of an earlier map of the window's addresses */
+        base -= OP_UNCACHED;
+    }
     ol_lanes_init(&ln);
-    for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++) {
-        row = (volatile u32 *)(base + yy * lp);
-        for (x = 0; x < lw; x++, i++) {
-            w = row[x];
-            if (i < 16)
-                r->head[i] = w;
-            if (sub == DRV_OPTICS_L1)
-                ol_lanes_add(&ln, w);
-            L.y[i] = (u8)(w >> (8 * P.py));
+    if (sub == DRV_OPTICS_L4) {
+        for (i = 0; i < 16; i++)
+            r->head[i] = ((const volatile u32 *)base)[i];
+        for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++, i += lw)
+            op_layer_y(L.y + i, (const volatile u8 *)(base + OL_MUL(yy, lp)) + P.py, lw);
+    } else {
+        for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++) {
+            row = (volatile u32 *)(base + yy * lp);
+            for (x = 0; x < lw; x++, i++) {
+                w = row[x];
+                if (i < 16)
+                    r->head[i] = w;
+                if (sub == DRV_OPTICS_L1)
+                    ol_lanes_add(&ln, w);
+                L.y[i] = (u8)(w >> (8 * P.py));
+            }
         }
     }
+    if (lc)
+        drv_fw_cache_flush();               /* the layer's lines dropped before the window is released */
     op_unmap(r, win);
     r->t_lread = drv_ticks_since(t);
     if (yy < lh) {
@@ -1420,10 +1469,9 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.dark = o->cfg.dark;
     P.hcb = o->cfg.hcb;
     P.hcr = o->cfg.hcr;
-    for (i = 0; i < lw * lh; i++)
-        L.pb[i] = L.ph[i] = 0;
-    for (i = 0; i < lh; i++)
-        L.nrow[i] = 0;
+    mem_set(L.pb, 0, 2 * lw * lh);
+    mem_set(L.ph, 0, 2 * lw * lh);
+    mem_set(L.nrow, 0, lh);
     ol_word_tables(&L, &P);
     op_bench(r, &L);
     if (o->cfg.read && (P.gb || P.gh))
@@ -1465,9 +1513,18 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     base = op_map(r, r->l_bus, lp * lh, &win);
     if (!base)
         goto out;
+    lc = o->cfg.lcached && win;
+    r->lcached = lc;
+    if (lc) {
+        drv_fw_cache_flush();               /* no line left of an earlier map of the window's addresses */
+        base -= OP_UNCACHED;
+    }
     for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++, i += lw)
-        ol_words(&L, &P, i, (volatile u32 *)(base + yy * lp), lw);
-    drv_fw_cache_flush();
+        ol_words(&L, &P, i, (volatile u32 *)(base + OL_MUL(yy, lp)), lw);
+    drv_fw_cache_flush();                   /* through the cache: every line written back to memory, and before the
+                                               window is released (a line written back later would go to whatever the
+                                               window shows then); past it: the bus's write buffers. Both before the
+                                               chain's next pass reads the layer */
     op_unmap(r, win);
     r->t_lwrite = drv_ticks_since(t);
     if (yy < lh)
@@ -1737,9 +1794,102 @@ void drv_tramp_optics_size(void);           /* thunks.s: the hook at 0x60393879 
 #define SIZE_SITE 0x60393879                /* in 0x603937f8: a0 -> {w, h} of the small frame from 0x6037eb7a, then the
                                                format 0x305 into its descriptor (mov 773,d0; movhu d0,(8,a2)) */
 
+/* The high word of x m by halves with the compiler's multiplication: the reference for ol_mulhi */
+static u32 op_mulhi_ref(u32 x, u32 m)
+{
+    u32 xl = x & 0xffff, xh = x >> 16, ml = m & 0xffff, mh = m >> 16, lh = xl * mh, hl = xh * ml;
+
+    return xh * mh + (lh >> 16) + (hl >> 16) + (((xl * ml) >> 16) + (lh & 0xffff) + (hl & 0xffff)) / 65536;
+}
+
+/* One extended box along n values (stride step) by its definition, the edges clamped, the compiler's multiplication: the
+ * first version of the layer's box (the host test's reference), for the start check */
+static void op_box_ref(u16 *v, u32 n, u32 step, u32 r, u32 alpha, u16 *tmp)
+{
+    u32 i, sum = 0, w = (2 * r + 1) * 256 + 2 * alpha, ia = (65536u * 256 + w / 2) / w, ib = alpha * ia >> 8, e;
+    s32 k;
+
+    for (i = 0; i < n; i++)
+        tmp[i] = v[i * step];
+    for (k = -(s32)r; k <= (s32)r; k++)
+        sum += tmp[k < 0 ? 0 : (u32)k < n ? (u32)k : n - 1];
+    for (i = 0; i < n; i++) {
+        e = tmp[i >= r + 1 ? i - r - 1 : 0] + tmp[i + r + 1 < n ? i + r + 1 : n - 1];
+        v[i * step] = (u16)((sum * ia + e * ib + 32768) >> 16);
+        sum += tmp[i + r + 1 < n ? i + r + 1 : n - 1];
+        sum -= tmp[i >= r ? i - r : 0];
+    }
+}
+
+/* Core task, at the layer's set-up: the kernels that use the extension unit or assembly against plain C, on scratch at
+ * b (uncached, KCHECK_BYTES and a small layer after it; any CPU): OL_MUL against the compiler's mul, ol_mulhi against
+ * op_mulhi_ref (64 pairs each), ol_read_pack loading bytes and loading words against ol_read_run (8 cells of a
+ * pseudo-random row), and ol_gauss (its row and column kernels with the unit's multiplies: two columns a step and one)
+ * against op_box_ref's passes on small sparse planes. In the emulator this runs at every start, on the camera too - a
+ * kernel the CPU computes otherwise keeps the layer off. 0, or a bit set: 1 OL_MUL, 2 ol_mulhi, 4 the read by bytes, 8 by
+ * words, 16 the Gaussian */
+#define KCHECK_CELLS 8
+#define KCHECK_BYTES (1024 + 4 * OL_READ_RUN * KCHECK_CELLS + 4 * KCHECK_CELLS)
+#define KCHECK_LAYER 32768                  /* bytes for ol_layout of the small planes (20 or 21 x 10) */
+static u32 op_kcheck(u8 *b)
+{
+    u32 *tab = (u32 *)b, *row = tab + 256, *out = row + OL_READ_RUN * KCHECK_CELLS, i, k, j, x = 0x12345678, y, e = 0;
+    u32 w, h, sg, r, a;
+    ol_t L;
+
+    for (i = 0; i < 64; i++) {
+        x = x * 1103515245u + 12345;
+        y = x ^ x >> 13;
+        if (i & 1)
+            y &= 0xffff;                    /* the Gaussians' and the words' factors are small */
+        if (OL_MUL(x, y) != x * y)
+            e |= 1;
+        if (ol_mulhi(x >> 1, y >> 1) != op_mulhi_ref(x >> 1, y >> 1))
+            e |= 2;
+    }
+    for (i = 0; i < 256; i++)
+        tab[i] = (i * 37 & 0xfff) | ((i * 91 + 7) & 0xfff) << 16;   /* halves below 4096, as the read's table */
+    for (i = 0; i < OL_READ_RUN * KCHECK_CELLS; i++) {
+        x = x * 1103515245u + 12345;
+        row[i] = x;
+    }
+    for (k = 0; k < 2; k++) {
+        for (i = 0; i < KCHECK_CELLS; i++)
+            out[i] = 0;
+        ol_read_pack(row, out, out + KCHECK_CELLS, tab, !k);
+        for (i = 0; i < KCHECK_CELLS; i++)
+            if (out[i] != ol_read_run(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab))
+                e |= 4 << k;
+    }
+    for (k = 0; k < 4; k++) {               /* widths 20 (pairs) and 21; sigma 3 (r 2) and 1.18 layer px (r 0) */
+        w = k & 1 ? 21 : 20;
+        h = 10;
+        sg = k & 2 ? 302 : 768;
+        mem_set(&L, 0, sizeof(L));
+        ol_layout(&L, (uptr)b + KCHECK_BYTES, w, h);
+        for (i = 0; i < w * h; i++) {       /* a few lights, the rest 0: the rows' ranges too */
+            x = x * 1103515245u + 12345;
+            L.pb[i] = L.pc[i] = x >> 28 ? 0 : (u16)(x >> 8 & 4095);
+        }
+        ol_gauss(&L, L.pb, sg);
+        ol_box_plan(sg, &r, &a);
+        for (j = 0; j < OL_BOX_PASSES; j++) {
+            for (i = 0; i < h; i++)
+                op_box_ref(L.pc + i * w, w, 1, r, a, L.ring);
+            for (i = 0; i < w; i++)
+                op_box_ref(L.pc + i, h, w, r, a, L.ring);
+        }
+        for (i = 0; i < w * h; i++)
+            if (L.pb[i] != L.pc[i])
+                e |= 16;
+    }
+    return e;
+}
+
 /* Core task, once, after drv_optics_install: the layer's settings, curves, work buffer and the size hook. 0, or a code:
  * 1 bad settings or no install, 2 no memory, 3 the site not as expected, 10 + a code of drv_code_jump, 20 + i: the
- * firmware function i not as expected */
+ * firmware function i not as expected, 30 + op_kcheck's bits: a kernel of the extension unit or of assembly does not give
+ * what plain C gives */
 int drv_optics_layer(const drv_optics_layer_cfg *c)
 {
     static const u8 size_site[5] = {0x2c, 0x05, 0x03, 0xf8, 0x72};    /* mov 773,d0; movhu d0,(8,a2) (+ 0x08) */
@@ -1775,6 +1925,9 @@ int drv_optics_layer(const drv_optics_layer_cfg *c)
     b = mem_alloc_for(MEM_OWNER_CORE, sz, MEM_LINES);
     if (!b)
         return rc = 2;
+    k = op_kcheck(b);                       /* sz is far above KCHECK_BYTES + KCHECK_LAYER */
+    if (k)
+        return rc = 30 + (int)k;
     mem_copy((void *)&o->cfg, c, sizeof(*c));
     ol_luts(c->gamma, (u16 *)o->lin, (u8 *)o->enc);
     o->order_auto = c->order == DRV_OPTICS_ORDER_AUTO;
@@ -2010,9 +2163,10 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
     if (r->fallback)
         log_printf(OMK_LOG_WARN, "optics: job %u: the chain LEFT OUT (%s): the plain pass to the outputs", n, op_err(r->err));
     if (r->sub >= DRV_OPTICS_L1 && r->w_task)
-        log_printf(OMK_LOG_INFO, "optics: job %u: layer read %u us, sources and Gaussians %u us, written %u us; window maps "
-                   "%u (%u not released); bytes Y %u Cb %u Cr %u", n, r->t_lread, r->t_calc, r->t_lwrite, r->maps,
-                   r->unmaps_bad, r->order & 0xff, r->order >> 8 & 0xff, r->order >> 16 & 0xff);
+        log_printf(OMK_LOG_INFO, "optics: job %u: layer read %u us, sources and Gaussians %u us, written %u us%s; window maps "
+                   "%u (%u not released); bytes Y %u Cb %u Cr %u", n, r->t_lread, r->t_calc, r->t_lwrite, r->lcached ?
+                   " (cached view)" : "", r->maps, r->unmaps_bad, r->order & 0xff, r->order >> 8 & 0xff,
+                   r->order >> 16 & 0xff);
     if (r->sub == DRV_OPTICS_L4 && r->w_task) {
         log_printf(OMK_LOG_INFO, "optics: job %u: Gaussians in layer pixels: Bloom %u.%02u + %u.%02u, Halation %u.%02u + "
                    "%u.%02u (after the transport's own)", n, op_q8i(r->sig[0]), op_q8f(r->sig[0]), op_q8i(r->sig[1]),
@@ -2033,9 +2187,10 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
         if (r->pr_cread || r->pr_csums)
             log_printf(OMK_LOG_INFO, "optics: job %u: picture row through the cached view: read %u us, read and sums %u us", n,
                        r->pr_cread, r->pr_csums);
-        log_printf(OMK_LOG_INFO, "optics: job %u: bench: a box row of %u values x %u: stack %u us, work buffer %u us, core's "
-                   "memory %u us; %u turns: plain %u us, with a multiplication %u us", n, OP_BENCH_N, OP_BENCH_REPS,
-                   r->bx_stack, r->bx_wbuf, r->bx_core, OP_TURNS, r->lp_plain, r->lp_mul);
+        log_printf(r->lp_same ? OMK_LOG_INFO : OMK_LOG_WARN, "optics: job %u: bench: a box row of %u values x %u %u us; "
+                   "%u turns: plain %u us, mulu %u us, udf01 %u us (%s), udf00 + udf15 %u us", n, OP_BENCH_N, OP_BENCH_REPS,
+                   r->bx_wbuf, OP_TURNS, r->lp_plain, r->lp_mul, r->lp_udf, r->lp_same ? "the same" : "DIFFERENT",
+                   r->lp_hi);
     }
     if (r->sub != DRV_OPTICS_L1 || !r->lanes[0])
         return;

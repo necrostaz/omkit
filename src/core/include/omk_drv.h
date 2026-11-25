@@ -284,6 +284,7 @@ typedef struct {
     u32 read;                               /* read the picture's rows for the sources (1) or not */
     u32 read_us;                            /* the read's time a job */
     u32 cached;                             /* the read through the window's cached view */
+    u32 lcached;                            /* the layer read and written (L4) through the window's cached view */
 } drv_optics_layer_cfg;
 int drv_optics_layer(const drv_optics_layer_cfg *c);
 /* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize

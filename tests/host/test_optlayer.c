@@ -122,6 +122,8 @@ static void reads(void)
     check(!ol_columns(o.cwp, W, LW), "64 / 8: columns");
     o.shift = ol_read_shift(o.cwp, LW, 16);
     ol_read_table(&o, &p);
+    ol_rows(&o, H);
+    check(!o.c8 && o.ry[1] == H / LH && o.ry[LH - 1] == (LH - 1) * H / LH, "64 / 8: cells of 4 pairs, the rows of cells");
     for (y = 0; y < H; y++)
         for (x = 0; x < W / 2; x++)
             pic[y][x] = 128u << 8 | 128u << 24 | (x * 2 + y * 3) % 256 | (u32)((x * 2 + 1 + y * 3) % 256) << 16;
@@ -460,7 +462,7 @@ static void gauss_pace(void)
 #define PW 5184
 static u32 prow[16][PW / 2];
 
-static u32 reads_same(u32 lw, u32 lh, u32 rows)
+static u32 reads_same(u32 lw, u32 lh, u32 rows, u32 pack)
 {
     ol_t o;
     ref_t r;
@@ -476,6 +478,13 @@ static u32 reads_same(u32 lw, u32 lh, u32 rows)
     }
     o.shift = ol_read_shift(o.cwp, lw, 16);
     ol_read_table(&o, &p);
+    ol_rows(&o, PW * 3 / 4);
+    if (o.c8 != (lw == PW / 16)) {
+        check(0, "reads: cells of 8 words exactly at 324");
+        return 98;
+    }
+    o.c8 &= pack;                           /* 0: the generic read at 324 too */
+    o.rbytes = rows & 1;
     r.cwp = o.cwp;
     r.shift = o.shift;
     r.pb = refp;
@@ -517,19 +526,22 @@ static void reads_equal(void)
     char what[120];
     u32 m;
 
-    m = reads_same(324, 243, 16);
-    snprintf(what, sizeof(what), "the read and the means at 324 (cells of 8 pairs): differ by %u", m);
+    m = reads_same(324, 243, 16, 1);
+    snprintf(what, sizeof(what), "the read (packed) and the means at 324 (cells of 8 pairs): differ by %u", m);
     check(!m, what);
-    m = reads_same(324, 243, 3);
+    m = reads_same(324, 243, 16, 0);
+    snprintf(what, sizeof(what), "the read (generic) and the means at 324: differ by %u", m);
+    check(!m, what);
+    m = reads_same(324, 243, 3, 1);
     snprintf(what, sizeof(what), "the read and the means at 324, up to 3 rows a cell: differ by %u", m);
     check(!m, what);
-    m = reads_same(400, 300, 16);
+    m = reads_same(400, 300, 16, 1);
     snprintf(what, sizeof(what), "the read and the means at 400: differ by %u", m);
     check(!m, what);
-    m = reads_same(250, 188, 16);           /* cells of 10..11 pairs: the read splits a cell's sum after 8 words */
+    m = reads_same(250, 188, 16, 1);           /* cells of 10..11 pairs: the read splits a cell's sum after 8 words */
     snprintf(what, sizeof(what), "the read and the means at 250: differ by %u", m);
     check(!m, what);
-    m = reads_same(42, 32, 16);             /* cells of 61..62 pairs; the means by division */
+    m = reads_same(42, 32, 16, 1);             /* cells of 61..62 pairs; the means by division */
     snprintf(what, sizeof(what), "the read and the means at 42: differ by %u", m);
     check(!m, what);
     if (verbose)
@@ -562,13 +574,20 @@ static void words_equal(void)
         p.pcb = (k + 1) % 3;
         p.pcr = (k + 2) % 3;
         for (i = 0; i < n; i++) {
-            o.pb[i] = rnd(3) ? 0 : (u16)rnd(OL_ONE + 1);
-            o.ph[i] = rnd(3) ? 0 : (u16)rnd(OL_ONE + 1);
+            o.pb[i] = rnd(k < 4 ? 3 : 40) ? 0 : (u16)rnd(OL_ONE + 1);    /* then sparse: runs of neutral words */
+            o.ph[i] = rnd(k < 4 ? 3 : 40) ? 0 : (u16)rnd(OL_ONE + 1);
             o.y[i] = (u8)rnd(256);
         }
         ol_word_tables(&o, &p);
-        for (i = 0; i < n; i += 324)
-            ol_words(&o, &p, i, row + i, 324);
+        for (i = 0; i < n; i += 324) {
+            if (k & 1) {                    /* pieces that start and end between words of the planes */
+                ol_words(&o, &p, i, row + i, 161);
+                ol_words(&o, &p, i + 161, row + i + 161, 1);
+                ol_words(&o, &p, i + 162, row + i + 162, 162);
+            } else {
+                ol_words(&o, &p, i, row + i, 324);
+            }
+        }
         for (i = 0; i < n; i++)
             if (row[i] != ref_word(&r, &p, i) || ol_word(&o, &p, i) != row[i])
                 bad++;
