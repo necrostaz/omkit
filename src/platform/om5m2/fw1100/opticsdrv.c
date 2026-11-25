@@ -119,7 +119,10 @@
  * Strengths (after card166): a job takes the look's optics rows' strengths in force when it is listed (drv_optics_strength
  * from the core task), or its set's own (a test); both 0 - W lists no step of ours (the job as N). The worker scales the
  * gains by the strengths' steps and by the scene's day weight (optlayer.h's ol_scene, ol_day: from the layer's Y it has
- * read), and Bloom's by the near part's share when there is a tail (ol_tail_add adds the tail at w / (256 - w)). */
+ * read), and Bloom's by the near part's share when there is a tail (ol_tail_add adds the tail at w / (256 - w)). With
+ * the strengths comes whether the colour tables in force are black and white (OP_MONO, core's isp_mono): the job's
+ * halation then has no colour (Cb, Cr 0 a unit of its Y; its Y as in colour) - a black-and-white film's halo is light,
+ * and the layer's chroma is added after the tables made the picture grey. */
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
@@ -181,6 +184,8 @@
 #define BL_GAIN_B2 140
 #define GAIN_ONE 0x04000400u
 #define LAYER_GAIN 1024                     /* the layer's gain in the blend: the strength is in the layer */
+#define OP_TEST (1u << 16)                  /* a job's strengths (str): a test's, from the INI's set */
+#define OP_MONO (1u << 17)                  /* ... the colour tables in force black and white: the halation without colour */
 #define GUARD_LO 0x60000200u
 #define GUARD_HI 0x60cbe800u
 #define FMT_YC 0x302                        /* the picture's format on the mask route: 2 bytes a pixel */
@@ -263,7 +268,8 @@ typedef struct {
     u32 h, type, mode, level, cpu, step;    /* mode as graindrv.c's; step: k | the list's count << 8 */
     u32 sub, job;                           /* the job's substage (DRV_OPTICS_*), its number in the crumbs */
     u32 set;                                /* the layer's settings: 0 - [optics], 1.. - drv_optics_layer_set's */
-    u32 str;                                /* the job's strengths: Bloom | Halation << 8 | 1 << 16 - a test's */
+    u32 str;                                /* the job's strengths: Bloom | Halation << 8, OP_TEST - a test's, OP_MONO -
+                                               black and white */
     u32 sc_mean, sc_share, sc_day;          /* L4: the layer's mean Y, its share at the Bloom threshold (permille), the
                                                day's weight (Q8) */
     u32 gbe, ghe;                           /* L4: the gains used (Q8, the strength, the day and the tail in them) */
@@ -352,8 +358,8 @@ typedef struct {
     drv_optics_layer_cfg xcfg[DRV_OPTICS_SETS];    /* drv_optics_layer_set's (core task, before the schedule's first) */
     u32 nsets;                              /* sets 1..nsets given */
     u32 set;                                /* the set of the jobs listed from now on (core: drv_optics_set) */
-    u32 str;                                /* the look's strengths of the jobs listed from now on: Bloom | Halation << 8
-                                               (core: drv_optics_strength) */
+    u32 str;                                /* the look's strengths of the jobs listed from now on: Bloom | Halation << 8,
+                                               OP_MONO (core: drv_optics_strength) */
     u32 order;                              /* py | pcb << 8 | pcr << 16 now (AUTO: the guess of the first L1 dump) */
     u32 order_auto, order_set;
     u16 lin[256];                           /* the curves (ol_luts), copied into the work buffer a job */
@@ -1523,12 +1529,13 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.gb = sb && sb <= 5 ? (cf->gb * cf->steps[0][sb - 1] + 50) / 100 : 0;
     P.gh = sh && sh <= 5 ? (cf->gh * cf->steps[1][sh - 1] + 50) / 100 : 0;
     P.dark = cf->dark;
-    P.hcb = cf->hcb;
-    P.hcr = cf->hcr;
+    P.hcb = r->str & OP_MONO ? 0 : cf->hcb;  /* black and white: a light halo without colour, its light kept */
+    P.hcr = r->str & OP_MONO ? 0 : cf->hcr;
     P.em = cf->em;
     P.bdark = cf->bdark;
     P.hfirst = cf->hfirst;
     P.tmix = P.gb ? (cf->tmix > DRV_OPTICS_TAIL_MAX ? DRV_OPTICS_TAIL_MAX : cf->tmix) : 0;
+    P.haze = cf->haze;                      /* in the tail's sources: none without a tail (ol_word_tables) */
     P.st = r->sig[4] = P.tmix ? ol_cpu_sigma(cf->st, fl, r->width, lw) / OL_TAIL : 0;   /* in the tail's pixels */
     if (P.st < 64)
         P.tmix = 0;                         /* a tail below 0.25 of its pixel: none (ol_gauss would do nothing) */
@@ -1797,7 +1804,8 @@ u32 drv_optics_list(u8 *h, u32 room, u32 *out)
         str = (cf->sbv != DRV_OPTICS_ROWS ? cf->sbv : o->str & 0xff) |
               (cf->shv != DRV_OPTICS_ROWS ? cf->shv : o->str >> 8 & 0xff) << 8;
         if (cf->sbv != DRV_OPTICS_ROWS || cf->shv != DRV_OPTICS_ROWS)
-            str |= 1u << 16;
+            str |= OP_TEST;
+        str |= o->str & OP_MONO;            /* black and white: the tables in force, whoever gave the strengths */
         if (!(str & 0xffff))
             sub = DRV_OPTICS_N;             /* Bloom and Halation 0: no step at all (the job as without the layer) */
     }
@@ -2083,12 +2091,12 @@ void drv_optics_set(u32 k)
         o->set = k <= o->nsets ? k : 0;
 }
 
-void drv_optics_strength(u32 bloom, u32 halation)
+void drv_optics_strength(u32 bloom, u32 halation, u32 mono)
 {
     volatile op_t *o = op();
 
     if (o)
-        o->str = (bloom > 5 ? 5 : bloom) | (halation > 5 ? 5 : halation) << 8;
+        o->str = (bloom > 5 ? 5 : bloom) | (halation > 5 ? 5 : halation) << 8 | (mono ? OP_MONO : 0);
 }
 
 /* The settings of a job's set (the worker; the arena block, uncached) */
@@ -2325,9 +2333,10 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                    " - no window, the rest from the layer" : "");
         log_printf(OMK_LOG_INFO, "optics: job %u: picture read's time: rows' mean %u us, longest %u us; maps, write-backs and "
                    "releases %u us; ticks given away %u us", n, r->f_row_avg, r->f_row_max, r->f_maps_us, r->f_slept);
-        log_printf(OMK_LOG_INFO, "optics: job %u: strengths Bloom %u, Halation %u (%s); scene: mean Y %u, %u.%u%% at the "
+        log_printf(OMK_LOG_INFO, "optics: job %u: strengths Bloom %u, Halation %u (%s%s); scene: mean Y %u, %u.%u%% at the "
                    "threshold, day %u%%; gains Bloom %u%%, Halation %u%%", n, r->str & 0xff, r->str >> 8 & 0xff,
-                   r->str >> 16 ? "a test's" : "the look's rows", r->sc_mean, r->sc_share / 10, r->sc_share % 10,
+                   r->str & OP_TEST ? "a test's" : "the look's rows", r->str & OP_MONO ? "; black and white: the "
+                   "halation without colour" : "", r->sc_mean, r->sc_share / 10, r->sc_share % 10,
                    r->sc_day * 100 / 256, r->gbe * 100 / 256, r->ghe * 100 / 256);
         log_printf(OMK_LOG_INFO, "optics: job %u: calc: sources %u us, Bloom %u us (rows %u, columns %u), Halation %u us "
                    "(rows %u, columns %u), Bloom's tail %u us; the passes on %u of %u values (%u%%)", n, r->t_src, r->t_gb,

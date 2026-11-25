@@ -9,6 +9,9 @@
 #include "omk_mem.h"
 #include "omk_power.h"
 #include "host_drv.h"
+#include "omk_isp.h"
+#include "omk_ispb.h"
+#include "omk_mod.h"
 
 static int failed;
 
@@ -1121,15 +1124,16 @@ static void test_layer(int phase)
         CHECK(host_opt_layer.sb == (80u | 200u << 16) && host_opt_layer.mixb == 64 && host_opt_layer.sh == 40);
         CHECK(host_opt_layer.gb == 150 * 256 / 100 && host_opt_layer.gh == 200 * 256 / 100);   /* the strongest step's */
         CHECK(host_opt_layer.sbv == 5 && host_opt_layer.shv == 2);     /* a test's strengths in place of the rows' */
-        CHECK(host_opt_layer.steps[0][0] == 25 && host_opt_layer.steps[0][4] == 100 && host_opt_layer.steps[1][0] == 16);
-        CHECK(host_opt_layer.day[0] == 80 && host_opt_layer.day[1] == 110 && host_opt_layer.day[2] == 50 &&
-              host_opt_layer.day[3] == 150 && host_opt_layer.day[4] == 40 && host_opt_layer.day[5] == 6);
+        CHECK(host_opt_layer.steps[0][0] == 20 && host_opt_layer.steps[0][4] == 100 && host_opt_layer.steps[1][0] == 16);
+        CHECK(host_opt_layer.day[0] == 95 && host_opt_layer.day[1] == 125 && host_opt_layer.day[2] == 60 &&
+              host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 6);
         CHECK(host_opt_layer.bench == 0 && host_look_rows == 1);
         CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 70 * 256 / 100);
         CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 100000 && host_opt_layer.cached == 0);
         CHECK(host_opt_layer.lcached == 0);
         CHECK(host_opt_layer.em == 16 && host_opt_layer.bdark == 80 * 256 / 100 && host_opt_layer.hfirst == 1);
         CHECK(host_opt_layer.tmix == 0 && host_opt_layer.st == 0);     /* the tail off by default */
+        CHECK(host_opt_layer.haze == 0);                                /* and the haze */
     } else {
         CHECK(host_opt_sub == DRV_OPTICS_N);    /* the schedule's first entry later */
         CHECK(host_opt_layer.route == DRV_OPTICS_403 && host_opt_layer.width == 400);   /* 648 clamped to 400 */
@@ -1150,6 +1154,9 @@ static void test_layer(int phase)
     free(t);
 }
 
+static omk_mod mono_mod;
+static u8 mono_block[OMK_ISPB_SIZE];
+
 /* The field's INI: [optics] layer = on without strengths - the strengths are the look's rows' (given to the driver
  * when they change), the steps and the day's keys read, bad ones logged and the defaults taken */
 static void test_layer_rows(void)
@@ -1159,7 +1166,8 @@ static void test_layer_rows(void)
 
     omk_dir(LOG_DIR);
     write_file("OMKIT.INI", "[optics]\nlayer = on\nbloom_steps = 10, 20, 30, 40, 250\nhalation_steps = 1, 2\n"
-                            "day_mean = 60, 120\nday_share = 9, 3\nday_halation = 35\nbench = 1\nbloom_tail = 95\n");
+                            "day_mean = 60, 120\nday_share = 9, 3\nday_halation = 35\nbench = 1\nbloom_tail = 95\n"
+                            "bloom_haze = 30\n");
     CHECK(cfg_load() == 1);
     log_setup(1, OMK_LOG_INFO);
     host_prev_ended = 1;
@@ -1176,9 +1184,10 @@ static void test_layer_rows(void)
     CHECK(host_opt_layer.sbv == DRV_OPTICS_ROWS && host_opt_layer.shv == DRV_OPTICS_ROWS);
     CHECK(host_opt_layer.steps[0][0] == 10 && host_opt_layer.steps[0][3] == 40 && host_opt_layer.steps[0][4] == 200);
     CHECK(host_opt_layer.steps[1][0] == 16 && host_opt_layer.steps[1][4] == 100);    /* not five: the default */
-    CHECK(host_opt_layer.day[0] == 60 && host_opt_layer.day[1] == 120 && host_opt_layer.day[2] == 50 &&
-          host_opt_layer.day[3] == 150 && host_opt_layer.day[4] == 40 && host_opt_layer.day[5] == 35);
+    CHECK(host_opt_layer.day[0] == 60 && host_opt_layer.day[1] == 120 && host_opt_layer.day[2] == 60 &&
+          host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 35);
     CHECK(host_opt_layer.bench == 1 && host_opt_layer.tmix == 90 * 256 / 100);   /* the tail at most 90 % */
+    CHECK(host_opt_layer.haze == 25 * 4096 / 100);                  /* the haze at most 25 % */
     CHECK(!optics_route());
     optics_service(1000);                   /* the look gives nothing yet: 0, 0 */
     CHECK(host_opt_str == 0 && host_opt_strs == 1 && !optics_route());
@@ -1188,17 +1197,33 @@ static void test_layer_rows(void)
     optics_service(1250);
     optics_service(1500);                   /* given once */
     CHECK(host_opt_str == (3u | 1u << 8) && host_opt_strs == 2 && optics_route());
+    /* a black-and-white preset's tables in force (isp_mono, the look's grain's rule): the same strengths again, now with
+     * mono - the halation without colour; back to colour tables: without */
+    host_isp_ok = 1;
+    mono_mod.state = MOD_LOADING;
+    memset(mono_block, 0, sizeof(mono_block));
+    mono_block[OMK_ISPB_PRESENT] = OMK_ISPB_P_GAINS;    /* the Cb/Cr gains set, Cb's 0: black and white */
+    mono_block[OMK_ISPB_CR] = 1;
+    CHECK(isp_override(&mono_mod, mono_block, OMK_ISPB_SIZE) == 0 && isp_mono());
+    optics_service(1600);
+    CHECK(host_opt_str == (3u | 1u << 8 | 1u << 16) && host_opt_strs == 3 && optics_route());
+    CHECK(isp_override(&mono_mod, 0, 0) == 0 && !isp_mono());
+    optics_service(1700);
+    CHECK(host_opt_str == (3u | 1u << 8) && host_opt_strs == 4);
     host_look_str[0] = 0;
     host_look_str[1] = 0;
     optics_service(1750);
-    CHECK(host_opt_str == 0 && host_opt_strs == 3 && !optics_route());
+    CHECK(host_opt_str == 0 && host_opt_strs == 5 && !optics_route());
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
     CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 200"));
     CHECK(t && strstr(t, "optics: layer: strengths 1..5 - Bloom 10 20 30 40 200%, Halation 16 25 40 63 100% of the gains; "
                          "the bench on"));
-    CHECK(t && strstr(t, "optics: layer: a day scene (mean Y 60..120 or 5..15% at the Bloom threshold): Bloom 40%, "
+    CHECK(t && strstr(t, "optics: layer: a day scene (mean Y 60..120 or 6..14% at the Bloom threshold): Bloom 100%, "
                          "Halation 35% of the gains"));
+    CHECK(t && strstr(t, "tail 90% of sigma 300, haze 25%)"));
+    CHECK(t && strstr(t, "optics: the look's strengths now: Bloom 3, Halation 1, black and white (the halation without "
+                         "colour)"));
     CHECK(t && strstr(t, "halation_steps: not five numbers") && strstr(t, "'9, 3': not two numbers"));
     CHECK(t && strstr(t, "optics: the look's strengths now: Bloom 3, Halation 1"));
     CHECK(t && strstr(t, "optics: the look's strengths now: Bloom 0, Halation 0 (no step in its stills)"));
@@ -1254,7 +1279,7 @@ static void test_layer_sets(void)
     CHECK(t && strstr(t, "optics: schedule of 5 entries"));
     CHECK(t && strstr(t, "'L4:Z' is not a substage") && strstr(t, "'W1:A' is not a substage"));
     CHECK(t && strstr(t, "optics: layer settings A: Bloom 5, a test (threshold 200, sigma 60 + 0 at 0%, gain 150% at 5, "
-                         "80% less on white; tail 30% of sigma 250)"));
+                         "80% less on white; tail 30% of sigma 250, haze 0%)"));
     CHECK(t && strstr(t, "optics: layer settings B: Halation 3, a test") && strstr(t, "before Bloom"));
     CHECK(t && strstr(t, "optics: layer settings A: the source - the emission of a blown pixel as 16 whites"));
     CHECK(t && strstr(t, "schedule 3 of 5: L4 with the settings A given to the next press"));

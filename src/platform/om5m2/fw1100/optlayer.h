@@ -19,6 +19,9 @@
  * - Bloom weighted by the darkness of the place, as Halation (on a bright place a filter's glow hardly shows);
  * - Halation's code from the place's own light, Bloom after it: its colour does not fade under a strong Bloom;
  * - Bloom's tail: a wide Gaussian on a plane OL_TAIL times smaller each way, added to Bloom's blur (ol_tail_*);
+ * - Bloom's haze (haze): a share of every pixel's light, not only of the light over the threshold, in the tail's sources
+ *   - a diffusion filter scatters a part of all it passes, so bright surfaces glow into the dark around them and the
+ *   shadows lift; it lights the whole layer (every word gets the word's arithmetic);
  * - the scene's darkness (ol_scene, ol_day): the layer's mean Y and its share at the Bloom threshold weigh a day scene,
  *   whose gains the caller lowers (a blown pixel there is a bright surface, not a lamp);
  * - the words of a run of lit pixels in one loop (ol_words_lit): no call a pixel.
@@ -110,6 +113,9 @@ typedef struct {
     u32 st, tmix;                           /* Bloom's tail: a Gaussian of st (pixels of the tail's plane, Q8) on the
                                                sources reduced OL_TAIL times (ol_tail_*), mixed in with the weight tmix
                                                (Q8; 0 - no tail) */
+    u32 haze;                               /* Bloom's haze: the share of every pixel's light (not only over the
+                                               threshold) in the tail's sources, Q12 (0 - none; with a tail only) - a
+                                               diffusion filter scatters a part of all the light it passes */
 } ol_par_t;
 
 #define OL_EM_MAX 64                        /* whites a blown pixel stands for, at most: em OL_ONE stays below 2^18 */
@@ -136,6 +142,8 @@ typedef struct {
     u32 *cw;                                /* 256: a word's chroma bytes by the halation's Y code */
     u16 *wd;                                /* 256: Halation's weight by the darkness of the place, Q8, by its code */
     u16 *wb;                                /* 256: the same of Bloom */
+    u16 *hz;                                /* 256: Bloom's haze of a code, haze lin >> 12 (ol_word_tables) */
+    u32 hazed;                              /* 1 - hz[] not all 0: ol_tail_down adds it */
     u16 *pt;                                /* tw * th: Bloom's tail (ol_tail_*) */
     u32 tw, th;                             /* the tail's plane: the layer's size / OL_TAIL, rounded up */
     u32 shift;                             /* the read's sums are kept >> shift (u16) */
@@ -171,6 +179,8 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
     o->wd = (u16 *)b;
     b += 512;
     o->wb = (u16 *)b;
+    b += 512;
+    o->hz = (u16 *)b;
     b += 512;
     o->pt = (u16 *)b;
     b += (2 * o->tw * o->th + 3) & ~3u;
@@ -831,7 +841,19 @@ static inline u32 ol_blur2(ol_t *o, u16 *plane, u32 s1, u32 s2, u32 mix)
  * light's sum. The plane is one column wider when the layer's cells are odd (an even width: paired column passes), that
  * column a copy of the last. */
 
-/* The tail's sources: pt[cell] = the mean of the Bloom's sources over the cell (o->acc: the sums of a row of cells) */
+/* The haze of a row of the layer's Y codes y .. y + lw into the sums acc[] of its tail cells (ol_tail_down) */
+static OL_KERNEL void ol_tail_haze(u32 *acc, const u8 *y, u32 lw, const u16 *hz)
+{
+    u32 x;
+
+    for (x = 0; x + OL_TAIL <= lw; x += OL_TAIL, y += OL_TAIL)
+        *acc++ += (u32)hz[y[0]] + hz[y[1]] + hz[y[2]] + hz[y[3]];
+    for (; x < lw; x++)
+        *acc += hz[*y++];
+}
+
+/* The tail's sources: pt[cell] = the mean of the Bloom's sources over the cell (o->acc: the sums of a row of cells),
+ * with Bloom's haze (o->hazed: the haze of the layer's own Y, ol_word_tables's hz) - then at most OL_ONE */
 static OL_KERNEL void ol_tail_down(ol_t *o)
 {
     u32 lw = o->lw, tw = o->tw, ty, tx, y, y0, y1, x, n, k, s;
@@ -849,6 +871,8 @@ static OL_KERNEL void ol_tail_down(ol_t *o)
                 acc[tx] += (u32)row[x] + row[x + 1] + row[x + 2] + row[x + 3];
             for (; x < lw; x++)             /* a last cell narrower than OL_TAIL */
                 acc[tx] += row[x];
+            if (o->hazed)
+                ol_tail_haze(acc, o->y + OL_MUL(y, lw), lw, o->hz);
         }
         for (tx = 0, x = 0; tx < tw; tx++, x += OL_TAIL) {
             s = acc[tx];
@@ -858,12 +882,14 @@ static OL_KERNEL void ol_tail_down(ol_t *o)
                 continue;
             }
             if (y1 - y0 == OL_TAIL && x + OL_TAIL <= lw) {
-                *out++ = (u16)((s + 8) >> 4);   /* a whole cell */
-                continue;
+                s = (s + 8) >> 4;           /* a whole cell */
+            } else {
+                k = x + OL_TAIL <= lw ? OL_TAIL : lw - x;   /* a cell at the right or bottom edge: what it has */
+                n = OL_MUL(k, y1 - y0);
+                s = (s + n / 2) / n;
             }
-            k = x + OL_TAIL <= lw ? OL_TAIL : lw - x;   /* a cell at the right or bottom edge: what it has */
-            n = OL_MUL(k, y1 - y0);
-            *out++ = (u16)((s + n / 2) / n);
+            *out++ = (u16)(s > OL_ONE ? OL_ONE : s);   /* the haze's mean at most OL_ONE (without it the sources' mean
+                                                          is): f OL_ONE stays below 65536 (ol_tail_add) */
         }
     }
 }
@@ -1064,8 +1090,9 @@ static inline u32 ol_neutral(const ol_par_t *p)
     return 128u << (8 * p->pcb) | 128u << (8 * p->pcr);
 }
 
-/* The word's tables (after the curves are in o and before ol_word): Halation's weight by the darkness of a code,
- * 256 - dark lin / 4096; the chroma bytes of a halation's Y code hy (0..255: enc is monotonic); the neutral word */
+/* The word's tables (after the curves are in o and before ol_word, ol_tail_down): Halation's weight by the darkness of
+ * a code, 256 - dark lin / 4096 (and Bloom's); the chroma bytes of a halation's Y code hy (0..255: enc is monotonic);
+ * Bloom's haze of a code (haze lin / 4096); the neutral word */
 static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
 {
     s32 hy;
@@ -1073,8 +1100,10 @@ static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
     for (hy = 0; hy < 256; hy++) {
         o->wd[hy] = (u16)(256 - (p->dark * o->lin[hy] >> 12));
         o->wb[hy] = (u16)(256 - (p->bdark * o->lin[hy] >> 12));
+        o->hz[hy] = (u16)(OL_MUL(p->haze > 4096 ? 4096 : p->haze, o->lin[hy]) >> 12);
         o->cw[hy] = ol_clamp8(128 + (hy * p->hcb >> 8)) << (8 * p->pcb) | ol_clamp8(128 + (hy * p->hcr >> 8)) << (8 * p->pcr);
     }
+    o->hazed = p->haze && p->tmix;
     o->neutral = ol_neutral(p);
     o->ys = 8 * p->py;
 }

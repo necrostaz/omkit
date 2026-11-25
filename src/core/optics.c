@@ -55,12 +55,14 @@
  * in [optics]:
  *   layer                     on - the layer (and the look's optics rows: without the layer they are not installed)
  *   bloom, halation           0..5: strengths of a test in place of the rows' (in a set: that set's presses)
- *   bloom_steps, halation_steps    five percents of the gains, the strengths 1..5 (25, 35, 50, 71, 100 and 16, 25, 40,
- *                                  63, 100: about x1.4 and x1.6 a step, the host model's sets A .. D of card166)
- *   day_mean, day_share       the day's weight from the layer's Y: its mean from .. to (codes; 80, 110) and the share of
- *                             it at the Bloom threshold or above from .. to (percent; 5, 15) - the larger of the two
- *   day_bloom, day_halation   the gains on a day scene, percent of the night's (40, 6): a blown pixel there is a bright
- *                             surface (metal, a window), not a lamp many times brighter than white (100, 100 - off)
+ *   bloom_steps, halation_steps    five percents of the gains, the strengths 1..5 (20, 32, 50, 71, 100 and 16, 25, 40,
+ *                                  63, 100: about x1.5 and x1.6 a step; Bloom's 1 about a filter of 1/8 against
+ *                                  1/2 at 5, the halation's the host model's sets A .. D of card166)
+ *   day_mean, day_share       the day's weight from the layer's Y: its mean from .. to (codes; 95, 125) and the share of
+ *                             it at the Bloom threshold or above from .. to (percent; 6, 14) - the larger of the two
+ *   day_bloom, day_halation   the gains on a day scene, percent of the night's (100, 6): a blown pixel there is a bright
+ *                             surface (metal, a window), not a lamp many times brighter than white - the halation's red
+ *                             "neon" on it is less; Bloom glows by day as by night (a diffusion filter; 100 - off)
  *   bench                     1 - the CPU bench of card164/165 in every job (0)
  *   route                     pair (the firmware's Soft Focus steps, 0x401 + 0x402) or 403 (our last step, 0x403)
  *   layer_width               the small layer's width, 42..400 (324: a cell of 16 pixels of 5184)
@@ -83,6 +85,10 @@
  *   bloom_tail, bloom_tail_sigma           Bloom's long tail (a diffusion filter's glow): the share of Bloom's light,
  *                                          percent (0 - none, the default), in a Gaussian of that sigma, pixels of
  *                                          the picture (300), made on a plane 4 times smaller each way
+ *   bloom_haze                             Bloom's haze: percent of all the light (not only over the threshold) in
+ *                                          the tail's sources (0 - none; with a tail only) - a diffusion filter
+ *                                          scatters a part of everything it passes: bright surfaces glow into the
+ *                                          dark around them, the shadows lift, the contrast falls
  *   read, read_ms, read_cached             the picture's rows read for the sources, the time a job (kept to a row),
  *                                          the cached view
  *   layer_cached                           the layer read and written (L4) through the window's cached view, written
@@ -99,6 +105,7 @@
  * RAM log (dbg_event): a mark, the watched tasks' states and the window of snapshots after it. */
 #include "omk_core.h"
 #include "omk_debug.h"
+#include "omk_isp.h"
 #include "omk_log.h"
 #include "omk_look.h"
 #include "omk_store.h"
@@ -121,9 +128,17 @@
 #define OPT_HAL_THRESHOLD 225
 #define OPT_BLOOM_GAIN 150
 #define OPT_HAL_GAIN 200
-/* The strengths 1..5 as percents of the gains (the gains: of the strongest step). Geometric steps: the host model's sets
- * of card166 - A (Bloom 250, Halation 400) at 1, B .. C at 3, D (1000, 2500) at 5 (docs of the module) */
-static const u8 opt_steps[2][5] = {{25, 35, 50, 71, 100}, {16, 25, 40, 63, 100}};
+#define OPT_HAZE_MAX 25                     /* bloom_haze, percent of all the light */
+/* The day's weight (card168: the scenes' logs of card167 - evening rooms mean Y 78..94 and 0.3..5.4 % at the threshold,
+ * night 62..71 and 1.3..1.9 %, the day of card162 100 and 14.7 %): the share tells the day, the mean only past 95 */
+#define OPT_DAY_MEAN0 95
+#define OPT_DAY_MEAN1 125
+#define OPT_DAY_SHARE0 6
+#define OPT_DAY_SHARE1 14
+/* The strengths 1..5 as percents of the gains (the gains: of the strongest step). Geometric steps: Bloom's a diffusion
+ * filter's ladder (1/8 : 1/4 : 1/2 about 1 : 1.8 : 3..4.6 - references measured; card168's host model), the halation's
+ * the host model's sets of card166 - A (400) at 1, B .. C at 3, D (2500) at 5 (docs of the module) */
+static const u8 opt_steps[2][5] = {{20, 32, 50, 71, 100}, {16, 25, 40, 63, 100}};
 
 /* The cached read's state on the card (store OPTICS, key 1) */
 typedef struct {
@@ -455,7 +470,7 @@ static void opt_pair(const char *t, u32 *a, u32 *b, u32 da, u32 db, u32 hi)
  * thresholds, Gaussians, gains, colour, the darkness weights, the source, the tail, the reads; logged as `name` */
 static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *name)
 {
-    u32 sb, sh, gb, gh, tail, ts, i, k;
+    u32 sb, sh, gb, gh, tail, ts, haze, i, k;
     const char *t;
 
     /* a strength key of the set (or of [optics]): a test's strength in place of the look's rows */
@@ -489,12 +504,12 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
             c->steps[k][i] = t ? (v[i] > 200 ? 200 : v[i]) : opt_steps[k][i];
     }
     t = cfg_str(cfg_str(sec, "day_mean", 0) ? sec : "optics", "day_mean", 0);
-    opt_pair(t, &c->day[0], &c->day[1], 80, 110, 255);
+    opt_pair(t, &c->day[0], &c->day[1], OPT_DAY_MEAN0, OPT_DAY_MEAN1, 255);
     t = cfg_str(cfg_str(sec, "day_share", 0) ? sec : "optics", "day_share", 0);
-    opt_pair(t, &c->day[2], &c->day[3], 5, 15, 100);
+    opt_pair(t, &c->day[2], &c->day[3], OPT_DAY_SHARE0, OPT_DAY_SHARE1, 100);
     c->day[2] *= 10;                        /* permille */
     c->day[3] *= 10;
-    c->day[4] = (u32)opt_sint(sec, "day_bloom", 40, 0, 100);
+    c->day[4] = (u32)opt_sint(sec, "day_bloom", 100, 0, 100);
     c->day[5] = (u32)opt_sint(sec, "day_halation", 6, 0, 100);
     c->bench = (u32)opt_sint(sec, "bench", 0, 0, 1);
     c->tb = (u32)opt_sint(sec, "bloom_threshold", OPT_BLOOM_THRESHOLD, 0, 254);
@@ -517,15 +532,19 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     ts = (u32)opt_sint(sec, "bloom_tail_sigma", 300, 0, 1000);
     c->tmix = ts ? tail * 256 / 100 : 0;
     c->st = c->tmix ? ts : 0;
+    haze = (u32)opt_sint(sec, "bloom_haze", 0, 0, OPT_HAZE_MAX);
+    c->haze = c->tmix ? haze * 4096 / 100 : 0;
+    if (haze && !c->tmix)
+        log_printf(OMK_LOG_WARN, "optics: layer%s: bloom_haze %u%% without Bloom's tail (bloom_tail): no haze", name, haze);
     c->read = (u32)opt_sint(sec, "read", 1, 0, 1);
     c->read_us = (u32)opt_sint(sec, "read_ms", 100, 0, 250) * 1000;
     c->cached = (u32)opt_sint(sec, "read_cached", 0, 0, 1);
     c->lcached = (u32)opt_sint(sec, "layer_cached", 0, 0, 1);
     log_printf(OMK_LOG_INFO, "optics: layer%s: Bloom %s (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, %u%% less on "
-               "white; tail %u%% of sigma %u)", name, sb == DRV_OPTICS_ROWS ? "by the look's rows" : sb == 0 ? "0, a test" :
+               "white; tail %u%% of sigma %u, haze %u%%)", name, sb == DRV_OPTICS_ROWS ? "by the look's rows" : sb == 0 ? "0, a test" :
                sb == 1 ? "1, a test" : sb == 2 ? "2, a test" : sb == 3 ? "3, a test" : sb == 4 ? "4, a test" : "5, a test",
                c->tb, c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, gb, (c->bdark * 100 + 128) / 256,
-               (c->tmix * 100 + 128) / 256, c->st);
+               (c->tmix * 100 + 128) / 256, c->st, (c->haze * 100 + 2048) / 4096);
     log_printf(OMK_LOG_INFO, "optics: layer%s: Halation %s (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb "
                "%d%% Cr %d%%, dark %u%%, %s)", name, sh == DRV_OPTICS_ROWS ? "by the look's rows" : sh == 0 ? "0, a test" :
                sh == 1 ? "1, a test" : sh == 2 ? "2, a test" : sh == 3 ? "3, a test" : sh == 4 ? "4, a test" : "5, a test",
@@ -874,25 +893,29 @@ static void opt_arm(const drv_optics_info *st, u32 now, int busy)
     drv_optics_arm();
 }
 
-/* The look's strengths (its owner's preset, the optics rows) to the driver when they change: the next jobs take them */
+/* The look's strengths (its owner's preset, the optics rows) to the driver when they change, with whether the colour
+ * tables in force are black and white (isp_mono, the rule of the look's grain: no colour in the halation then): the next
+ * jobs take them. With a test's strengths in the INI's sets the rows' do not reach those jobs: said with the line */
 static void opt_strength(void)
 {
     u8 v[OMK_OPTICS_ROWS];
-    u32 s;
+    u32 s, mono = isp_mono() ? 1 : 0;
 
     look_optics_now(v);
-    s = v[OMK_OPTICS_BLOOM] | (u32)v[OMK_OPTICS_HALATION] << 8;
+    s = v[OMK_OPTICS_BLOOM] | (u32)v[OMK_OPTICS_HALATION] << 8 | mono << 16;
     if (s == op.str)
         return;
     op.str = s;
-    drv_optics_strength(v[OMK_OPTICS_BLOOM], v[OMK_OPTICS_HALATION]);
-    log_printf(OMK_LOG_INFO, "optics: the look's strengths now: Bloom %u, Halation %u%s", v[OMK_OPTICS_BLOOM],
-               v[OMK_OPTICS_HALATION], s ? "" : " (no step in its stills)");
+    drv_optics_strength(v[OMK_OPTICS_BLOOM], v[OMK_OPTICS_HALATION], mono);
+    log_printf(OMK_LOG_INFO, "optics: the look's strengths now: Bloom %u, Halation %u%s%s%s", v[OMK_OPTICS_BLOOM],
+               v[OMK_OPTICS_HALATION], mono ? ", black and white (the halation without colour)" : "",
+               s & 0xffff ? "" : " (no step in its stills)", op.test_str ? "; NOT taken where the INI gives a test's "
+               "strengths" : "");
 }
 
 int optics_route(void)
 {
-    return op.layer && ((op.str != ~0u && op.str) || op.test_str);
+    return op.layer && ((op.str != ~0u && (op.str & 0xffff)) || op.test_str);
 }
 
 void optics_service(u32 now)

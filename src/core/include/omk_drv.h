@@ -301,6 +301,8 @@ typedef struct {
     u32 hfirst;                             /* 1 - Halation's code from the place's own light, Bloom after it */
     u32 st;                                 /* Bloom's tail: sigma, pixels of the picture (0 - none) */
     u32 tmix;                               /* its weight, Q8 (0 - none; at most DRV_OPTICS_TAIL_MAX) */
+    u32 haze;                               /* Bloom's haze: the share of all the light in the tail's sources, Q12 (0 -
+                                               none; with a tail only) */
     /* The strengths (feature/optics-layer, after card166): a job's Bloom and Halation strengths 0..5 are the look's
      * optics rows' (drv_optics_strength) unless the set gives its own (a test: sbv, shv 0..5; DRV_OPTICS_ROWS - the
      * rows'). Strength k scales the gains gb, gh (those of the strongest step) by steps[0 Bloom, 1 Halation][k - 1]
@@ -310,7 +312,8 @@ typedef struct {
     /* The scene's darkness (a night's lamp stands for many whites, a day's blown metal or window for few): from the layer's
      * Y, its mean and the share of its pixels at the Bloom threshold or above; the day's weight 0..256 grows from 0 at
      * day[0] to 256 at day[1] (mean, codes) or at day[2] .. day[3] (share, permille) - the larger of the two; the gains
-     * of a day scene are day[4] (Bloom), day[5] (Halation) percent of the night's. day[4] = day[5] = 100 - off */
+     * of a day scene are day[4] (Bloom), day[5] (Halation) percent of the night's. day[4] = day[5] = 100 - off (Bloom's
+     * 100 by default since card168: a diffusion filter glows by day as by night) */
     u32 day[6];
     u32 bench;                              /* 1 - the bench of card164/165 in every L4 job (CPU time, a test) */
 } drv_optics_layer_cfg;
@@ -323,9 +326,11 @@ int drv_optics_layer(const drv_optics_layer_cfg *c);
 #define DRV_OPTICS_SETS 6
 int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c);
 void drv_optics_set(u32 k);                 /* 0 - the first set ([optics]), 1..DRV_OPTICS_SETS - the further ones */
-/* The look's optics rows' strengths of the chosen entry (core task, when they change): Bloom, Halation 0..5. A job takes
- * those in force when it is listed (with its set, as drv_optics_set) */
-void drv_optics_strength(u32 bloom, u32 halation);
+/* The look's optics rows' strengths of the chosen entry (core task, when they change): Bloom, Halation 0..5, and mono 1
+ * when the colour tables in force are black and white (isp_mono: the halation's colour then 0 - a light halo on a black-
+ * and-white film; its light kept). A job takes those in force when it is listed (with its set, as drv_optics_set); mono
+ * holds for a test's strengths too */
+void drv_optics_strength(u32 bloom, u32 halation, u32 mono);
 /* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize
  * the worker's buffer, *wbuf its address (the cached one) */
 u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf);

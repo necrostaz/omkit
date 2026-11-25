@@ -816,6 +816,93 @@ static void scene(void)
           ol_day_gain(1000, 256, 100) == 1000, "day: the gains");
 }
 
+/* Black and white (the colour tables in force, driver: hcb = hcr = 0): every word's chroma neutral, its Y the colour
+ * version's - the halation's light kept, its colour gone; both orders, Bloom by darkness on, over codes and lights */
+static void words_mono(void)
+{
+    ol_t o;
+    ol_par_t p, q;
+    u32 b, h, c, f, wc, wm, y_same = 1, neutral = 1, coloured = 0;
+
+    layout(&o, LW, LH);
+    params(&p);
+    p.dark = 230;
+    p.bdark = 200;
+    p.gb = 600;
+    p.gh = 1500;
+    for (f = 0; f < 2; f++) {
+        p.hfirst = f;
+        q = p;
+        q.hcb = q.hcr = 0;
+        for (c = 0; c < 256; c += 5)
+            for (h = 0; h < 4096; h += 97)
+                for (b = 0; b < 4096; b += 391) {
+                    ol_word_tables(&o, &p);
+                    wc = ol_word_of(&o, &p, b, h, c);
+                    ol_word_tables(&o, &q);
+                    wm = ol_word_of(&o, &q, b, h, c);
+                    y_same &= (wc & 0xff) == (wm & 0xff);
+                    neutral &= (wm >> 8 & 0xffff) == 0x8080 && !(wm >> 24);
+                    coloured |= (wc >> 8 & 0xffff) != 0x8080;
+                }
+    }
+    check(coloured, "black and white: the colour version's halation has colour");
+    check(y_same, "black and white: the halation's light (Y) the colour version's");
+    check(neutral, "black and white: no colour in any word");
+}
+
+/* Bloom's haze: the tail's sources get haze lin[y] of each pixel (mean over the cell), at most OL_ONE; without a tail
+ * or at haze 0 nothing; the hz table */
+static void haze(void)
+{
+    ol_t o;
+    ol_par_t p;
+    u32 i, n, lw = 324, lh = 243, x, ok;
+
+    layout(&o, lw, lh);
+    n = lw * lh;
+    params(&p);
+    p.haze = 4096 * 4 / 100;
+    ol_word_tables(&o, &p);
+    check(!o.hazed, "haze: none without a tail");
+    p.tmix = 128;
+    ol_word_tables(&o, &p);
+    check(o.hazed && o.hz[255] == (OL_ONE * (4096 * 4 / 100) >> 12) && o.hz[0] == 0, "haze: the table");
+    memset(o.pb, 0, 2 * n);
+    for (i = 0; i < n; i++)
+        o.y[i] = 200;
+    ol_tail_down(&o);
+    for (i = 0, ok = 1; i < o.tw * o.th; i++)
+        ok &= o.pt[i] == o.hz[200];
+    check(ok, "haze: a flat Y gives a flat tail of its haze");
+    for (i = 0; i < n; i++)                 /* sources and haze over OL_ONE: held at it */
+        o.pb[i] = OL_ONE;
+    p.haze = 4096;
+    ol_word_tables(&o, &p);
+    ol_tail_down(&o);
+    for (i = 0, ok = 1; i < o.tw * o.th; i++)
+        ok &= o.pt[i] == OL_ONE;
+    check(ok, "haze: the tail's sources at most OL_ONE");
+    for (i = 0; i < n; i++) {               /* a dark layer with a bright half: the haze where the light is */
+        o.pb[i] = 0;
+        o.y[i] = i % lw < 162 ? 220 : 10;
+    }
+    p.haze = 4096 * 4 / 100;
+    ol_word_tables(&o, &p);
+    ol_tail_down(&o);
+    x = o.pt[30 * o.tw + 10];
+    check(x == o.hz[220] && o.pt[30 * o.tw + 70] == o.hz[10] && o.pt[30 * o.tw + 70] < x, "haze: by the light of the cell");
+    p.haze = 0;                             /* haze 0: the first tail's sources exactly */
+    ol_word_tables(&o, &p);
+    for (i = 0; i < n; i++)
+        o.pb[i] = (u16)(i * 7 % 4096);
+    ol_tail_down(&o);
+    memcpy(o.pc, o.pt, 2 * o.tw * o.th);
+    o.hazed = 0;
+    ol_tail_down(&o);
+    check(!memcmp(o.pc, o.pt, 2 * o.tw * o.th), "haze: 0 - the sources as without it");
+}
+
 int main(int argc, char **argv)
 {
     (void)argv;
@@ -834,6 +921,8 @@ int main(int argc, char **argv)
     words_later();
     tail();
     scene();
+    words_mono();
+    haze();
     if (!failed)
         printf("ok\n");
     return failed;
