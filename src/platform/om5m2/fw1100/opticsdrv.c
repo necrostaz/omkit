@@ -270,7 +270,7 @@ typedef struct {
     u32 set;                                /* the layer's settings: 0 - [optics], 1.. - drv_optics_layer_set's */
     u32 str;                                /* the job's strengths: Bloom | Halation << 8, OP_TEST - a test's, OP_MONO -
                                                black and white */
-    u32 sc_mean, sc_share, sc_day;          /* L4: the layer's mean Y, its share at the Bloom threshold (permille), the
+    u32 sc_mean, sc_share, sc_day;          /* L4: the layer's mean Y, its share at DRV_OPTICS_DAY_CODE (permille), the
                                                day's weight (Q8) */
     u32 gbe, ghe;                           /* L4: the gains used (Q8, the strength, the day and the tail in them) */
     u32 psw, sp, sp_min;                    /* at the step's entry (C); the lowest sp of the step's C code */
@@ -1532,6 +1532,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.hcb = r->str & OP_MONO ? 0 : cf->hcb;  /* black and white: a light halo without colour, its light kept */
     P.hcr = r->str & OP_MONO ? 0 : cf->hcr;
     P.em = cf->em;
+    P.emb = cf->emb;
     P.bdark = cf->bdark;
     P.hfirst = cf->hfirst;
     P.tmix = P.gb ? (cf->tmix > DRV_OPTICS_TAIL_MAX ? DRV_OPTICS_TAIL_MAX : cf->tmix) : 0;
@@ -1539,7 +1540,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.st = r->sig[4] = P.tmix ? ol_cpu_sigma(cf->st, fl, r->width, lw) / OL_TAIL : 0;   /* in the tail's pixels */
     if (P.st < 64)
         P.tmix = 0;                         /* a tail below 0.25 of its pixel: none (ol_gauss would do nothing) */
-    ol_scene(&L, cf->tb > 255 ? 255 : cf->tb, &s0, &s1);   /* the day's weight from the layer's Y */
+    ol_scene(&L, DRV_OPTICS_DAY_CODE, &s0, &s1);   /* the day's weight from the layer's Y */
     r->sc_mean = s0;
     r->sc_share = s1;
     r->sc_day = ol_day(s0, s1, (const u32 *)cf->day);

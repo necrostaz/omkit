@@ -59,7 +59,7 @@
  *                                  63, 100: about x1.5 and x1.6 a step; Bloom's 1 about a filter of 1/8 against
  *                                  1/2 at 5, the halation's the host model's sets A .. D of card166)
  *   day_mean, day_share       the day's weight from the layer's Y: its mean from .. to (codes; 95, 125) and the share of
- *                             it at the Bloom threshold or above from .. to (percent; 6, 14) - the larger of the two
+ *                             it at the code 200 or above from .. to (percent; 6, 14) - the larger of the two
  *   day_bloom, day_halation   the gains on a day scene, percent of the night's (100, 6): a blown pixel there is a bright
  *                             surface (metal, a window), not a lamp many times brighter than white - the halation's red
  *                             "neon" on it is less; Bloom glows by day as by night (a diffusion filter; 100 - off)
@@ -78,6 +78,9 @@
  *                                          first version); 1..64 (16) - the emission of a pixel whose blown light
  *                                          stands for that many whites (the tone curve's shoulder undone): a lamp
  *                                          glows, white paper just under 255 hardly does
+ *   bloom_emission, halation_emission      the same for each alone (card168; emission when not given): a diffusion
+ *                                          filter glows from bright surfaces too - Bloom with fewer whites (4) and a
+ *                                          lower threshold takes them in, the halation keeps to lamps
  *   bloom_dark                             less Bloom on bright places, as halation_dark: percent (80)
  *   halation_first                         1 (default) - the halation's code, and so its colour, from the place's own
  *                                          light, Bloom added after it (its colour does not fade under a strong
@@ -526,6 +529,8 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     c->hcr = opt_sint(sec, "halation_cr", 70, -200, 200) * 256 / 100;
     c->dark = (u32)opt_sint(sec, "halation_dark", 70, 0, 100) * 256 / 100;
     c->em = (u32)opt_sint(sec, "emission", OPT_EMISSION, 0, 64);
+    c->emb = (u32)opt_sint(sec, "bloom_emission", (s32)c->em, 0, 64);   /* Bloom's own; the common one if not given */
+    c->em = (u32)opt_sint(sec, "halation_emission", (s32)c->em, 0, 64);
     c->bdark = (u32)opt_sint(sec, "bloom_dark", OPT_BLOOM_DARK, 0, 100) * 256 / 100;
     c->hfirst = (u32)opt_sint(sec, "halation_first", 1, 0, 1);
     tail = (u32)opt_sint(sec, "bloom_tail", 0, 0, (DRV_OPTICS_TAIL_MAX * 100 + 255) / 256);   /* 90 % */
@@ -554,7 +559,7 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
                "gains%s", name, c->steps[0][0], c->steps[0][1], c->steps[0][2], c->steps[0][3], c->steps[0][4],
                c->steps[1][0], c->steps[1][1], c->steps[1][2], c->steps[1][3], c->steps[1][4],
                c->bench ? "; the bench on" : "");
-    log_printf(OMK_LOG_INFO, "optics: layer%s: a day scene (mean Y %u..%u or %u..%u%% at the Bloom threshold): Bloom %u%%, "
+    log_printf(OMK_LOG_INFO, "optics: layer%s: a day scene (mean Y %u..%u or %u..%u%% at code 200): Bloom %u%%, "
                "Halation %u%% of the gains", name, c->day[0], c->day[1], c->day[2] / 10, c->day[3] / 10, c->day[4],
                c->day[5]);
     if (c->em)
@@ -563,6 +568,9 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     else
         log_printf(OMK_LOG_INFO, "optics: layer%s: the source - the excess over the threshold; the picture read %s, %u ms",
                    name, c->read ? "on" : "off", c->read_us / 1000);
+    if (c->emb != c->em)
+        log_printf(OMK_LOG_INFO, "optics: layer%s: Bloom's own source - %s %u whites (bloom_emission; Halation's above)",
+                   name, c->emb ? "the emission of a blown pixel as" : "the excess over the threshold, not", c->emb);
 }
 
 /* The layer's settings; 1 - the layer is on (a strength, or a layer substage in the schedule) */

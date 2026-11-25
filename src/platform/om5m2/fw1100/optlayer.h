@@ -16,13 +16,15 @@
  * - the source may be the emission instead of the excess (ol_emission): the tone curve's shoulder undone, a blown pixel
  *   standing for em whites - the excess makes a code of 240 glow half as much as 255, a lamp in the scene is tens of
  *   times brighter than white paper;
+ * - Bloom's own emission (emb): a diffusion filter glows from bright surfaces too, so Bloom may take fewer whites and a
+ *   lower threshold than the halation, which keeps to lamps;
  * - Bloom weighted by the darkness of the place, as Halation (on a bright place a filter's glow hardly shows);
  * - Halation's code from the place's own light, Bloom after it: its colour does not fade under a strong Bloom;
  * - Bloom's tail: a wide Gaussian on a plane OL_TAIL times smaller each way, added to Bloom's blur (ol_tail_*);
  * - Bloom's haze (haze): a share of every pixel's light, not only of the light over the threshold, in the tail's sources
  *   - a diffusion filter scatters a part of all it passes, so bright surfaces glow into the dark around them and the
  *   shadows lift; it lights the whole layer (every word gets the word's arithmetic);
- * - the scene's darkness (ol_scene, ol_day): the layer's mean Y and its share at the Bloom threshold weigh a day scene,
+ * - the scene's darkness (ol_scene, ol_day): the layer's mean Y and its share at a code (200) weigh a day scene,
  *   whose gains the caller lowers (a blown pixel there is a bright surface, not a lamp);
  * - the words of a run of lit pixels in one loop (ol_words_lit): no call a pixel.
  *
@@ -105,6 +107,8 @@ typedef struct {
     s32 hcb, hcr;                           /* Halation's chroma a unit of its Y code, Q8 signed */
     u32 py, pcb, pcr;                       /* the bytes (0..3) of Y, Cb and Cr in a layer word */
     /* The later parts; 0 each - the first version's values */
+    u32 emb;                                /* Bloom's source: as em, its own (card168: a diffusion filter glows from
+                                               bright surfaces too, not only from what the picture blew) */
     u32 em;                                 /* the source: 0 - the excess over the threshold; 1..OL_EM_MAX - the emission
                                                of a pixel whose blown light stands for em whites (ol_emission) */
     u32 bdark;                              /* Bloom weighted by darkness as Halation: Q8 */
@@ -332,21 +336,16 @@ static inline u32 ol_emission(u32 x, u32 t, u32 m)
 }
 
 /* The read's table (after ol_columns): tab[c] = the source of code c for Bloom | for Halation << 16 - the excess over
- * the threshold, or the emission (p->em). A half holds the sum of 16 pixels (16 OL_ONE < 65536), so the read adds at
+ * the threshold, or the emission (Bloom's p->emb, Halation's p->em). A half holds the sum of 16 pixels (16 OL_ONE < 65536), so the read adds at
  * most 8 words before it splits the halves */
 static inline void ol_read_table(ol_t *o, const ol_par_t *p)
 {
-    u32 i, l, eb, eh, m = p->em > OL_EM_MAX ? OL_EM_MAX : p->em;
+    u32 i, l, eb, eh, m = p->em > OL_EM_MAX ? OL_EM_MAX : p->em, mb = p->emb > OL_EM_MAX ? OL_EM_MAX : p->emb;
 
     for (i = 0; i < 256; i++) {
         l = o->lin[i];
-        if (m) {
-            eb = ol_emission(l, p->tb, m);
-            eh = ol_emission(l, p->th, m);
-        } else {
-            eb = l > p->tb ? l - p->tb : 0;
-            eh = l > p->th ? l - p->th : 0;
-        }
+        eb = mb ? ol_emission(l, p->tb, mb) : l > p->tb ? l - p->tb : 0;
+        eh = m ? ol_emission(l, p->th, m) : l > p->th ? l - p->th : 0;
         o->tab[i] = eb | eh << 16;
     }
     o->tabd = 1;

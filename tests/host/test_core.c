@@ -1132,6 +1132,7 @@ static void test_layer(int phase)
         CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 100000 && host_opt_layer.cached == 0);
         CHECK(host_opt_layer.lcached == 0);
         CHECK(host_opt_layer.em == 16 && host_opt_layer.bdark == 80 * 256 / 100 && host_opt_layer.hfirst == 1);
+        CHECK(host_opt_layer.emb == 16);                                /* Bloom's source: the common one */
         CHECK(host_opt_layer.tmix == 0 && host_opt_layer.st == 0);     /* the tail off by default */
         CHECK(host_opt_layer.haze == 0);                                /* and the haze */
     } else {
@@ -1167,7 +1168,7 @@ static void test_layer_rows(void)
     omk_dir(LOG_DIR);
     write_file("OMKIT.INI", "[optics]\nlayer = on\nbloom_steps = 10, 20, 30, 40, 250\nhalation_steps = 1, 2\n"
                             "day_mean = 60, 120\nday_share = 9, 3\nday_halation = 35\nbench = 1\nbloom_tail = 95\n"
-                            "bloom_haze = 30\n");
+                            "bloom_haze = 30\nbloom_emission = 4\n");
     CHECK(cfg_load() == 1);
     log_setup(1, OMK_LOG_INFO);
     host_prev_ended = 1;
@@ -1188,6 +1189,7 @@ static void test_layer_rows(void)
           host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 35);
     CHECK(host_opt_layer.bench == 1 && host_opt_layer.tmix == 90 * 256 / 100);   /* the tail at most 90 % */
     CHECK(host_opt_layer.haze == 25 * 4096 / 100);                  /* the haze at most 25 % */
+    CHECK(host_opt_layer.emb == 4 && host_opt_layer.em == 16);      /* Bloom's own source, Halation's the common one */
     CHECK(!optics_route());
     optics_service(1000);                   /* the look gives nothing yet: 0, 0 */
     CHECK(host_opt_str == 0 && host_opt_strs == 1 && !optics_route());
@@ -1219,9 +1221,10 @@ static void test_layer_rows(void)
     CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 200"));
     CHECK(t && strstr(t, "optics: layer: strengths 1..5 - Bloom 10 20 30 40 200%, Halation 16 25 40 63 100% of the gains; "
                          "the bench on"));
-    CHECK(t && strstr(t, "optics: layer: a day scene (mean Y 60..120 or 6..14% at the Bloom threshold): Bloom 100%, "
+    CHECK(t && strstr(t, "optics: layer: a day scene (mean Y 60..120 or 6..14% at code 200): Bloom 100%, "
                          "Halation 35% of the gains"));
     CHECK(t && strstr(t, "tail 90% of sigma 300, haze 25%)"));
+    CHECK(t && strstr(t, "optics: layer: Bloom's own source - the emission of a blown pixel as 4 whites"));
     CHECK(t && strstr(t, "optics: the look's strengths now: Bloom 3, Halation 1, black and white (the halation without "
                          "colour)"));
     CHECK(t && strstr(t, "halation_steps: not five numbers") && strstr(t, "'9, 3': not two numbers"));

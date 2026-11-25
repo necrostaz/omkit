@@ -295,6 +295,7 @@ typedef struct {
     u32 read_us;                            /* the read's time a job */
     u32 cached;                             /* the read through the window's cached view */
     u32 lcached;                            /* the layer read and written (L4) through the window's cached view */
+    u32 emb;                                /* Bloom's source, as em (bloom_emission; emission when not given) */
     u32 em;                                 /* the source: 0 - the excess over the threshold; 1..64 - the emission of a
                                                blown pixel standing for em whites (optlayer.h's ol_emission) */
     u32 bdark;                              /* Bloom by darkness, Q8 */
@@ -310,8 +311,9 @@ typedef struct {
     u32 sbv, shv;
     u32 steps[2][5];
     /* The scene's darkness (a night's lamp stands for many whites, a day's blown metal or window for few): from the layer's
-     * Y, its mean and the share of its pixels at the Bloom threshold or above; the day's weight 0..256 grows from 0 at
-     * day[0] to 256 at day[1] (mean, codes) or at day[2] .. day[3] (share, permille) - the larger of the two; the gains
+     * Y, its mean and the share of its pixels at the code 200 or above (DRV_OPTICS_DAY_CODE: the Bloom threshold of
+     * card167, fixed since card168 so that Bloom's own threshold does not move the day); the day's weight 0..256 grows
+     * from 0 at day[0] to 256 at day[1] (mean, codes) or at day[2] .. day[3] (share, permille) - the larger of the two; the gains
      * of a day scene are day[4] (Bloom), day[5] (Halation) percent of the night's. day[4] = day[5] = 100 - off (Bloom's
      * 100 by default since card168: a diffusion filter glows by day as by night) */
     u32 day[6];
@@ -319,6 +321,7 @@ typedef struct {
 } drv_optics_layer_cfg;
 #define DRV_OPTICS_ROWS 0xff
 #define DRV_OPTICS_TAIL_MAX 230             /* 90 %: the near part keeps 10 % (its share divides the tail, Q8) */
+#define DRV_OPTICS_DAY_CODE 200            /* the day's share: the layer's pixels at this code or above */
 int drv_optics_layer(const drv_optics_layer_cfg *c);
 /* Further sets of the layer's settings, 1..DRV_OPTICS_SETS (core task, after drv_optics_layer): a job takes the set in
  * force when it is listed (drv_optics_set, between presses, as drv_optics_sub); the route, the width, the bytes and the

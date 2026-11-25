@@ -609,7 +609,7 @@ static void emission(void)
 
     layout(&o, LW, LH);
     params(&p);
-    p.em = 16;
+    p.em = p.emb = 16;
     ol_read_table(&o, &p);
     for (c = 1; c < 256; c++)
         mono &= (o.tab[c] & 0xffff) >= (o.tab[c - 1] & 0xffff) && (o.tab[c] >> 16) >= (o.tab[c - 1] >> 16);
@@ -623,17 +623,26 @@ static void emission(void)
     check(e245 > OL_ONE * 30 / 100 && e245 < OL_ONE * 40 / 100, "emission: 245 ~0.35 of a blown pixel");
     check(e230 > OL_ONE * 10 / 100 && e230 < OL_ONE * 16 / 100, "emission: 230 ~0.13 of a blown pixel");
     check(e245 * (OL_ONE - p.tb) < (lin[245] - p.tb) * OL_ONE, "emission: below the excess (each to its blown pixel)");
-    p.em = 1;                               /* no shoulder: the excess, normalised */
+    p.em = p.emb = 1;                       /* no shoulder: the excess, normalised */
     ol_read_table(&o, &p);
     check((o.tab[245] & 0xffff) + 1 >= (lin[245] - p.tb) * OL_ONE / (OL_ONE - p.tb) &&
           (o.tab[245] & 0xffff) <= (lin[245] - p.tb) * OL_ONE / (OL_ONE - p.tb) + 1, "emission at m 1: the excess normalised");
-    p.em = 0;
+    p.em = p.emb = 0;
     ol_read_table(&o, &p);
     check((o.tab[245] & 0xffff) == lin[245] - p.tb && (o.tab[245] >> 16) == lin[245] - p.th, "m 0: the excess");
-    p.em = 16;
+    p.em = p.emb = 16;
     p.th = OL_ONE;                          /* a threshold at white: nothing, no division by 0 */
     ol_read_table(&o, &p);
     check(!(o.tab[255] >> 16), "emission: a threshold at white gives nothing");
+    p.th = lin[230];                        /* Bloom's own emission: its half alone changes */
+    p.emb = 4;
+    ol_read_table(&o, &p);
+    e230 = o.tab[230] & 0xffff;
+    e245 = o.tab[245] >> 16;
+    p.emb = 16;
+    ol_read_table(&o, &p);
+    check((o.tab[230] & 0xffff) < e230 && (o.tab[245] >> 16) == e245,
+          "emission: Bloom's own m (4 glows more from a bright surface than 16), Halation's half as it was");
 }
 
 /* The words with the later keys: Bloom less on a bright place (bdark); Halation first - its colour the same however
