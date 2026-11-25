@@ -166,6 +166,10 @@ u32 drv_look_edit_take(u32 *ev, u32 max, u32 *lost);
  * 0, -1 bad, -2 not available */
 int drv_look_grain_tiles(const char *const *names, u32 count);
 int drv_look_grain(u32 entry, s32 tile, u32 level);
+/* The look's optics rows (API 20, platform pictprof.c): drv_look_optics - entry's strengths (OMK_OPTICS_ROWS of
+ * 0..OMK_OPTICS_MAX) to show; another entry than the UI shows: dropped (0). 0, -1 bad, -2 the rows are not available
+ * (not installed on this firmware). Core task */
+int drv_look_optics(u32 entry, const u8 *strength);
 int drv_look_picture_size(u32 pic, u32 *w, u32 *h);
 int drv_look_picture(u32 pic, u32 w, u32 h, const u8 *pixels);
 /* The EXIF UserComment of the following pictures (S+0xf7c, written in the shooting parameter reader's filter): text up to

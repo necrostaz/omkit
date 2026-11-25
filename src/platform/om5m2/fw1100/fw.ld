@@ -126,3 +126,23 @@ fw_job_cancel = 0x6038a8a5;             /* the job's cancel check: a0 P, a1 &u16
 fw_sf_down = 0x603937f8;                /* the reduction 0x400 into 0x1060: a0 h -> d0 slot (u16); [d2,d3,a2,a3],24 */
 fw_xfer = 0x6038c50f;                   /* the pass to the outputs: a0 h, d0 slot, d1 callback, a1 &dep -> d0; [d2,a2],12 */
 optics_size_back = 0x6039387f;          /* the reduction past mov 773,d0; movhu d0,(8,a2) at 0x60393879 */
+/* The look's optics rows (pictprof.c, thunks.s) */
+item_slider_fw = 0x60e4a94a;            /* the slider rows' redraw handler (7, 8, 59, 5376), as its stub 0x60e49e16 calls it */
+fac_kind0 = 0x60e3cd53;                 /* the child factory 0x60e3ccba: mov d0,(4,sp); clr d0 (kind 0); the child */
+find1_back = 0x60e49d75;                /* the redraw's item table search: its loop with a0 = the stock table */
+find1_found = 0x60e49d87;               /* ... past the loop: (4452,a3) = the descriptor */
+find2_back = 0x60e4a1aa;                /* the left column's item table search: its loop with a3 = the stock table */
+find2_found = 0x60e4a1ba;               /* ... past the loop: (16,sp) = the descriptor */
+hold_back = 0x60e3ca69;                 /* the column's long-OK case past exthu d0; cmp 5029,d0 */
+hold_none = 0x60e3cac9;                 /* ... its end: mov d2,d0; ret */
+child_update = 0x60e2c539;              /* the slider child reads its count and value again: a0 the child */
+stop_back = 0x60e2c46f;                 /* the slider child's setup: mov d0,(a0) = +116 (stop at the ends) */
+order_back = 0x60e2c63f;                /* ... its bne after cmp 469,d0 (a2 = 1: the list top-down) */
+sign_back = 0x60e4b049;                 /* the left cell's sign lookup past cmp 5376,d0; beq */
+sign_11 = 0x60e4b07b;                   /* ... its case of 5376, 1011, 5374: the -5..+5 table 0x611b58f0 */
+digit_back = 0x60e4b0ba;                /* the digit lookup past cmp 5376,d0; beq */
+digit_11 = 0x60e4b0ec;                  /* ... its -5..+5 table 0x611b5948 */
+str_back = 0x60d52ee3;                  /* the string getter past mov 0x61e53d30,a0 */
+orig_ui_count = 0x608ef279;             /* UI object +24: d0 id -> d0 the number of values */
+orig_ui_byidx = 0x608ef4a1;             /* +28: d0 id, d1 index, a1 where (or 0) -> d0 the value, -1 past the end */
+orig_ui_selectable = 0x608eee71;        /* +36: d0 id, d1 value -> d0 1 selectable */

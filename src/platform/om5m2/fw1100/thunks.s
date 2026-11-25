@@ -1496,6 +1496,202 @@ _drv_fw_job_cancel:
 	extbu	d0
 	rets
 
+# ------------------------------------------------------------------------------------------------------------------
+# The look's optics rows (pictprof.c, "The look's optics rows"): items ROW_I0 (Bloom) and ROW_I1 (Halation), in 7..5377 (the
+# range of the column's switches); their children are sliders of kind 0 on the virtual settings ROW_SET + row, values
+# 0..ROW_N - 1. The numbers are pictprof.c's (ITEM_BLOOM, ITEM_HALATION, ROW_SET, ROW_STR, OMK_OPTICS_MAX + 1). GUI task, CPU 0
+	.equ	ROW_I0, 5372
+	.equ	ROW_I1, 5370
+	.equ	ROW_SET, 0x7e00
+	.equ	ROW_SEND, 0x7e02
+	.equ	ROW_N, 6
+	.equ	ROW_STR, 0x7f00
+	.global	_drv_row_find1, _drv_row_find2, _drv_row_fac0, _drv_row_fac1, _drv_row_bar, _drv_row_hold
+	.global	_drv_row_stop, _drv_row_order, _drv_row_sign, _drv_row_digit, _drv_row_str
+	.global	_drv_ui_count, _drv_ui_byidx, _drv_ui_selectable
+
+# The redraw's item table search, 0x60e49d6b (mov d3,a0; movhu (a0),d2; mov 0x611b50f8,a0): our descriptors first
+_drv_row_find1:
+	mov	d3,a0
+	movhu	(a0),d2
+	mov	_drv_row_desc,a0
+	movhu	(a0),d0
+	cmp	d2,d0
+	beq	1f
+	add	40,a0
+	movhu	(a0),d0
+	cmp	d2,d0
+	beq	1f
+	mov	0x611b50f8,a0
+	jmp	find1_back
+1:	mov	a0,(4452,a3)
+	jmp	find1_found
+
+# The left column's search, 0x60e4a1a2 (exthu d3; clr d1; mov 0x611b50f8,a3): the same, the descriptor to (16,sp)
+_drv_row_find2:
+	exthu	d3
+	clr	d1
+	mov	_drv_row_desc,a3
+	movhu	(a3),d0
+	cmp	d3,d0
+	beq	1f
+	add	40,a3
+	movhu	(a3),d0
+	cmp	d3,d0
+	beq	1f
+	mov	0x611b50f8,a3
+	jmp	find2_back
+1:	mov	a3,(16,sp)
+	jmp	find2_found
+
+# The child factory's cases of our rows (switch 0x611a0a98): a kind-0 child on the virtual setting
+_drv_row_fac0:
+	mov	ROW_SET,d0
+	jmp	fac_kind0
+_drv_row_fac1:
+	mov	ROW_SET+1,d0
+	jmp	fac_kind0
+
+# The redraw's case of our rows (switch 0x611b79a8): the stock slider handler (it finds no value for an unknown item),
+# then drv_row_draw(panel) puts the row's value on the bar
+_drv_row_bar:
+	mov	a3,a0
+	mov	a0,a1
+	call	item_slider_fw,[d2,d3,a2,a3],40
+	mov	a3,d0
+	add	-32,sp
+	call	_drv_row_draw,[],0
+	add	32,sp
+	jmp	item_back
+
+# The column's long OK (0x903e), 0x60e3ca64 (exthu d0; cmp 5029,d0), d0 the item under the cursor, a3 the column + 72:
+# our rows are reset here (drv_row_reset(item) -> 1, the column's result in d2), then the row's child reads its value
+_drv_row_hold:
+	exthu	d0
+	cmp	ROW_I0,d0
+	beq	1f
+	cmp	ROW_I1,d0
+	beq	1f
+	cmp	5029,d0
+	jmp	hold_back
+1:	add	-32,sp
+	call	_drv_row_reset,[],0
+	add	32,sp
+	mov	d0,d2
+	mov	(4,a3),a0			# the row's child (as 0x60e3ca7f passes the editors' long OK to it)
+	cmp	0,a0
+	beq	2f
+	call	child_update,[d2,d3,a2,a3],68	# it reads its value again (else its next step starts from the old one)
+2:	jmp	hold_none
+
+# The slider child's setup (0x60e2c3..): +116 = 1 (stop at the ends, no wrap) for the ids of the table
+# 0x611979ac (239 ids), set at 0x60e2c46a (clr d0; mov 116,a0; add a3,a0) before its search: ours get 1
+_drv_row_stop:
+	mov	(16,sp),a1			# the child's setting id (the stock code loads a1 again right after)
+	movhu	(a1),d0
+	cmp	ROW_SET,d0
+	bcs	1f
+	cmp	ROW_SEND,d0
+	bcc	1f
+	mov	1,d0
+	bra	2f
+1:	clr	d0
+2:	mov	116,a0
+	add	a3,a0
+	jmp	stop_back
+
+# ... its value list's order: a2 = 1 (top-down) for the ids of the table 0x61197b8a (324 ids), searched before 0x60e2c637
+# (mov (16,sp),a0; movhu (a0),d0; cmp 469,d0); ours get 1, and the control's +152 = 1 (the dials step one fixed way, as
+# 0x60e3159f sets it for the stock sliders after this builder 0x60e2c539, which keeps its a0 at (24,sp))
+_drv_row_order:
+	mov	(16,sp),a0
+	movhu	(a0),d0
+	cmp	ROW_SET,d0
+	bcs	1f
+	cmp	ROW_SEND,d0
+	bcc	1f
+	mov	1,a2
+	mov	(24,sp),a0
+	mov	1,d0
+	mov	d0,(152,a0)
+	mov	(16,sp),a0
+	movhu	(a0),d0
+1:	cmp	469,d0
+	jmp	order_back
+
+# The left cell's readout: the sign (0x60e4b02c) and digit (0x60e4b09d) lookups pick a table by the item; ours take item
+# 5376's -5..+5 tables. At 0x60e4b043 / 0x60e4b0b4 (cmp 5376,d0; beq <5376's case>), the beq said again with absolute jumps
+_drv_row_sign:
+	cmp	5376,d0
+	beq	1f
+	cmp	ROW_I0,d0
+	beq	1f
+	cmp	ROW_I1,d0
+	beq	1f
+	jmp	sign_back
+1:	jmp	sign_11
+_drv_row_digit:
+	cmp	5376,d0
+	beq	1f
+	cmp	ROW_I0,d0
+	beq	1f
+	cmp	ROW_I1,d0
+	beq	1f
+	jmp	digit_back
+1:	jmp	digit_11
+
+# The string getter 0x60d52ed5 (call ..,[d2],8; d2 the string id -> a0 UTF-16), at 0x60d52edb (extbu d0; asl2 d0;
+# mov 0x61e53d30,a0): our ids ROW_STR + row are our titles
+_drv_row_str:
+	mov	d2,a0
+	cmp	ROW_STR,a0
+	beq	1f
+	cmp	ROW_STR+1,a0
+	beq	2f
+	extbu	d0
+	asl2	d0
+	mov	0x61e53d30,a0
+	jmp	str_back
+1:	mov	_drv_row_text,a0
+	ret	[d2],8
+2:	mov	_drv_row_text+24,a0
+	ret	[d2],8
+
+# UI object +24 / +28 / +36 for the virtual settings (method words); any other id - the firmware's method
+_drv_ui_count:
+	cmp	ROW_SET,d0
+	bcs	9f
+	cmp	ROW_SEND,d0
+	bcc	9f
+	mov	ROW_N,d0
+	rets
+9:	jmp	orig_ui_count
+_drv_ui_byidx:
+	cmp	ROW_SET,d0
+	bcs	9f
+	cmp	ROW_SEND,d0
+	bcc	9f
+	mov	d1,d0
+	cmp	ROW_N,d0
+	bcs	2f
+	mov	-1,d0
+2:	cmp	0,a1
+	beq	3f
+	mov	d0,(a1)
+3:	rets
+9:	jmp	orig_ui_byidx
+_drv_ui_selectable:
+	cmp	ROW_SET,d0
+	bcs	9f
+	cmp	ROW_SEND,d0
+	bcc	9f
+	clr	d0
+	cmp	ROW_N,d1
+	bcc	2f
+	mov	1,d0
+2:	rets
+9:	jmp	orig_ui_selectable
+
 # ---------------------------------------------------------------------------------------------------------------
 # PTP vendor operations (ptp.c) and the file rename of the debug service.
 	.global	_drv_tramp_ptp_reg, _drv_ptp_entry, _drv_ptp_reg_fw, _drv_ptp_send_fw, _drv_ptp_recv_len_fw, _drv_ptp_recv_fw

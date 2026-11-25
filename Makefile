@@ -51,7 +51,7 @@ $(OUT)/drv.o: src/platform/$(PLATFORM)/drv.c src/core/include/*.h src/sdk/includ
 	@mkdir -p $(OUT)
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
-$(OUT)/pictprof.o: src/platform/$(PLATFORM)/pictprof.c src/core/include/*.h src/sdk/include/*.h
+$(OUT)/pictprof.o: src/platform/$(PLATFORM)/pictprof.c src/platform/$(PLATFORM)/rowsw.h src/core/include/*.h src/sdk/include/*.h
 	@mkdir -p $(OUT)
 	$(TC)gcc $(CFLAGS) -c $< -o $@
 
@@ -186,11 +186,15 @@ $(TEST)/test_edtrig: src/platform/$(PLATFORM)/edtrig.h tests/host/test_edtrig.c 
 	@mkdir -p $(TEST)
 	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_edtrig.c -o $@
 
+$(TEST)/test_rowsw: src/platform/$(PLATFORM)/rowsw.h tests/host/test_rowsw.c src/sdk/include/omk_types.h
+	@mkdir -p $(TEST)
+	$(HOST_CC) $(HOST_CFLAGS) -Isrc/sdk/include -Isrc/platform/$(PLATFORM) tests/host/test_rowsw.c -o $@
+
 # HELLO.OMM and hello.elf for the loader and mkmod tests, when the MN10300 toolchain is there
 test-hello:
 	$(if $(HAVE_TC),@$(MAKE) -s -C src/modules MOD=hello OUT=$(abspath $(TEST))/modules >/dev/null)
 
-test-host: $(TEST)/test_core $(TEST)/test_shoot $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_debug $(TEST)/test_optprobe $(TEST)/test_optwork $(TEST)/test_optlayer test-hello
+test-host: $(TEST)/test_core $(TEST)/test_shoot $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_debug $(TEST)/test_optprobe $(TEST)/test_optwork $(TEST)/test_optlayer $(TEST)/test_rowsw test-hello
 	@echo "host tests:"
 	@sh tests/host/run.sh $(TEST) $(HOST_CC) $(if $(HAVE_TC),$(abspath $(TEST))/modules $(TC) "$(PYTHON)")
 

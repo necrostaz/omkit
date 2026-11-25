@@ -166,7 +166,8 @@ int edits_mono(const u8 *ispb)
 u32 edits_changed(const edits_t *e)
 {
     return (e->tone[0] || e->tone[1] || e->tone[2] ? 1u << OMK_EDIT_TONE : 0) | (e->vivid_set ? 1u << OMK_EDIT_VIVID : 0) |
-           (e->filter ? 1u << OMK_EDIT_LEVEL : 0) | (e->grain || e->tile[0] ? 1u << OMK_EDIT_GRAIN : 0);
+           (e->filter ? 1u << OMK_EDIT_LEVEL : 0) | (e->grain || e->tile[0] ? 1u << OMK_EDIT_GRAIN : 0) |
+           (e->optics[OMK_OPTICS_BLOOM] || e->optics[OMK_OPTICS_HALATION] ? 1u << OMK_EDIT_OPTICS : 0);
 }
 
 void edits_reset(edits_t *e, u32 group)
@@ -187,6 +188,9 @@ void edits_reset(edits_t *e, u32 group)
         for (i = 0; i < GRAIN_FILE; i++)
             e->tile[i] = 0;
     }
+    if (group == OMK_EDIT_OPTICS || group == OMK_EDIT_GROUPS)    /* ... and the optics rows */
+        for (i = 0; i < OMK_OPTICS_ROWS; i++)
+            e->optics[i] = 0;
 }
 
 static s32 clamp(s32 v, s32 lo, s32 hi)

@@ -7,8 +7,9 @@
 #include "omk_ispb.h"
 
 #define ISPB_SIZE OMK_ISPB_SIZE
-#define EDITS_FORMAT 2                      /* 2: with the grain (FILMLOOK 1.5); 1: Color/Vivid a shift from the preset's
-                                               saturation (1.3), taken with the grain Off; 0 - its replacement (1.2), not taken */
+#define EDITS_FORMAT 3                      /* 3: with the optics rows' strengths; 2: with the grain (FILMLOOK 1.5), taken with
+                                               the optics rows at 0; 1: Color/Vivid a shift from the preset's saturation (1.3),
+                                               taken with the grain Off; 0 - its replacement (1.2), not taken */
 #define GRAIN_FILE 13                       /* a grain container's 8.3 file name with its terminator */
 
 typedef struct {
@@ -20,6 +21,8 @@ typedef struct {
     /* format 2 */
     u8 grain;                               /* the grain's strength: 0 Off, 1 Low, 2 Med, 3 High */
     char tile[GRAIN_FILE];                  /* the grain tile's container file; "" - the module's default tile */
+    /* format 3 (in the two bytes a format 2 record kept as padding: the record's size is the same) */
+    u8 optics[OMK_OPTICS_ROWS];             /* the optics rows' strengths 0..OMK_OPTICS_MAX: Bloom, Halation; 0 - off */
 } edits_t;
 #define EDITS_V1_SIZE 20                    /* sizeof(edits_t) of format 1: the fields up to vivid_set */
 

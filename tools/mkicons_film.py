@@ -24,6 +24,11 @@ icons of the same places (sign height and line width measured on them):
   id 9  grain item           66 x 50   "Film" over "Grain"                                       profile text
   id 10 grain: tile dial     <= 56 x 24  "Tile", over the dial that steps the tile            dial_label.py
   id 11 grain: strength dial <= 56 x 24  "Level", over the dial of Off, Low, Med, High        dial_label.py
+  id 12 Bloom row's sign     46 x 46   a disc with eight short rays (a glow), left of the number  profile icon
+  id 13 Halation row's sign  46 x 46   a dot inside a ring (a halo), left of the number           profile icon
+
+The signs of the optics rows (ids 12, 13) are placeholders until the owner approves them; they stand where the camera
+draws the "S" of a slider row (46 x 46).
 
 The dial labels (ids 6, 7, 10, 11) are drawn by dial_label.py in the face, size and rows of the camera's own labels
 ("Color", "Vivid"), as every module's dial label is; "Tile" and "Level" stand for "Type" and "Strength" (FILMLOOK 1.9),
@@ -66,6 +71,8 @@ PICTURES = {
     9: (66, 50, "text", ("Film", "Grain"), 2.2),
     10: ((None, 56), 24, "dial", "Tile", None),
     11: ((None, 56), 24, "dial", "Level", None),
+    12: (46, 46, "icon", "bloom", 3.0),
+    13: (46, 46, "icon", "halation", 3.0),
 }
 # The words of the item pictures (ids 8, 9): letters as strokes in a box 0..w x 0..1 (y down, 1 = the cap height; lower
 # case from 0.3)
@@ -226,6 +233,27 @@ def negative(g, b, s):
     return m_andnot(m, letter_f(g, (px0 + px1) / 2 - fw / 2 + 0.5, y0 + (H - fh) / 2, fw, fh, s))
 
 
+def disc(g, cx, cy, r):
+    """A disc of radius r"""
+    return rect(g, cx - r, cy - r, cx + r, cy + r, r=r)
+
+
+def bloom(g, s):
+    """The Bloom row's sign: a disc with eight short rays around it, in the middle of the picture"""
+    cx, cy = g.w / 2, g.h / 2
+    m = disc(g, cx, cy, 6.5)
+    for k in range(8):
+        a = k * math.pi / 4
+        m = m_or(m, capsule(g, cx + 10.5 * math.cos(a), cy + 10.5 * math.sin(a), cx + 16 * math.cos(a), cy + 16 * math.sin(a), s))
+    return m
+
+
+def halation(g, s):
+    """The Halation row's sign: a dot inside a ring"""
+    cx, cy = g.w / 2, g.h / 2
+    return m_or(disc(g, cx, cy, 5.0), m_andnot(disc(g, cx, cy, 16.0), disc(g, cx, cy, 16.0 - s)))
+
+
 def word(g, text, s, cap=CAP, y0=None, gap=0.24):
     """A word of an item picture: the letters' strokes, centred across (and down unless y0), the cap height cap"""
     gap = gap * cap
@@ -311,7 +339,11 @@ def render(rid):
         return w, h, bytes(k for row in rows for k in row)
     wmax = width[1] if isinstance(width, tuple) else width
     g = Grid(wmax, h)
-    if isinstance(box, str):
+    if box == "bloom":
+        m = bloom(g, s)
+    elif box == "halation":
+        m = halation(g, s)
+    elif isinstance(box, str):
         m = word(g, box, s)
     elif isinstance(box[0], str):                 # two lines, as the profiles' "Color Level": cap 13 px, 21 px apart
         m = m_or(word(g, box[0], s, 13.0, 6.0), word(g, box[1], s, 13.0, 27.0))

@@ -356,6 +356,7 @@ static const omk_api api = {
     look_grain,
     prof_mono_matrix_get,
     api_card_busy,
+    look_optics,
 };
 
 const omk_api *omk_api_get(void)
