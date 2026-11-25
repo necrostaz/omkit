@@ -5,7 +5,7 @@
 #include "omk_drv.h"
 #include "omk_mem.h"
 
-#define CORE_VERSION "1.44"
+#define CORE_VERSION "1.45"
 #ifndef CORE_BUILD                          /* the Makefile: git branch@commit of the build, "-dirty" with changes */
 #define CORE_BUILD "unknown"
 #endif

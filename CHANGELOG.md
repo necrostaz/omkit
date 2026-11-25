@@ -51,6 +51,8 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   in the log's first line and in `INFO`) and fixes writing files over USB, which failed since core 1.40.
 - **core 1.44** keeps the card's volume whole across resets during a save (the stores rewritten in place) and keeps one
   `CORE.LOG` for all power-ons.
+- **core 1.45** adds test sessions over USB without hands: during a one-shot scenario the camera stays in charge only
+  with the cable in, and it restarts itself into the MTP mode at the end.
 
 ## [0.1.0] - 2026-11-20
 
