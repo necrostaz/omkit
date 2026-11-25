@@ -572,7 +572,8 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     log_printf(OMK_LOG_INFO, "optics: layer%s: Halation %s (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb "
                "%d%% Cr %d%%, dark %u%%, %s)", name, sh == DRV_OPTICS_ROWS ? "by the look's rows" : sh == 0 ? "0, a test" :
                sh == 1 ? "1, a test" : sh == 2 ? "2, a test" : sh == 3 ? "3, a test" : sh == 4 ? "4, a test" : "5, a test",
-               c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256, gh, c->hcb * 100 / 256, c->hcr * 100 / 256,
+               c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256, gh, (c->hcb * 100 + (c->hcb < 0 ? -128 : 128)) / 256,
+               (c->hcr * 100 + (c->hcr < 0 ? -128 : 128)) / 256,
                c->dark * 100 / 256, c->hfirst ? "before Bloom" : "after Bloom");
     log_printf(OMK_LOG_INFO, "optics: layer%s: strengths 1..5 - Bloom %u %u %u %u %u%%, Halation %u %u %u %u %u%% of the "
                "gains%s", name, c->steps[0][0], c->steps[0][1], c->steps[0][2], c->steps[0][3], c->steps[0][4],
@@ -636,7 +637,7 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
     fl = (216 * 5184 + 50 * c->width) / (100 * c->width);   /* optlayer.h's ol_floor_sigma for 5184 */
     log_printf(OMK_LOG_INFO, "optics: layer: route %s, width %u (cells of %u px; the transport alone blurs by sigma ~%u px), "
                "bytes %s; picture read %s%s", c->route == DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width,
-               fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" : t, c->read ? "on (every row of cells, 2 rows each)" : "off",
+               fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" : t, c->read ? "on, 2 rows a cell" : "off",
                c->cached ? " through the CACHED view" : "");
     log_printf(OMK_LOG_INFO, "optics: layer: the layer read and written %s", c->lcached ? "through the CACHED view (written "
                "back before the window is released)" : "past the cache");

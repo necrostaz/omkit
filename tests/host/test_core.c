@@ -1158,7 +1158,7 @@ static void test_layer(int phase)
               strstr(t, "optics: layer: the strength's curve after the blur (percent of white; 0 - none): Bloom toe 0, "
                         "at most 0; Halation toe 0, at most 0") &&
               strstr(t, "optics: layer: jobs = first - the second job of a RAW+JPEG press (the ORF's preview) without "
-                        "the layer") && strstr(t, "picture read on (every row of cells, 2 rows each)") &&
+                        "the layer") && strstr(t, "picture read on, 2 rows a cell") &&
               !strstr(t, "read_ms is not taken"));
     else if (!(t && strstr(t, "optics: layer: read_ms is not taken") && strstr(t, "Halation toe 5, at most 60") &&
                strstr(t, "jobs = both - both jobs")))
