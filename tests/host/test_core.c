@@ -1089,6 +1089,9 @@ static void test_schedule(void)
  * schedule: the jobs get L4, the settings as given and as defaults, the log line; 2 - a schedule of layer substages
  * without strengths: the layer on, route 403, the byte positions given, a sigma below the transport's warned of */
 extern drv_optics_layer_cfg host_opt_layer;
+extern u8 host_look_str[2];
+extern int host_look_str_on, host_look_rows;
+extern u32 host_opt_str, host_opt_strs;
 
 static void test_layer(int phase)
 {
@@ -1116,7 +1119,12 @@ static void test_layer(int phase)
         CHECK(host_opt_layer.order == DRV_OPTICS_ORDER_AUTO && host_opt_layer.gamma == 220);
         CHECK(host_opt_layer.tb == 200 && host_opt_layer.th == 225);
         CHECK(host_opt_layer.sb == (80u | 200u << 16) && host_opt_layer.mixb == 64 && host_opt_layer.sh == 40);
-        CHECK(host_opt_layer.gb == 150 * 256 * 5 / 500 && host_opt_layer.gh == 200 * 256 * 2 / 500);
+        CHECK(host_opt_layer.gb == 150 * 256 / 100 && host_opt_layer.gh == 200 * 256 / 100);   /* the strongest step's */
+        CHECK(host_opt_layer.sbv == 5 && host_opt_layer.shv == 2);     /* a test's strengths in place of the rows' */
+        CHECK(host_opt_layer.steps[0][0] == 25 && host_opt_layer.steps[0][4] == 100 && host_opt_layer.steps[1][0] == 16);
+        CHECK(host_opt_layer.day[0] == 80 && host_opt_layer.day[1] == 110 && host_opt_layer.day[2] == 50 &&
+              host_opt_layer.day[3] == 150 && host_opt_layer.day[4] == 40 && host_opt_layer.day[5] == 6);
+        CHECK(host_opt_layer.bench == 0 && host_look_rows == 1);
         CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 70 * 256 / 100);
         CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 100000 && host_opt_layer.cached == 0);
         CHECK(host_opt_layer.lcached == 0);
@@ -1125,7 +1133,8 @@ static void test_layer(int phase)
     } else {
         CHECK(host_opt_sub == DRV_OPTICS_N);    /* the schedule's first entry later */
         CHECK(host_opt_layer.route == DRV_OPTICS_403 && host_opt_layer.width == 400);   /* 648 clamped to 400 */
-        CHECK(host_opt_layer.order == (1u | 2u << 8 | 0u << 16) && host_opt_layer.gb == 0);
+        CHECK(host_opt_layer.order == (1u | 2u << 8 | 0u << 16) && host_opt_layer.gb == 150 * 256 / 100);
+        CHECK(host_opt_layer.sbv == DRV_OPTICS_ROWS && host_opt_layer.shv == 1);
         CHECK(host_opt_layer.lcached == 1);
     }
     log_flush();
@@ -1138,6 +1147,61 @@ static void test_layer(int phase)
     else
         CHECK(t && strstr(t, "layer_width = 648 out of 42..400") && strstr(t, "Halation sigma 10 px is below the layer's "
                                                                            "smallest") && strstr(t, "schedule of 4 entries"));
+    free(t);
+}
+
+/* The field's INI: [optics] layer = on without strengths - the strengths are the look's rows' (given to the driver
+ * when they change), the steps and the day's keys read, bad ones logged and the defaults taken */
+static void test_layer_rows(void)
+{
+    long n;
+    char *t;
+
+    omk_dir(LOG_DIR);
+    write_file("OMKIT.INI", "[optics]\nlayer = on\nbloom_steps = 10, 20, 30, 40, 250\nhalation_steps = 1, 2\n"
+                            "day_mean = 60, 120\nday_share = 9, 3\nday_halation = 35\nbench = 1\nbloom_tail = 95\n");
+    CHECK(cfg_load() == 1);
+    log_setup(1, OMK_LOG_INFO);
+    host_prev_ended = 1;
+    host_opt_worker_rc = 0;
+    host_opt_sub = 99;
+    host_look_rows = 0;
+    host_look_str_on = 0;
+    host_opt_str = 0xffffffffu;
+    host_opt_strs = 0;
+    memset(&host_opt_layer, 0, sizeof(host_opt_layer));
+    memset(&host_opt, 0, sizeof(host_opt));
+    optics_setup();
+    CHECK(host_opt_sub == DRV_OPTICS_L4 && host_look_rows == 1);
+    CHECK(host_opt_layer.sbv == DRV_OPTICS_ROWS && host_opt_layer.shv == DRV_OPTICS_ROWS);
+    CHECK(host_opt_layer.steps[0][0] == 10 && host_opt_layer.steps[0][3] == 40 && host_opt_layer.steps[0][4] == 200);
+    CHECK(host_opt_layer.steps[1][0] == 16 && host_opt_layer.steps[1][4] == 100);    /* not five: the default */
+    CHECK(host_opt_layer.day[0] == 60 && host_opt_layer.day[1] == 120 && host_opt_layer.day[2] == 50 &&
+          host_opt_layer.day[3] == 150 && host_opt_layer.day[4] == 40 && host_opt_layer.day[5] == 35);
+    CHECK(host_opt_layer.bench == 1 && host_opt_layer.tmix == 90 * 256 / 100);   /* the tail at most 90 % */
+    CHECK(!optics_route());
+    optics_service(1000);                   /* the look gives nothing yet: 0, 0 */
+    CHECK(host_opt_str == 0 && host_opt_strs == 1 && !optics_route());
+    host_look_str_on = 1;
+    host_look_str[0] = 3;
+    host_look_str[1] = 1;
+    optics_service(1250);
+    optics_service(1500);                   /* given once */
+    CHECK(host_opt_str == (3u | 1u << 8) && host_opt_strs == 2 && optics_route());
+    host_look_str[0] = 0;
+    host_look_str[1] = 0;
+    optics_service(1750);
+    CHECK(host_opt_str == 0 && host_opt_strs == 3 && !optics_route());
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &n);
+    CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 200"));
+    CHECK(t && strstr(t, "optics: layer: strengths 1..5 - Bloom 10 20 30 40 200%, Halation 16 25 40 63 100% of the gains; "
+                         "the bench on"));
+    CHECK(t && strstr(t, "optics: layer: a day scene (mean Y 60..120 or 5..15% at the Bloom threshold): Bloom 40%, "
+                         "Halation 35% of the gains"));
+    CHECK(t && strstr(t, "halation_steps: not five numbers") && strstr(t, "'9, 3': not two numbers"));
+    CHECK(t && strstr(t, "optics: the look's strengths now: Bloom 3, Halation 1"));
+    CHECK(t && strstr(t, "optics: the look's strengths now: Bloom 0, Halation 0 (no step in its stills)"));
     free(t);
 }
 
@@ -1172,11 +1236,11 @@ static void test_layer_sets(void)
     optics_setup();
     CHECK(host_opt_nsets == 2);
     CHECK(host_opt_layer.em == 0 && host_opt_layer.bdark == 0 && host_opt_layer.hfirst == 0 && host_opt_layer.tmix == 0);
-    CHECK(host_opt_layer.gb == 150 * 256 * 3 / 500 && host_opt_layer.gh == 200 * 256 * 3 / 500);
-    CHECK(host_opt_sets[1].gb == 150 * 256 * 5 / 500 && host_opt_sets[1].gh == 200 * 256 * 3 / 500);
+    CHECK(host_opt_layer.gb == 150 * 256 / 100 && host_opt_layer.sbv == 3 && host_opt_layer.shv == 3);
+    CHECK(host_opt_sets[1].sbv == 5 && host_opt_sets[1].shv == 3 && host_opt_sets[1].gh == 200 * 256 / 100);
     CHECK(host_opt_sets[1].em == 16 && host_opt_sets[1].tmix == 30 * 256 / 100 && host_opt_sets[1].st == 250);
     CHECK(host_opt_sets[1].bdark == 80 * 256 / 100 && host_opt_sets[1].hfirst == 0 && host_opt_sets[1].th == 225);
-    CHECK(host_opt_sets[2].gh == 3000 * 256 * 3 / 500 && host_opt_sets[2].hfirst == 1 && host_opt_sets[2].em == 0);
+    CHECK(host_opt_sets[2].gh == 3000 * 256 / 100 && host_opt_sets[2].hfirst == 1 && host_opt_sets[2].em == 0);
     CHECK(host_opt_sets[2].tmix == 0 && host_opt_sets[2].st == 0);
     optics_service(1000);                   /* the worker made, the first entry given */
     CHECK(host_opt_sub == want_sub[0] && host_opt_set == want_set[0]);
@@ -1189,9 +1253,9 @@ static void test_layer_sets(void)
     t = read_file("LOG/CORE.LOG", &n);
     CHECK(t && strstr(t, "optics: schedule of 5 entries"));
     CHECK(t && strstr(t, "'L4:Z' is not a substage") && strstr(t, "'W1:A' is not a substage"));
-    CHECK(t && strstr(t, "optics: layer settings A: Bloom 5 (threshold 200, sigma 60 + 0 at 0%, gain 150% at 5, 80% less "
-                         "on white; tail 30% of sigma 250)"));
-    CHECK(t && strstr(t, "optics: layer settings B: Halation 3") && strstr(t, "before Bloom"));
+    CHECK(t && strstr(t, "optics: layer settings A: Bloom 5, a test (threshold 200, sigma 60 + 0 at 0%, gain 150% at 5, "
+                         "80% less on white; tail 30% of sigma 250)"));
+    CHECK(t && strstr(t, "optics: layer settings B: Halation 3, a test") && strstr(t, "before Bloom"));
     CHECK(t && strstr(t, "optics: layer settings A: the source - the emission of a blown pixel as 16 whites"));
     CHECK(t && strstr(t, "schedule 3 of 5: L4 with the settings A given to the next press"));
     CHECK(t && strstr(t, "schedule 4 of 5: L4 with the settings B given"));
@@ -1218,6 +1282,8 @@ int main(int argc, char **argv)
         test_layer(atoi(argv[3]));
     else if (argc > 2 && !strcmp(argv[2], "layer_sets"))
         test_layer_sets();
+    else if (argc > 2 && !strcmp(argv[2], "layer_rows"))
+        test_layer_rows();
     else {
         test_cfg_template();
         test_log();

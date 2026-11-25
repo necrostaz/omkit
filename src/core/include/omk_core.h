@@ -63,5 +63,8 @@ int grain_look(u32 entry, s32 tile, u32 level);   /* the look owner's choice (lo
 /* optics.c: the optics layer - [optics] probe, its store for the cached read (level 2); before the modules */
 void optics_setup(void);
 void optics_service(u32 now);
+/* 1 - the optics layer is on and the stills of the look get a strength (the rows', or a test's): grain.c gives them the
+ * mask route's list even without grain */
+int optics_route(void);
 
 #endif

@@ -3553,6 +3553,13 @@ u32 drv_row_reset(u32 item)
     return 1;
 }
 
+static int rows_wanted;                     /* core: the optics layer is on (drv_look_rows), core task only */
+
+void drv_look_rows(int on)
+{
+    rows_wanted = on;
+}
+
 /* The module's strengths of entry (core task): taken unless another entry is shown, or a step is newer (its hold) */
 int drv_look_optics(u32 entry, const u8 *v)
 {
@@ -3560,6 +3567,8 @@ int drv_look_optics(u32 entry, const u8 *v)
     volatile look_ed_t *e;
     u32 st, i;
 
+    if (!rows_wanted)
+        return -3;                          /* no optics layer: the rows are not installed */
     if (!sh || !look_installed)
         return -2;
     for (i = 0; i < OMK_OPTICS_ROWS; i++)
@@ -3608,8 +3617,9 @@ int drv_look_install(int cache_inv, const char *name)
     if (look_column_put() < 0)              /* checked before anything goes in: the slot's column must be the one we know */
         return 4;
     install_editor();
-    rows_service(1);                        /* the optics rows: not needed for the look itself - without them the column
-                                               has none */
+    if (rows_wanted)
+        rows_service(1);                    /* the optics rows, with the optics layer only: not needed for the look itself -
+                                               without them the column has none */
     sh = shared();
     sh->cc_last[0] = hue_base();
     sh->cc_last[1] = 0;

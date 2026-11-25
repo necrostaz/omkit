@@ -114,7 +114,12 @@
  * the calc line; the picture's read logs its rows' mean and longest, and the time of its maps and write-backs.
  *
  * Sets of settings: a job takes the layer's settings in force when it is listed (drv_optics_set, the schedule's L4:X)
- * and keeps them in its row and record; the worker reads that set (op_cfg). */
+ * and keeps them in its row and record; the worker reads that set (op_cfg).
+ *
+ * Strengths (after card166): a job takes the look's optics rows' strengths in force when it is listed (drv_optics_strength
+ * from the core task), or its set's own (a test); both 0 - W lists no step of ours (the job as N). The worker scales the
+ * gains by the strengths' steps and by the scene's day weight (optlayer.h's ol_scene, ol_day: from the layer's Y it has
+ * read), and Bloom's by the near part's share when there is a tail (ol_tail_add adds the tail at w / (256 - w)). */
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
@@ -258,6 +263,10 @@ typedef struct {
     u32 h, type, mode, level, cpu, step;    /* mode as graindrv.c's; step: k | the list's count << 8 */
     u32 sub, job;                           /* the job's substage (DRV_OPTICS_*), its number in the crumbs */
     u32 set;                                /* the layer's settings: 0 - [optics], 1.. - drv_optics_layer_set's */
+    u32 str;                                /* the job's strengths: Bloom | Halation << 8 | 1 << 16 - a test's */
+    u32 sc_mean, sc_share, sc_day;          /* L4: the layer's mean Y, its share at the Bloom threshold (permille), the
+                                               day's weight (Q8) */
+    u32 gbe, ghe;                           /* L4: the gains used (Q8, the strength, the day and the tail in them) */
     u32 psw, sp, sp_min;                    /* at the step's entry (C); the lowest sp of the step's C code */
     u32 task, stk, stksz;                   /* the running task (its TCB): id, stack base and size; 0 - not read */
     u32 lock[2];                            /* the cross-CPU lock bytes at the entry */
@@ -324,6 +333,7 @@ typedef struct {
         u32 layer;                          /* 1 - the layer is ready (the step), so the blend hook makes it additive */
         u32 rec;                            /* the job's ring record (the step), 0 - none */
         u32 set;                            /* the layer's settings in force when it was listed */
+        u32 str;                            /* ... and its strengths (as op_rec_t's) */
     } row[ROWS];
     u32 ended[CPUS][SUBS];                  /* H3: our jobs ended, by the substage they had (each CPU its own row) */
     /* The worker: made by the core task; the request from the step, one at a time (the job task runs one job at a time) */
@@ -342,6 +352,8 @@ typedef struct {
     drv_optics_layer_cfg xcfg[DRV_OPTICS_SETS];    /* drv_optics_layer_set's (core task, before the schedule's first) */
     u32 nsets;                              /* sets 1..nsets given */
     u32 set;                                /* the set of the jobs listed from now on (core: drv_optics_set) */
+    u32 str;                                /* the look's strengths of the jobs listed from now on: Bloom | Halation << 8
+                                               (core: drv_optics_strength) */
     u32 order;                              /* py | pcb << 8 | pcr << 16 now (AUTO: the guess of the first L1 dump) */
     u32 order_auto, order_set;
     u16 lin[256];                           /* the curves (ol_luts), copied into the work buffer a job */
@@ -1413,7 +1425,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     ol_lanes_t ln;
     op_gpace_t gp;
     u32 lw = r->l_wh & 0xffff, lh = r->l_wh >> 16, lp = r->l_pitch * 4, sub = r->sub, x, yy, i, w, base, win, t, fl;
-    u32 k, t1, s0, s1, stop = 0, lc;
+    u32 k, t1, s0, s1, stop = 0, lc, sb, sh;
     volatile u32 *row;
     const volatile drv_optics_layer_cfg *cf = op_cfg(o, r->set);
 
@@ -1506,23 +1518,36 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.sh1 = r->sig[2] = ol_cpu_sigma(cf->sh & 0xffff, fl, r->width, lw);
     P.sh2 = r->sig[3] = ol_cpu_sigma(cf->sh >> 16, fl, r->width, lw);
     P.mixh = cf->mixh;
-    P.gb = cf->gb;
-    P.gh = cf->gh;
+    sb = r->str & 0xff;                     /* the job's strengths: steps of the strongest's gains */
+    sh = r->str >> 8 & 0xff;
+    P.gb = sb && sb <= 5 ? (cf->gb * cf->steps[0][sb - 1] + 50) / 100 : 0;
+    P.gh = sh && sh <= 5 ? (cf->gh * cf->steps[1][sh - 1] + 50) / 100 : 0;
     P.dark = cf->dark;
     P.hcb = cf->hcb;
     P.hcr = cf->hcr;
     P.em = cf->em;
     P.bdark = cf->bdark;
     P.hfirst = cf->hfirst;
-    P.tmix = P.gb ? cf->tmix : 0;
+    P.tmix = P.gb ? (cf->tmix > DRV_OPTICS_TAIL_MAX ? DRV_OPTICS_TAIL_MAX : cf->tmix) : 0;
     P.st = r->sig[4] = P.tmix ? ol_cpu_sigma(cf->st, fl, r->width, lw) / OL_TAIL : 0;   /* in the tail's pixels */
     if (P.st < 64)
         P.tmix = 0;                         /* a tail below 0.25 of its pixel: none (ol_gauss would do nothing) */
+    ol_scene(&L, cf->tb > 255 ? 255 : cf->tb, &s0, &s1);   /* the day's weight from the layer's Y */
+    r->sc_mean = s0;
+    r->sc_share = s1;
+    r->sc_day = ol_day(s0, s1, (const u32 *)cf->day);
+    P.gb = ol_day_gain(P.gb, r->sc_day, cf->day[4]);
+    P.gh = ol_day_gain(P.gh, r->sc_day, cf->day[5]);
+    if (P.tmix)                             /* the tail added at w / (256 - w): the near part's share in the gain */
+        P.gb = (P.gb * (256 - P.tmix) + 128) >> 8;
+    r->gbe = P.gb;
+    r->ghe = P.gh;
     mem_set(L.pb, 0, 2 * lw * lh);
     mem_set(L.ph, 0, 2 * lw * lh);
     mem_set(L.nrow, 0, lh);
     ol_word_tables(&L, &P);
-    op_bench(r, &L);
+    if (cf->bench)
+        op_bench(r, &L);
     if (cf->read && (P.gb || P.gh))
         op_frame_read(o, r, &L, &P, p);
     if (op_pace(p)) {
@@ -1560,7 +1585,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
             gp.t = t1 = drv_ticks();
             stop = ol_tail_blur(&L, P.st);
             if (!stop)
-                ol_tail_up(&L, P.tmix);
+                ol_tail_add(&L, ol_tail_factor(P.tmix));
             r->t_gt += drv_ticks_since(t1) - (p->slept - s1);
         }
     }
@@ -1676,7 +1701,7 @@ u32 drv_optics_step(u8 *h)
 {
     volatile op_t *o = op();
     volatile op_rec_t *r;
-    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, psw, sp, stk = 0, stksz = 0, mode = 0, set = 0;
+    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, psw, sp, stk = 0, stksz = 0, mode = 0, set = 0, str = 0;
     volatile u32 *c;
 
     if (!h)
@@ -1685,6 +1710,7 @@ u32 drv_optics_step(u8 *h)
         sub = o->row[i].sub;
         job = o->row[i].job;
         set = o->row[i].set;
+        str = o->row[i].str;
     }
     psw = op_psw();
     sp = op_sp();
@@ -1723,6 +1749,7 @@ u32 drv_optics_step(u8 *h)
         r->sub = sub;
         r->job = job;
         r->set = set <= o->nsets ? set : 0;
+        r->str = str;
         if (sub >= DRV_OPTICS_A) {
             c = crumb();
             r->psw = psw;
@@ -1756,13 +1783,24 @@ u32 drv_optics_step(u8 *h)
 u32 drv_optics_list(u8 *h, u32 room, u32 *out)
 {
     volatile op_t *o = op();
-    u32 i, sub, n;
+    u32 i, sub, n, str = 0, set;
+    const volatile drv_optics_layer_cfg *cf;
 
     if (!o || !h)
         return 0;
     sub = o->sub;
+    set = o->set;
     if (sub >= DRV_OPTICS_L0 && !o->layer_on)
         sub = DRV_OPTICS_N;                 /* the layer not set up (drv_optics_layer failed): no step */
+    if (sub == DRV_OPTICS_L4) {             /* the strengths: the set's own (a test), else the look's rows' */
+        cf = op_cfg(o, set);
+        str = (cf->sbv != DRV_OPTICS_ROWS ? cf->sbv : o->str & 0xff) |
+              (cf->shv != DRV_OPTICS_ROWS ? cf->shv : o->str >> 8 & 0xff) << 8;
+        if (cf->sbv != DRV_OPTICS_ROWS || cf->shv != DRV_OPTICS_ROWS)
+            str |= 1u << 16;
+        if (!(str & 0xffff))
+            sub = DRV_OPTICS_N;             /* Bloom and Halation 0: no step at all (the job as without the layer) */
+    }
     n = sub < DRV_OPTICS_L0 ? 2 : o->cfg.route == DRV_OPTICS_PAIR ? 3 : 2;   /* with the plain pass after ours */
     if (sub != DRV_OPTICS_N && room < n) {
         o->noroom++;
@@ -1779,7 +1817,8 @@ u32 drv_optics_list(u8 *h, u32 room, u32 *out)
     o->row[i].job = ++o->wl;
     o->row[i].layer = 0;
     o->row[i].rec = 0;
-    o->row[i].set = o->set;
+    o->row[i].set = set;
+    o->row[i].str = str;
     o->row[i].h = (u32)h;
     crumb()[CR_LISTED] = o->wl;
     op_crumb(o->wl, sub, P_LISTED);
@@ -2044,6 +2083,14 @@ void drv_optics_set(u32 k)
         o->set = k <= o->nsets ? k : 0;
 }
 
+void drv_optics_strength(u32 bloom, u32 halation)
+{
+    volatile op_t *o = op();
+
+    if (o)
+        o->str = (bloom > 5 ? 5 : bloom) | (halation > 5 ? 5 : halation) << 8;
+}
+
 /* The settings of a job's set (the worker; the arena block, uncached) */
 static const volatile drv_optics_layer_cfg *op_cfg(volatile op_t *o, u32 set)
 {
@@ -2278,6 +2325,10 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                    " - no window, the rest from the layer" : "");
         log_printf(OMK_LOG_INFO, "optics: job %u: picture read's time: rows' mean %u us, longest %u us; maps, write-backs and "
                    "releases %u us; ticks given away %u us", n, r->f_row_avg, r->f_row_max, r->f_maps_us, r->f_slept);
+        log_printf(OMK_LOG_INFO, "optics: job %u: strengths Bloom %u, Halation %u (%s); scene: mean Y %u, %u.%u%% at the "
+                   "threshold, day %u%%; gains Bloom %u%%, Halation %u%%", n, r->str & 0xff, r->str >> 8 & 0xff,
+                   r->str >> 16 ? "a test's" : "the look's rows", r->sc_mean, r->sc_share / 10, r->sc_share % 10,
+                   r->sc_day * 100 / 256, r->gbe * 100 / 256, r->ghe * 100 / 256);
         log_printf(OMK_LOG_INFO, "optics: job %u: calc: sources %u us, Bloom %u us (rows %u, columns %u), Halation %u us "
                    "(rows %u, columns %u), Bloom's tail %u us; the passes on %u of %u values (%u%%)", n, r->t_src, r->t_gb,
                    r->g_us[0][0], r->g_us[0][1], r->t_gh, r->g_us[1][0], r->g_us[1][1], r->t_gt, r->g_done, r->g_all,
@@ -2290,10 +2341,11 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
         if (r->pr_cread || r->pr_csums)
             log_printf(OMK_LOG_INFO, "optics: job %u: picture row through the cached view: read %u us, read and sums %u us", n,
                        r->pr_cread, r->pr_csums);
-        log_printf(r->lp_same ? OMK_LOG_INFO : OMK_LOG_WARN, "optics: job %u: bench: a box row of %u values x %u %u us; "
-                   "%u turns: plain %u us, mulu %u us, udf01 %u us (%s), udf00 + udf15 %u us", n, OP_BENCH_N, OP_BENCH_REPS,
-                   r->bx_wbuf, OP_TURNS, r->lp_plain, r->lp_mul, r->lp_udf, r->lp_same ? "the same" : "DIFFERENT",
-                   r->lp_hi);
+        if (r->lp_plain)                    /* the bench ran ([optics] bench) */
+            log_printf(r->lp_same ? OMK_LOG_INFO : OMK_LOG_WARN, "optics: job %u: bench: a box row of %u values x %u %u us; "
+                       "%u turns: plain %u us, mulu %u us, udf01 %u us (%s), udf00 + udf15 %u us", n, OP_BENCH_N,
+                       OP_BENCH_REPS, r->bx_wbuf, OP_TURNS, r->lp_plain, r->lp_mul, r->lp_udf, r->lp_same ? "the same" :
+                       "DIFFERENT", r->lp_hi);
     }
     if (r->sub != DRV_OPTICS_L1 || !r->lanes[0])
         return;

@@ -35,7 +35,7 @@
  * (omk_ispb.h; core applies the same rule to the block it gets). The log line of a preset says which it is.
  * The optics rows (API 20): Bloom and Halation, strengths 0 (off) .. 5 per preset, kept with its edits (EDITS_FORMAT 3;
  * older records: 0); a long OK on a row sets it to 0. Core keeps the chosen preset's strengths for the look's stills; the
- * effects themselves are core's (not yet on the pictures).
+ * effects themselves are core's optics layer ([optics] layer = on in OMKIT.INI; without it the rows are not shown).
  */
 #include "omk_api.h"
 #include "edits.h"

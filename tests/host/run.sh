@@ -62,6 +62,10 @@ done
 mkdir "$tmp/layer_sets"
 out=$("$BIN/test_core" "$tmp/layer_sets" layer_sets 2>&1)
 if [ "$out" = ok ]; then pass "core: optics layer settings by the press"; else fail "core: optics layer settings by the press"; echo "$out" | sed 's/^/        /'; fi
+# ... and the field's: [optics] layer = on, the strengths from the look's rows, the steps and the day's keys
+mkdir "$tmp/layer_rows"
+out=$("$BIN/test_core" "$tmp/layer_rows" layer_rows 2>&1)
+if [ "$out" = ok ]; then pass "core: optics layer by the look's rows"; else fail "core: optics layer by the look's rows"; echo "$out" | sed 's/^/        /'; fi
 
 # The test scenario (tests/host/test_shoot.c): its state machine against a simulated camera, by keys and by wifi events
 for path in keys wifi; do

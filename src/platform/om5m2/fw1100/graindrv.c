@@ -244,6 +244,8 @@ typedef struct {
      * slot now. The core task writes, W reads, under drv_lock */
     u32 active, ready, gain, filling;
     u32 route, chroma, tag;                 /* of new jobs; the core task writes, W reads under drv_lock */
+    u32 optics;                             /* 1 - with gain 0 the stills still go the mask route's list, without the
+                                               blend (DRV_GRAIN_LIST): the optics layer's step is in it (core task) */
     u32 seed;                               /* the generator's seed counter (A, any CPU: a lost step is harmless) */
     u32 freed[CPUS];                        /* H3: our textures released with the current tag */
     u32 t_job[CPUS], t_job_max[CPUS];       /* H3: the last and the longest job, W to H3, us */
@@ -529,7 +531,10 @@ static inline __attribute__((always_inline)) u32 tex_take(volatile tex_t *t, u8 
         route = t->route;
         chroma = t->chroma;
         tag = t->tag;
-        if (!t->ready || e >= DRV_GRAIN_GENS || !gain)
+        if (!gain && t->optics && route != DRV_GRAIN_GF)
+            route = DRV_GRAIN_LIST;         /* the optics layer alone: the mask route's list, no grain blended (the
+                                               camera, card129: a picture without grain) */
+        if (!t->ready || e >= DRV_GRAIN_GENS || (!gain && route != DRV_GRAIN_LIST))
             what = T_NOTREADY;
         else
             fill = 1;
@@ -626,8 +631,8 @@ static u32 tex_job(volatile tex_t *t, const u8 *h, u32 *cpu)
 
     if (*(const u32 *)(h + H_KEY) != t->key)
         return 0;
-    if (!t->gain || !drv_look_active())
-        return 0;                           /* not the look's still, or its strength is Off */
+    if ((!t->gain && !t->optics) || !drv_look_active())
+        return 0;                           /* not the look's still, or its strength is Off and no optics layer */
     *cpu = cpu_now();
     type = *(const u16 *)(h + H_TYPE);
     if (!type || type != t->type) {
@@ -1111,6 +1116,14 @@ void drv_grain_look_gain(u32 gain)
 
     if (t)
         t->gain = gain <= DRV_GRAIN_GAIN_MAX ? gain : DRV_GRAIN_GAIN_MAX;
+}
+
+void drv_grain_look_optics(u32 on)
+{
+    volatile tex_t *t = tex();
+
+    if (t)
+        t->optics = on != 0;
 }
 
 void drv_grain_route(u32 route, u32 chroma, u32 tag)

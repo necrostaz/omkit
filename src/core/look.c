@@ -174,7 +174,8 @@ int look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 count)
     }
     rc = drv_look_optics(entry, strength);
     if (rc && rc != optics_rc)              /* once per code */
-        log_printf(OMK_LOG_WARN, "look: optics rows not shown, code %d", rc);
+        log_printf(rc == -3 ? OMK_LOG_INFO : OMK_LOG_WARN, rc == -3 ? "look: optics rows off (no optics layer: [optics] "
+                   "layer)" : "look: optics rows not shown, code %d", rc);
     optics_rc = rc;
     if (!same)
         log_printf(OMK_LOG_DEBUG, "look: entry %u: bloom %u, halation %u", entry + 1, strength[OMK_OPTICS_BLOOM],

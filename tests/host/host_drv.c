@@ -908,6 +908,30 @@ void drv_optics_set(u32 k)
     host_opt_set = k;
 }
 
+/* The strengths: the look's (look_optics_now, what the test sets) and what the driver got; the rows wanted */
+u8 host_look_str[2];
+int host_look_str_on;
+u32 host_opt_str = 0xffffffffu, host_opt_strs;
+int host_look_rows;
+
+int look_optics_now(u8 *out)
+{
+    out[0] = host_look_str_on ? host_look_str[0] : 0;
+    out[1] = host_look_str_on ? host_look_str[1] : 0;
+    return host_look_str_on;
+}
+
+void drv_optics_strength(u32 bloom, u32 halation)
+{
+    host_opt_str = bloom | halation << 8;
+    host_opt_strs++;
+}
+
+void drv_look_rows(int on)
+{
+    host_look_rows = on;
+}
+
 u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf)
 {
     *wsize = 0;

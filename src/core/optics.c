@@ -48,10 +48,20 @@
  * debug service's RAM log is the record. After the last entry the jobs keep it. A hang or a reset on a press is the
  * one before it or its own: the log says which entry each press got.
  *
- * The layer (feature/optics-layer, Bloom and Halation; opticsdrv.c's header, optlayer.h): on when [optics] bloom or
- * halation is 1..5 or the schedule names a layer substage (L0..L4); the jobs then get L4 (without a schedule). Its
- * settings, all in [optics]:
- *   bloom, halation           0..5, the strengths (0 - off)
+ * The layer (feature/optics-layer, Bloom and Halation; opticsdrv.c's header, optlayer.h): on with [optics] layer = on,
+ * a strength key (bloom, halation: a test) or a layer substage (L0..L4) in the schedule; the jobs then get L4 (without a
+ * schedule). The strengths of a job are the look's optics rows' (the module's preset: look_optics_now, given to the
+ * driver when they change), both 0 - no step at all; the gains below are those of the strongest step. Its settings, all
+ * in [optics]:
+ *   layer                     on - the layer (and the look's optics rows: without the layer they are not installed)
+ *   bloom, halation           0..5: strengths of a test in place of the rows' (in a set: that set's presses)
+ *   bloom_steps, halation_steps    five percents of the gains, the strengths 1..5 (25, 35, 50, 71, 100 and 16, 25, 40,
+ *                                  63, 100: about x1.4 and x1.6 a step, the host model's sets A .. D of card166)
+ *   day_mean, day_share       the day's weight from the layer's Y: its mean from .. to (codes; 80, 110) and the share of
+ *                             it at the Bloom threshold or above from .. to (percent; 5, 15) - the larger of the two
+ *   day_bloom, day_halation   the gains on a day scene, percent of the night's (40, 6): a blown pixel there is a bright
+ *                             surface (metal, a window), not a lamp many times brighter than white (100, 100 - off)
+ *   bench                     1 - the CPU bench of card164/165 in every job (0)
  *   route                     pair (the firmware's Soft Focus steps, 0x401 + 0x402) or 403 (our last step, 0x403)
  *   layer_width               the small layer's width, 42..400 (324: a cell of 16 pixels of 5184)
  *   layer_bytes               auto, or the bytes of Y, Cb, Cr in a layer word as three digits (012: Y 0, Cb 1, Cr 2)
@@ -90,6 +100,7 @@
 #include "omk_core.h"
 #include "omk_debug.h"
 #include "omk_log.h"
+#include "omk_look.h"
 #include "omk_store.h"
 
 #define OPT_STORE "OPTICS"
@@ -110,6 +121,9 @@
 #define OPT_HAL_THRESHOLD 225
 #define OPT_BLOOM_GAIN 150
 #define OPT_HAL_GAIN 200
+/* The strengths 1..5 as percents of the gains (the gains: of the strongest step). Geometric steps: the host model's sets
+ * of card166 - A (Bloom 250, Halation 400) at 1, B .. C at 3, D (1000, 2500) at 5 (docs of the module) */
+static const u8 opt_steps[2][5] = {{25, 35, 50, 71, 100}, {16, 25, 40, 63, 100}};
 
 /* The cached read's state on the card (store OPTICS, key 1) */
 typedef struct {
@@ -143,7 +157,10 @@ static struct {
     u32 cached, same;                       /* the driver's counts already in b */
     u32 retry_ms;
     u32 listed, ended;                      /* the driver's counts already told to the debug service */
-} op;
+    int layer;                              /* the layer is set up */
+    int test_str;                           /* a set gives a test's strength above 0 (in place of the rows') */
+    u32 str;                                /* the look's strengths given to the driver: Bloom | Halation << 8, or ~0 */
+} op = {.str = ~0u};
 
 static struct {
     bis_state_t b;
@@ -406,14 +423,80 @@ static int opt_int(const char *key, int def, int lo, int hi)
     return opt_sint("optics", key, def, lo, hi);
 }
 
+/* "a, b" (two numbers 0..hi, a below b) into *a, *b; else (absent or bad: logged) the defaults */
+static void opt_pair(const char *t, u32 *a, u32 *b, u32 da, u32 db, u32 hi)
+{
+    u32 v[2], n = 0, x, d;
+    const char *t0 = t;
+
+    *a = da;
+    *b = db;
+    while (t && *t && n < 2) {
+        while (*t == ',' || *t == ' ' || *t == '\t')
+            t++;
+        for (x = d = 0; *t >= '0' && *t <= '9'; t++, d++)
+            x = x < 100000 ? x * 10 + (u32)(*t - '0') : x;
+        if (!d)
+            break;
+        v[n++] = x;
+    }
+    if (!t0)
+        return;
+    if (n != 2 || *t || v[0] >= v[1] || v[1] > hi) {
+        log_printf(OMK_LOG_WARN, "optics: '%s': not two numbers 0..%u, the first below the second; %u, %u taken", t0, hi,
+                   da, db);
+        return;
+    }
+    *a = v[0];
+    *b = v[1];
+}
+
 /* The keys of a set of the layer's settings (sec: [optics] or [optics.X]) that the worker takes a job: the strengths,
  * thresholds, Gaussians, gains, colour, the darkness weights, the source, the tail, the reads; logged as `name` */
 static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *name)
 {
-    u32 sb, sh, gb, gh, tail, ts;
+    u32 sb, sh, gb, gh, tail, ts, i, k;
+    const char *t;
 
-    sb = (u32)opt_sint(sec, "bloom", 0, 0, 5);
-    sh = (u32)opt_sint(sec, "halation", 0, 0, 5);
+    /* a strength key of the set (or of [optics]): a test's strength in place of the look's rows */
+    c->sbv = cfg_str(sec, "bloom", 0) || cfg_str("optics", "bloom", 0) ? (u32)opt_sint(sec, "bloom", 0, 0, 5) :
+             DRV_OPTICS_ROWS;
+    c->shv = cfg_str(sec, "halation", 0) || cfg_str("optics", "halation", 0) ? (u32)opt_sint(sec, "halation", 0, 0, 5) :
+             DRV_OPTICS_ROWS;
+    sb = c->sbv;
+    sh = c->shv;
+    if ((sb != DRV_OPTICS_ROWS && sb) || (sh != DRV_OPTICS_ROWS && sh))
+        op.test_str = 1;
+    for (k = 0; k < 2; k++) {               /* bloom_steps, halation_steps: five percents 0..200, else the defaults */
+        const char *key = k ? "halation_steps" : "bloom_steps";
+        u32 v[5], n = 0, x, d;
+
+        t = cfg_str(cfg_str(sec, key, 0) ? sec : "optics", key, 0);
+        while (t && *t && n < 5) {
+            while (*t == ',' || *t == ' ' || *t == '\t')
+                t++;
+            for (x = d = 0; *t >= '0' && *t <= '9'; t++, d++)
+                x = x < 1000 ? x * 10 + (u32)(*t - '0') : x;
+            if (!d)
+                break;
+            v[n++] = x;
+        }
+        if (t && (n != 5 || *t)) {
+            log_printf(OMK_LOG_WARN, "optics: %s: not five numbers 0..200, the default taken", key);
+            t = 0;
+        }
+        for (i = 0; i < 5; i++)
+            c->steps[k][i] = t ? (v[i] > 200 ? 200 : v[i]) : opt_steps[k][i];
+    }
+    t = cfg_str(cfg_str(sec, "day_mean", 0) ? sec : "optics", "day_mean", 0);
+    opt_pair(t, &c->day[0], &c->day[1], 80, 110, 255);
+    t = cfg_str(cfg_str(sec, "day_share", 0) ? sec : "optics", "day_share", 0);
+    opt_pair(t, &c->day[2], &c->day[3], 5, 15, 100);
+    c->day[2] *= 10;                        /* permille */
+    c->day[3] *= 10;
+    c->day[4] = (u32)opt_sint(sec, "day_bloom", 40, 0, 100);
+    c->day[5] = (u32)opt_sint(sec, "day_halation", 6, 0, 100);
+    c->bench = (u32)opt_sint(sec, "bench", 0, 0, 1);
     c->tb = (u32)opt_sint(sec, "bloom_threshold", OPT_BLOOM_THRESHOLD, 0, 254);
     c->th = (u32)opt_sint(sec, "halation_threshold", OPT_HAL_THRESHOLD, 0, 254);
     c->sb = (u32)opt_sint(sec, "bloom_sigma", 60, 0, 1000) | (u32)opt_sint(sec, "bloom_sigma2", 0, 0, 1000) << 16;
@@ -422,15 +505,15 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     c->mixh = (u32)opt_sint(sec, "halation_mix", 0, 0, 100) * 256 / 100;
     gb = (u32)opt_sint(sec, "bloom_gain", OPT_BLOOM_GAIN, 0, 5000);
     gh = (u32)opt_sint(sec, "halation_gain", OPT_HAL_GAIN, 0, 5000);
-    c->gb = gb * 256 * sb / 500;
-    c->gh = gh * 256 * sh / 500;
+    c->gb = gb * 256 / 100;                 /* the strongest step's; a job's strength scales it (steps) */
+    c->gh = gh * 256 / 100;
     c->hcb = opt_sint(sec, "halation_cb", -40, -200, 200) * 256 / 100;
     c->hcr = opt_sint(sec, "halation_cr", 70, -200, 200) * 256 / 100;
     c->dark = (u32)opt_sint(sec, "halation_dark", 70, 0, 100) * 256 / 100;
     c->em = (u32)opt_sint(sec, "emission", OPT_EMISSION, 0, 64);
     c->bdark = (u32)opt_sint(sec, "bloom_dark", OPT_BLOOM_DARK, 0, 100) * 256 / 100;
     c->hfirst = (u32)opt_sint(sec, "halation_first", 1, 0, 1);
-    tail = (u32)opt_sint(sec, "bloom_tail", 0, 0, 100);
+    tail = (u32)opt_sint(sec, "bloom_tail", 0, 0, (DRV_OPTICS_TAIL_MAX * 100 + 255) / 256);   /* 90 % */
     ts = (u32)opt_sint(sec, "bloom_tail_sigma", 300, 0, 1000);
     c->tmix = ts ? tail * 256 / 100 : 0;
     c->st = c->tmix ? ts : 0;
@@ -438,12 +521,23 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     c->read_us = (u32)opt_sint(sec, "read_ms", 100, 0, 250) * 1000;
     c->cached = (u32)opt_sint(sec, "read_cached", 0, 0, 1);
     c->lcached = (u32)opt_sint(sec, "layer_cached", 0, 0, 1);
-    log_printf(OMK_LOG_INFO, "optics: layer%s: Bloom %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, %u%% less on "
-               "white; tail %u%% of sigma %u)", name, sb, c->tb, c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, gb,
-               (c->bdark * 100 + 128) / 256, (c->tmix * 100 + 128) / 256, c->st);
-    log_printf(OMK_LOG_INFO, "optics: layer%s: Halation %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb %d%% "
-               "Cr %d%%, dark %u%%, %s)", name, sh, c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256, gh,
-               c->hcb * 100 / 256, c->hcr * 100 / 256, c->dark * 100 / 256, c->hfirst ? "before Bloom" : "after Bloom");
+    log_printf(OMK_LOG_INFO, "optics: layer%s: Bloom %s (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, %u%% less on "
+               "white; tail %u%% of sigma %u)", name, sb == DRV_OPTICS_ROWS ? "by the look's rows" : sb == 0 ? "0, a test" :
+               sb == 1 ? "1, a test" : sb == 2 ? "2, a test" : sb == 3 ? "3, a test" : sb == 4 ? "4, a test" : "5, a test",
+               c->tb, c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, gb, (c->bdark * 100 + 128) / 256,
+               (c->tmix * 100 + 128) / 256, c->st);
+    log_printf(OMK_LOG_INFO, "optics: layer%s: Halation %s (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb "
+               "%d%% Cr %d%%, dark %u%%, %s)", name, sh == DRV_OPTICS_ROWS ? "by the look's rows" : sh == 0 ? "0, a test" :
+               sh == 1 ? "1, a test" : sh == 2 ? "2, a test" : sh == 3 ? "3, a test" : sh == 4 ? "4, a test" : "5, a test",
+               c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256, gh, c->hcb * 100 / 256, c->hcr * 100 / 256,
+               c->dark * 100 / 256, c->hfirst ? "before Bloom" : "after Bloom");
+    log_printf(OMK_LOG_INFO, "optics: layer%s: strengths 1..5 - Bloom %u %u %u %u %u%%, Halation %u %u %u %u %u%% of the "
+               "gains%s", name, c->steps[0][0], c->steps[0][1], c->steps[0][2], c->steps[0][3], c->steps[0][4],
+               c->steps[1][0], c->steps[1][1], c->steps[1][2], c->steps[1][3], c->steps[1][4],
+               c->bench ? "; the bench on" : "");
+    log_printf(OMK_LOG_INFO, "optics: layer%s: a day scene (mean Y %u..%u or %u..%u%% at the Bloom threshold): Bloom %u%%, "
+               "Halation %u%% of the gains", name, c->day[0], c->day[1], c->day[2] / 10, c->day[3] / 10, c->day[4],
+               c->day[5]);
     if (c->em)
         log_printf(OMK_LOG_INFO, "optics: layer%s: the source - the emission of a blown pixel as %u whites over the "
                    "threshold; the picture read %s, %u ms", name, c->em, c->read ? "on" : "off", c->read_us / 1000);
@@ -461,7 +555,7 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
 
     sb = (u32)opt_int("bloom", 0, 0, 5);
     sh = (u32)opt_int("halation", 0, 0, 5);
-    for (on = sb || sh, i = 0; schedule[i] && !on; i++)
+    for (on = sb || sh || cfg_bool("optics", "layer", 0), i = 0; schedule[i] && !on; i++)
         on = (schedule[i] == 'L' || schedule[i] == 'l') && schedule[i + 1] >= '0' && schedule[i + 1] <= '4' &&
              (!i || schedule[i - 1] == ',' || schedule[i - 1] == ' ');
     if (!on)
@@ -592,6 +686,8 @@ void optics_setup(void)
                 return;
         } else {
             layer_sets(&lc);
+            op.layer = 1;
+            drv_look_rows(1);               /* the look's optics rows: only with the layer */
             drv_optics_layer_floor(5184, &ws, &wb);
             log_printf(OMK_LOG_INFO, "optics: layer set up: the size hook in, the worker's buffer %u bytes at %08x; the "
                        "CPU kernels (the extension unit's multiplies, the read's loops) checked against plain C", ws, wb);
@@ -778,6 +874,27 @@ static void opt_arm(const drv_optics_info *st, u32 now, int busy)
     drv_optics_arm();
 }
 
+/* The look's strengths (its owner's preset, the optics rows) to the driver when they change: the next jobs take them */
+static void opt_strength(void)
+{
+    u8 v[OMK_OPTICS_ROWS];
+    u32 s;
+
+    look_optics_now(v);
+    s = v[OMK_OPTICS_BLOOM] | (u32)v[OMK_OPTICS_HALATION] << 8;
+    if (s == op.str)
+        return;
+    op.str = s;
+    drv_optics_strength(v[OMK_OPTICS_BLOOM], v[OMK_OPTICS_HALATION]);
+    log_printf(OMK_LOG_INFO, "optics: the look's strengths now: Bloom %u, Halation %u%s", v[OMK_OPTICS_BLOOM],
+               v[OMK_OPTICS_HALATION], s ? "" : " (no step in its stills)");
+}
+
+int optics_route(void)
+{
+    return op.layer && ((op.str != ~0u && op.str) || op.test_str);
+}
+
 void optics_service(u32 now)
 {
     drv_optics_info st;
@@ -786,6 +903,8 @@ void optics_service(u32 now)
 
     if (!op.on)
         return;
+    if (op.layer)
+        opt_strength();
     drv_optics_beat(now);
     drv_optics_service(&st);
     for (ended = k = 0; k < DRV_OPTICS_SUBS; k++)

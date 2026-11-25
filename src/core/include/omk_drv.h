@@ -170,6 +170,9 @@ int drv_look_grain(u32 entry, s32 tile, u32 level);
  * 0..OMK_OPTICS_MAX) to show; another entry than the UI shows: dropped (0). 0, -1 bad, -2 the rows are not available
  * (not installed on this firmware). Core task */
 int drv_look_optics(u32 entry, const u8 *strength);
+/* The optics rows wanted (core task, before the look is installed): only with the optics layer on; without it they are
+ * not installed at all and drv_look_optics answers -3 */
+void drv_look_rows(int on);
 int drv_look_picture_size(u32 pic, u32 *w, u32 *h);
 int drv_look_picture(u32 pic, u32 w, u32 h, const u8 *pixels);
 /* The EXIF UserComment of the following pictures (S+0xf7c, written in the shooting parameter reader's filter): text up to
@@ -222,6 +225,9 @@ void drv_grain_service(u32 now);
 int drv_grain_slot_begin(u32 *gen);
 void drv_grain_slot_ready(u32 gen, const u8 *src, u32 side, u32 mean, const char *name);
 void drv_grain_look_gain(u32 gain);
+/* The optics layer without grain (core task): with gain 0 and on 1 the look's stills still go the mask route's work list,
+ * as DRV_GRAIN_LIST (no grain blended), so that the layer's step is in it */
+void drv_grain_look_optics(u32 on);
 /* The route of the next stills (core 1.21): DRV_GRAIN_GF - the grain film's work list (texture blend on the development,
  * stage 0x100); DRV_GRAIN_LIST - the monochrome profile's list (key 12: mask development 0x900, development 0x901) with the
  * texture built but no blend; DRV_GRAIN_MASK - that list, the texture blended on 0x901 with the mask as its weight. chroma:
@@ -294,8 +300,22 @@ typedef struct {
     u32 bdark;                              /* Bloom by darkness, Q8 */
     u32 hfirst;                             /* 1 - Halation's code from the place's own light, Bloom after it */
     u32 st;                                 /* Bloom's tail: sigma, pixels of the picture (0 - none) */
-    u32 tmix;                               /* its weight, Q8 (0 - none) */
+    u32 tmix;                               /* its weight, Q8 (0 - none; at most DRV_OPTICS_TAIL_MAX) */
+    /* The strengths (feature/optics-layer, after card166): a job's Bloom and Halation strengths 0..5 are the look's
+     * optics rows' (drv_optics_strength) unless the set gives its own (a test: sbv, shv 0..5; DRV_OPTICS_ROWS - the
+     * rows'). Strength k scales the gains gb, gh (those of the strongest step) by steps[0 Bloom, 1 Halation][k - 1]
+     * percent; both 0 - the job gets no step at all */
+    u32 sbv, shv;
+    u32 steps[2][5];
+    /* The scene's darkness (a night's lamp stands for many whites, a day's blown metal or window for few): from the layer's
+     * Y, its mean and the share of its pixels at the Bloom threshold or above; the day's weight 0..256 grows from 0 at
+     * day[0] to 256 at day[1] (mean, codes) or at day[2] .. day[3] (share, permille) - the larger of the two; the gains
+     * of a day scene are day[4] (Bloom), day[5] (Halation) percent of the night's. day[4] = day[5] = 100 - off */
+    u32 day[6];
+    u32 bench;                              /* 1 - the bench of card164/165 in every L4 job (CPU time, a test) */
 } drv_optics_layer_cfg;
+#define DRV_OPTICS_ROWS 0xff
+#define DRV_OPTICS_TAIL_MAX 230             /* 90 %: the near part keeps 10 % (its share divides the tail, Q8) */
 int drv_optics_layer(const drv_optics_layer_cfg *c);
 /* Further sets of the layer's settings, 1..DRV_OPTICS_SETS (core task, after drv_optics_layer): a job takes the set in
  * force when it is listed (drv_optics_set, between presses, as drv_optics_sub); the route, the width, the bytes and the
@@ -303,6 +323,9 @@ int drv_optics_layer(const drv_optics_layer_cfg *c);
 #define DRV_OPTICS_SETS 6
 int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c);
 void drv_optics_set(u32 k);                 /* 0 - the first set ([optics]), 1..DRV_OPTICS_SETS - the further ones */
+/* The look's optics rows' strengths of the chosen entry (core task, when they change): Bloom, Halation 0..5. A job takes
+ * those in force when it is listed (with its set, as drv_optics_set) */
+void drv_optics_strength(u32 bloom, u32 halation);
 /* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize
  * the worker's buffer, *wbuf its address (the cached one) */
 u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf);

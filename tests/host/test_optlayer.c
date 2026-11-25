@@ -669,14 +669,47 @@ static void words_later(void)
     check((ol_word_of(&o, &p, 2000, 300, 20) >> 16 & 0xff) < (w2 >> 16 & 0xff), "Bloom first: the colour fades");
 }
 
-/* Bloom's tail: the reduction and the enlargement keep the light's sum and a flat plane; mixed in at weight w, the light
- * reaches farther than the main Gaussian's; its spread (second moment) is the tail's sigma (x OL_TAIL) and the
- * reduction's and enlargement's own */
+/* The first tail's mix (8998668): pb = ((256 - w) pb + w T + 128) >> 8 - what ol_tail_add with Bloom's gain scaled by
+ * (256 - w) / 256 stands for */
+static void tail_mix_ref(ol_t *o, u32 w)
+{
+    u32 y, jy = 0, qy = 0, j, tn = (o->lw + OL_TAIL - 1) / OL_TAIL, iw = 256 - w, a, b, c, q, t, x;
+    u32 v[128];
+    const u16 *r0, *r1;
+    u16 *row;
+
+    for (y = 0; y < o->lh; y++) {
+        row = o->pb + y * o->lw;
+        r0 = o->pt + (qy < 2 ? (jy ? jy - 1 : 0) : jy) * o->tw;
+        r1 = o->pt + (qy < 2 ? jy : (jy + 1 < o->th ? jy + 1 : jy)) * o->tw;
+        for (j = 0; j < tn; j++)
+            v[j] = qy == 0 ? 3 * r0[j] + 5 * r1[j] : qy == 1 ? r0[j] + 7 * r1[j] : qy == 2 ? 7 * r0[j] + r1[j] :
+                   5 * r0[j] + 3 * r1[j];
+        for (j = 0, a = v[0]; j < tn; j++, a = b) {
+            b = v[j];
+            c = j + 1 < tn ? v[j + 1] : b;
+            for (q = 0; q < 4 && (x = 4 * j + q) < o->lw; q++) {
+                t = q == 0 ? 3 * a + 5 * b : q == 1 ? a + 7 * b : q == 2 ? 7 * b + c : 5 * b + 3 * c;
+                row[x] = (u16)((row[x] * iw + ((t + 32) >> 6) * w + 128) >> 8);
+            }
+        }
+        if (++qy == OL_TAIL) {
+            qy = 0;
+            jy++;
+        }
+    }
+}
+
+/* Bloom's tail: the reduction and the enlargement keep the light's sum and a flat plane; added at w / (256 - w), the
+ * light reaches farther than the main Gaussian's; its spread (second moment) is the tail's sigma (x OL_TAIL) and the
+ * reduction's and enlargement's own; with Bloom's gain scaled by (256 - w) / 256 the light is the first version's mix
+ * (within the rounding); a row the tail does not reach is left as it is */
 static void tail(void)
 {
     ol_t o;
-    u32 i, x, y, n, lw = 324, lh = 243, far0, far1;
+    u32 i, x, y, n, lw = 324, lh = 243, far0, far1, w, k, dmax = 0, same;
     double s0, s1, m, v, d;
+    static u16 keep[324 * 243], mixed[324 * 243];
 
     layout(&o, lw, lh);
     n = lw * lh;
@@ -685,34 +718,63 @@ static void tail(void)
     ol_tail_down(&o);
     for (i = 0, x = 1; i < o.tw * o.th; i++)
         x &= o.pt[i] == 1000;
-    check(o.tw == 81 && o.th == 61 && x, "tail: a flat plane's reduction flat");
-    ol_tail_up(&o, 256);
+    check(o.tw == 82 && o.th == 61 && x, "tail: an even plane (81 cells + a copy), a flat plane's reduction flat");
+    ol_tail_add(&o, ol_tail_factor(128));
     for (i = 0, x = 1; i < n; i++)
-        x &= o.pb[i] == 1000;
-    check(x, "tail: a flat plane stays flat");
+        x &= o.pb[i] == 2000;
+    check(x, "tail: a flat plane stays flat (G + T at w 1/2)");
     memset(o.pb, 0, 2 * n);                 /* a light of 3 x 3 in the middle */
     for (y = 120; y < 123; y++)
         for (x = 160; x < 163; x++)
             o.pb[y * lw + x] = 4000;
-    for (i = 0, s0 = 0; i < n; i++)
-        s0 += o.pb[i];
     ol_tail_down(&o);
     ol_gauss(&o, o.pb, 3 * 256);            /* the main Gaussian: 3 layer pixels */
     far0 = o.pb[121 * lw + 161 + 40];
     o.pace = 0;
     ol_tail_blur(&o, 5 * 256);              /* 5 tail pixels: 20 layer pixels */
-    ol_tail_up(&o, 128);
+    memcpy(keep, o.pb, 2 * n);
+    memcpy(mixed, o.pt, 2 * o.tw * o.th);
+    ol_tail_add(&o, ol_tail_factor(128));
     far1 = o.pb[121 * lw + 161 + 40];
     check(far0 == 0 && far1 > 0, "tail: the light reaches farther");
-    memset(o.pb, 0, 2 * n);                 /* the tail alone (w 256): its sum and spread */
+    for (w = 26; w <= 230; w += 51) {        /* against the first version's mix, Bloom's gain scaled */
+        memcpy(o.pb, keep, 2 * n);
+        memcpy(o.pt, mixed, 2 * o.tw * o.th);
+        tail_mix_ref(&o, w);
+        for (i = 0; i < n; i++)
+            o.pc[i] = o.pb[i];
+        memcpy(o.pb, keep, 2 * n);
+        ol_tail_add(&o, ol_tail_factor(w));
+        for (i = 0; i < n; i++) {
+            k = (o.pb[i] * (256 - w) + 128) >> 8;
+            d = (double)k - o.pc[i];
+            if (d < 0)
+                d = -d;
+            if (d > dmax)
+                dmax = (u32)d;
+        }
+        memcpy(o.pt, mixed, 2 * o.tw * o.th);   /* ol_tail_add scaled it */
+    }
+    if (verbose)
+        printf("tail: against the first version's mix (w 10..90 %%): at most %u of %u apart\n", dmax, OL_ONE);
+    check(dmax <= 2, "tail: the first version's light within the rounding of the gain's scaling");
+    memset(o.pb, 0, 2 * n);                 /* a row the tail does not reach: as it is */
+    o.pb[3] = 77;
+    memset(o.pt, 0, 2 * o.tw * o.th);
+    ol_tail_add(&o, 256);
+    for (i = 0, same = o.pb[3] == 77; i < n; i++)
+        same &= i == 3 || !o.pb[i];
+    check(same, "tail: no tail - nothing changed");
+    memset(o.pb, 0, 2 * n);                 /* the tail alone (G 0, f 1): its sum and spread */
     for (y = 120; y < 124; y++)
         for (x = 160; x < 164; x++)
             o.pb[y * lw + x] = 4000;
     for (i = 0, s0 = 0; i < n; i++)
         s0 += o.pb[i];
     ol_tail_down(&o);
+    memset(o.pb, 0, 2 * n);
     ol_tail_blur(&o, 5 * 256);
-    ol_tail_up(&o, 256);
+    ol_tail_add(&o, 256);
     for (i = 0, s1 = 0, m = 0; i < n; i++) {
         s1 += o.pb[i];
         m += (double)o.pb[i] * (i % lw);
@@ -730,6 +792,28 @@ static void tail(void)
         printf("tail: variance %.1f layer pixels^2 (want 400 of the tail's Gaussian + ~2.7 of the bilinear enlargement)\n",
                v);
     check(near(v, 402.7, 0.03), "tail: its sigma the one asked for (x OL_TAIL), plus the enlargement's");
+    check(ol_tail_factor(0) == 0 && ol_tail_factor(128) == 256 && ol_tail_factor(230) == 2265, "tail: its factor");
+}
+
+/* The scene's darkness: the layer's mean Y and its share at a code, the day's weight and the gains it scales */
+static void scene(void)
+{
+    ol_t o;
+    u32 i, mean, share, d[4] = {80, 110, 50, 150};
+
+    layout(&o, 324, 243);
+    for (i = 0; i < 324 * 243; i++)
+        o.y[i] = 50;
+    ol_scene(&o, 200, &mean, &share);
+    check(mean == 50 && share == 0, "scene: a dark flat layer");
+    for (i = 0; i < 324 * 243; i++)
+        o.y[i] = i % 324 < 162 ? 255 : 51;
+    ol_scene(&o, 200, &mean, &share);
+    check(mean == 153 && share == 500, "scene: half blown");
+    check(ol_day(50, 0, d) == 0 && ol_day(153, 500, d) == 256, "day: night 0, day 256");
+    check(ol_day(95, 0, d) == 128 && ol_day(0, 100, d) == 128 && ol_day(95, 120, d) == 179, "day: the ramps, the larger");
+    check(ol_day_gain(1000, 0, 20) == 1000 && ol_day_gain(1000, 256, 20) == 199 && ol_day_gain(1000, 128, 50) == 750 &&
+          ol_day_gain(1000, 256, 100) == 1000, "day: the gains");
 }
 
 int main(int argc, char **argv)
@@ -749,6 +833,7 @@ int main(int argc, char **argv)
     emission();
     words_later();
     tail();
+    scene();
     if (!failed)
         printf("ok\n");
     return failed;

@@ -111,11 +111,12 @@ static struct {
     u32 cap;                                /* the slot's size: the largest tile */
     s32 want, loaded, failed;               /* the tile chosen, the one in the slot (-1 none), one that did not load */
     u32 level, gain, large, look;
+    u32 optics;                             /* the optics layer's step wanted on stills without grain (given to the driver) */
     u32 changed_ms, retry_ms;
     u32 entry;
     u32 unready;                            /* the slot is still marked ready with a tile no longer chosen (a fill was
                                                reading it when the choice changed): mark it at the next service */
-} gl = {0, 0, 0, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0};
+} gl = {0, 0, 0, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 static u32 rd16(const u8 *p)
 {
@@ -305,11 +306,20 @@ static int grn_load(u32 k, u32 *ms)
 /* The gain the look's stills get now, and the allocator's layout: to the driver when they change */
 static void gl_publish(void)
 {
-    u32 gain = gl.want >= 0 && gl.level ? grn[gl.want].gain[gl.level] : 0, large = gl.look && gain;
+    u32 gain = gl.want >= 0 && gl.level ? grn[gl.want].gain[gl.level] : 0;
+    /* the optics layer on a still without grain: the mask route's list without the blend (its step is in that list) -
+     * a tile is still needed (the list's texture is built, not blended) */
+    u32 opt = !gain && gl.want >= 0 && optics_route(), large = gl.look && (gain || opt);
 
     if (gain != gl.gain) {
         gl.gain = gain;
         drv_grain_look_gain(gain);
+    }
+    if (opt != gl.optics) {
+        gl.optics = opt;
+        drv_grain_look_optics(opt);
+        log_printf(OMK_LOG_INFO, "grain: %s", opt ? "the look's stills without grain take the mask route's list for the optics "
+                   "layer (no grain blended)" : "no optics layer on the stills without grain");
     }
     if (large != gl.large) {
         gl.large = large;
