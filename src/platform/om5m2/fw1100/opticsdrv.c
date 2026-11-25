@@ -110,7 +110,11 @@
  * ranges left to work on), the layer written; one row of the picture timed alone (read; read with the sums; through the
  * cached view too with read_cached) and a bench (a box row on the stack, in the work buffer, in core's memory; a loop
  * with and without a multiplication). Between the parts and the Gaussians' passes the worker gives the CPU away when
- * OPT_YIELD_US passed (op_pace), and stops there if asked. */
+ * OPT_YIELD_US passed (op_pace), and stops there if asked. Bloom's tail (optlayer.h's ol_tail_*) has its own time in
+ * the calc line; the picture's read logs its rows' mean and longest, and the time of its maps and write-backs.
+ *
+ * Sets of settings: a job takes the layer's settings in force when it is listed (drv_optics_set, the schedule's L4:X)
+ * and keeps them in its row and record; the worker reads that set (op_cfg). */
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
@@ -253,6 +257,7 @@ typedef struct {
     u32 shot;                               /* the look's grain shot (graindrv.c's ring), 0 - not found */
     u32 h, type, mode, level, cpu, step;    /* mode as graindrv.c's; step: k | the list's count << 8 */
     u32 sub, job;                           /* the job's substage (DRV_OPTICS_*), its number in the crumbs */
+    u32 set;                                /* the layer's settings: 0 - [optics], 1.. - drv_optics_layer_set's */
     u32 psw, sp, sp_min;                    /* at the step's entry (C); the lowest sp of the step's C code */
     u32 task, stk, stksz;                   /* the running task (its TCB): id, stack base and size; 0 - not read */
     u32 lock[2];                            /* the cross-CPU lock bytes at the entry */
@@ -283,6 +288,7 @@ typedef struct {
     u32 t_lread, t_calc, t_lwrite;          /* the worker: the layer read, the sources and Gaussians, the layer written */
     u32 t_src, t_gb, t_gh;                  /* L4, us without the ticks given away: the sources, Bloom's and Halation's
                                                Gaussians */
+    u32 t_gt;                               /* ... Bloom's tail (its reduction, Gaussian, enlargement and mix) */
     u32 g_us[2][2];                         /* ... the Gaussians' row and column passes: [Bloom, Halation][OL_ROWS, OL_COLS] */
     u32 g_done, g_all;                      /* values the passes worked on (the rows' ranges), of the whole planes' */
     u32 pr_read, pr_sums, pr_cread, pr_csums;   /* one row of the picture, us: read, read with the sums; the same through
@@ -292,8 +298,12 @@ typedef struct {
     u32 lp_plain, lp_mul, lp_udf, lp_hi;    /* loops of OP_TURNS turns, us: plain, mulu, udf01, udf00 + udf15 */
     u32 lp_same;                            /* 1 - the loops of mulu and udf01 gave the same */
     u32 lcached;                            /* 1 - the layer read and written through the window's cached view */
-    u32 sig[4];                             /* the Gaussians, layer pixels Q8: Bloom 1, 2, Halation 1, 2 */
+    u32 sig[5];                             /* the Gaussians, layer pixels Q8: Bloom 1, 2, Halation 1, 2; the tail's in
+                                               its own plane's pixels */
     u32 f_rows, f_passes, f_us, f_cells, f_maps, f_err;   /* the picture's read: rows, passes, us, rows of cells reached */
+    u32 f_row_max, f_row_avg, f_maps_us, f_slept;   /* ... its longest row and the rows' running mean (us, with what
+                                               the CPU did meanwhile), the maps, write-backs and releases, the ticks
+                                               given away */
     u32 lanes[1 + 4 * OL_LANES];            /* L1: ol_lanes_t */
     u32 blend_set;                          /* the blend hook made the blend additive (any CPU; after the report: the
                                                blend's pass comes after the step - the service's count is the one logged) */
@@ -313,6 +323,7 @@ typedef struct {
         u32 h, sub, job;                    /* h 0 - free: W takes it (CPU 0), H3 frees it (any CPU, h last) */
         u32 layer;                          /* 1 - the layer is ready (the step), so the blend hook makes it additive */
         u32 rec;                            /* the job's ring record (the step), 0 - none */
+        u32 set;                            /* the layer's settings in force when it was listed */
     } row[ROWS];
     u32 ended[CPUS][SUBS];                  /* H3: our jobs ended, by the substage they had (each CPU its own row) */
     /* The worker: made by the core task; the request from the step, one at a time (the job task runs one job at a time) */
@@ -327,7 +338,10 @@ typedef struct {
     op_rec_t test;                          /* drv_optics_worker_test's request */
     /* The layer (drv_optics_layer, core task, before any list) */
     u32 layer_on;
-    drv_optics_layer_cfg cfg;
+    drv_optics_layer_cfg cfg;               /* the first set ([optics]): also the route, width, bytes and curve of all */
+    drv_optics_layer_cfg xcfg[DRV_OPTICS_SETS];    /* drv_optics_layer_set's (core task, before the schedule's first) */
+    u32 nsets;                              /* sets 1..nsets given */
+    u32 set;                                /* the set of the jobs listed from now on (core: drv_optics_set) */
     u32 order;                              /* py | pcb << 8 | pcr << 16 now (AUTO: the guess of the first L1 dump) */
     u32 order_auto, order_set;
     u16 lin[256];                           /* the curves (ol_luts), copied into the work buffer a job */
@@ -444,6 +458,7 @@ static u32 op_row(volatile op_t *o, u32 h);
 static void op_layer_step(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc);
 static void op_fallback(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 k);
 static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p);
+static const volatile drv_optics_layer_cfg *op_cfg(volatile op_t *o, u32 set);
 
 /* The empty loop: n iterations of 2 instructions */
 static void op_spin(u32 n)
@@ -1225,7 +1240,7 @@ static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
     t = drv_ticks();
     ol_read_row(L, (const volatile u32 *)base, db, dh);
     r->pr_sums = drv_ticks_since(t);
-    if (o->cfg.cached && win) {
+    if (op_cfg(o, r->set)->cached && win) {
         drv_fw_cache_flush();
         t = drv_ticks();
         sum += op_read_sum((const volatile u32 *)(base - OP_UNCACHED), n, 0);
@@ -1245,11 +1260,17 @@ static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
  * reversal, so that wherever the time runs out the rows read are spread evenly; in a pass the picture's two banks of the
  * window one after the other (one map each), each with its share of the time left, its rows of cells in an interleaved
  * order. Through the window past the cache, or through its cached view (the cache written back and dropped before and
- * after). The rows of cells no row reached take the layer's own Y (ol_sources) */
+ * after). The rows of cells no row reached take the layer's own Y (ol_sources).
+ * The budget (read_ms) is kept to a row: everything in it counts (the maps, the write-backs, the releases, a tick given
+ * away, the time the CPU ran other tasks), and a row - or a bank's map - is begun only when the time left holds one more
+ * row as long as the rows' running mean (card165 read past its 100 ms by up to 37 ms: the bank's map and write-back were
+ * outside its slice, and its last row was begun with no regard to how long a row takes) */
 static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const ol_par_t *P, pace_t *p)
 {
+    const volatile drv_optics_layer_cfg *cf = op_cfg(o, r->set);
     u32 W = r->width, H = r->height, rb = r->pitch * 2, lw = L->lw, lh = L->lh, chmin, j, off, bank, b0, b1, rows, left;
-    u32 t0, budget = o->cfg.read_us, done = 0, slice, ts, cy, y, bus, win, base, q, k, cached = o->cfg.cached;
+    u32 t0, budget = cf->read_us, done = 0, slice, ts, tr, el, cy, y, bus, win, base, q, k, cached = cf->cached;
+    u32 avg, begun, s0 = p->slept;
 
     if (ol_columns(L->cwp, W, lw)) {
         r->f_err = 1;
@@ -1260,6 +1281,9 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
     ol_rows(L, H);
     op_row_probe(o, r, L);                  /* out of the read's budget */
     L->rbytes = cached;                     /* through the cache the packing read loads bytes, past it words */
+    avg = cached ? r->pr_csums : r->pr_sums;   /* the rows' running mean: the probe's row to begin with */
+    if (!avg)
+        avg = 1000;
     t0 = drv_ticks();
     chmin = H / lh;
     b0 = r->bus >> 27;
@@ -1271,13 +1295,14 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
                 continue;
             done |= 1u << off;
         }
-        r->f_passes++;
+        begun = 0;
         left = 0;                           /* the pass's rows still to read, all banks */
         for (cy = 0; cy < lh; cy++)
             if (L->ry[cy] + off < H)
                 left++;
         for (bank = b0; bank <= b1; bank++) {
-            if (drv_ticks_since(t0) >= budget)
+            el = drv_ticks_since(t0);
+            if (el + avg >= budget)
                 goto out;
             for (cy = 0, rows = 0; cy < lh; cy++) {
                 y = L->ry[cy] + off;
@@ -1287,13 +1312,18 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
             }
             if (!rows)
                 continue;
-            slice = (budget - drv_ticks_since(t0)) / left * rows;
+            if (!begun) {
+                begun = 1;
+                r->f_passes++;
+            }
+            slice = (budget - el) / left * rows;   /* the bank's share, its map and write-backs in it */
             left -= rows;
             for (cy = 0; cy < lh; cy++) {   /* the bank's first row: its window */
                 bus = r->bus + OL_MUL(L->ry[cy] + off, rb);
                 if (bus >> 27 == bank)
                     break;
             }
+            ts = drv_ticks();
             base = op_map(r, bus, 2 * W, &win);
             r->f_maps++;
             if (!base) {
@@ -1304,24 +1334,33 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
             base = win ? base & ~OP_BANK_MASK : 0;   /* a window shows the whole bank; 0: the CPU's own memory */
             if (cached)
                 drv_fw_cache_flush();
-            ts = drv_ticks();
+            r->f_maps_us += drv_ticks_since(ts);
             for (q = 0; q < 4; q++) {       /* the rows of cells 0, 4, 8, ..., then 2, 6, ..., 1, 5, ..., 3, 7, ... */
                 for (cy = (q == 1 ? 2 : q == 2 ? 1 : q); cy < lh; cy += 4) {
                     y = L->ry[cy] + off;
                     bus = r->bus + OL_MUL(y, rb);
                     if (y >= H || bus >> 27 != bank || (bus + 2 * W - 1) >> 27 != bank)
                         continue;
-                    if (drv_ticks_since(ts) >= slice || op_pace(p))
+                    if (op_pace(p))         /* first: a tick given away counts in the time below */
                         goto bank_end;
+                    if (drv_ticks_since(ts) + avg >= slice || drv_ticks_since(t0) + avg >= budget)
+                        goto bank_end;
+                    tr = drv_ticks();
                     k = base ? base | (bus & OP_BANK_MASK) : op_direct(bus);
                     ol_read_cells(L, (const volatile u32 *)(cached ? k - OP_UNCACHED : k), cy);
                     r->f_rows++;
+                    tr = drv_ticks_since(tr);
+                    if (tr > r->f_row_max)
+                        r->f_row_max = tr;
+                    avg = ((avg << 1) + avg + tr + 2) >> 2;
                 }
             }
 bank_end:
+            ts = drv_ticks();
             if (cached)
                 drv_fw_cache_flush();       /* no line of the picture stays in the cache */
             op_unmap(r, win);
+            r->f_maps_us += drv_ticks_since(ts);
             if (p->stop && (p->stop[0] | p->stop[1]))
                 goto out;
         }
@@ -1331,6 +1370,8 @@ out:
         if (L->nrow[k])
             r->f_cells++;
     r->f_us = drv_ticks_since(t0);
+    r->f_row_avg = avg;
+    r->f_slept = p->slept - s0;
 }
 
 /* The Y bytes of n layer words into y: p - the byte of Y in the first word (each byte loaded once) */
@@ -1374,6 +1415,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     u32 lw = r->l_wh & 0xffff, lh = r->l_wh >> 16, lp = r->l_pitch * 4, sub = r->sub, x, yy, i, w, base, win, t, fl;
     u32 k, t1, s0, s1, stop = 0, lc;
     volatile u32 *row;
+    const volatile drv_optics_layer_cfg *cf = op_cfg(o, r->set);
 
     op_crumb(r->job, sub, P_LAYER);
     P.py = o->order & 0xff;
@@ -1411,7 +1453,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     base = op_map(r, r->l_bus, lp * lh, &win);
     if (!base)
         goto out;
-    lc = sub == DRV_OPTICS_L4 && o->cfg.lcached && win;    /* only a window has the cached view */
+    lc = sub == DRV_OPTICS_L4 && cf->lcached && win;    /* only a window has the cached view */
     r->lcached = lc;
     if (lc) {
         drv_fw_cache_flush();               /* no line left of an earlier map of the window's addresses */
@@ -1456,25 +1498,32 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     }
     /* L4: the effect */
     fl = ol_floor_sigma(r->width, lw);
-    P.tb = L.lin[o->cfg.tb > 255 ? 255 : o->cfg.tb];
-    P.th = L.lin[o->cfg.th > 255 ? 255 : o->cfg.th];
-    P.sb1 = r->sig[0] = ol_cpu_sigma(o->cfg.sb & 0xffff, fl, r->width, lw);
-    P.sb2 = r->sig[1] = ol_cpu_sigma(o->cfg.sb >> 16, fl, r->width, lw);
-    P.mixb = o->cfg.mixb;
-    P.sh1 = r->sig[2] = ol_cpu_sigma(o->cfg.sh & 0xffff, fl, r->width, lw);
-    P.sh2 = r->sig[3] = ol_cpu_sigma(o->cfg.sh >> 16, fl, r->width, lw);
-    P.mixh = o->cfg.mixh;
-    P.gb = o->cfg.gb;
-    P.gh = o->cfg.gh;
-    P.dark = o->cfg.dark;
-    P.hcb = o->cfg.hcb;
-    P.hcr = o->cfg.hcr;
+    P.tb = L.lin[cf->tb > 255 ? 255 : cf->tb];
+    P.th = L.lin[cf->th > 255 ? 255 : cf->th];
+    P.sb1 = r->sig[0] = ol_cpu_sigma(cf->sb & 0xffff, fl, r->width, lw);
+    P.sb2 = r->sig[1] = ol_cpu_sigma(cf->sb >> 16, fl, r->width, lw);
+    P.mixb = cf->mixb;
+    P.sh1 = r->sig[2] = ol_cpu_sigma(cf->sh & 0xffff, fl, r->width, lw);
+    P.sh2 = r->sig[3] = ol_cpu_sigma(cf->sh >> 16, fl, r->width, lw);
+    P.mixh = cf->mixh;
+    P.gb = cf->gb;
+    P.gh = cf->gh;
+    P.dark = cf->dark;
+    P.hcb = cf->hcb;
+    P.hcr = cf->hcr;
+    P.em = cf->em;
+    P.bdark = cf->bdark;
+    P.hfirst = cf->hfirst;
+    P.tmix = P.gb ? cf->tmix : 0;
+    P.st = r->sig[4] = P.tmix ? ol_cpu_sigma(cf->st, fl, r->width, lw) / OL_TAIL : 0;   /* in the tail's pixels */
+    if (P.st < 64)
+        P.tmix = 0;                         /* a tail below 0.25 of its pixel: none (ol_gauss would do nothing) */
     mem_set(L.pb, 0, 2 * lw * lh);
     mem_set(L.ph, 0, 2 * lw * lh);
     mem_set(L.nrow, 0, lh);
     ol_word_tables(&L, &P);
     op_bench(r, &L);
-    if (o->cfg.read && (P.gb || P.gh))
+    if (cf->read && (P.gb || P.gh))
         op_frame_read(o, r, &L, &P, p);
     if (op_pace(p)) {
         r->err = OE_STOPPED;
@@ -1487,6 +1536,11 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     gp.p = p;
     L.pace = op_gpace;
     L.ctx = &gp;
+    if (P.tmix) {
+        t1 = drv_ticks();
+        ol_tail_down(&L);                   /* the tail's sources, before Bloom's Gaussian blurs pb: in the tail's time */
+        r->t_gt = drv_ticks_since(t1);
+    }
     for (k = 0; k < 2 && !stop; k++) {      /* Bloom, Halation; after each pass the CPU given away when it is due */
         if (!(k ? P.gh : P.gb))
             continue;
@@ -1501,6 +1555,14 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
             r->t_gb = t1;
         r->g_us[k][OL_ROWS] = gp.us[OL_ROWS];
         r->g_us[k][OL_COLS] = gp.us[OL_COLS];
+        if (!k && P.tmix && !stop) {        /* Bloom's tail: its Gaussian on the small plane, then into pb */
+            s1 = p->slept;
+            gp.t = t1 = drv_ticks();
+            stop = ol_tail_blur(&L, P.st);
+            if (!stop)
+                ol_tail_up(&L, P.tmix);
+            r->t_gt += drv_ticks_since(t1) - (p->slept - s1);
+        }
     }
     r->g_done = L.done;
     r->g_all = L.all;
@@ -1513,7 +1575,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     base = op_map(r, r->l_bus, lp * lh, &win);
     if (!base)
         goto out;
-    lc = o->cfg.lcached && win;
+    lc = cf->lcached && win;
     r->lcached = lc;
     if (lc) {
         drv_fw_cache_flush();               /* no line left of an earlier map of the window's addresses */
@@ -1614,7 +1676,7 @@ u32 drv_optics_step(u8 *h)
 {
     volatile op_t *o = op();
     volatile op_rec_t *r;
-    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, psw, sp, stk = 0, stksz = 0, mode = 0;
+    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, psw, sp, stk = 0, stksz = 0, mode = 0, set = 0;
     volatile u32 *c;
 
     if (!h)
@@ -1622,6 +1684,7 @@ u32 drv_optics_step(u8 *h)
     if (o && (i = op_row(o, (u32)h)) < ROWS) {
         sub = o->row[i].sub;
         job = o->row[i].job;
+        set = o->row[i].set;
     }
     psw = op_psw();
     sp = op_sp();
@@ -1659,6 +1722,7 @@ u32 drv_optics_step(u8 *h)
         r->level = o->level;
         r->sub = sub;
         r->job = job;
+        r->set = set <= o->nsets ? set : 0;
         if (sub >= DRV_OPTICS_A) {
             c = crumb();
             r->psw = psw;
@@ -1715,6 +1779,7 @@ u32 drv_optics_list(u8 *h, u32 room, u32 *out)
     o->row[i].job = ++o->wl;
     o->row[i].layer = 0;
     o->row[i].rec = 0;
+    o->row[i].set = o->set;
     o->row[i].h = (u32)h;
     crumb()[CR_LISTED] = o->wl;
     op_crumb(o->wl, sub, P_LISTED);
@@ -1952,6 +2017,39 @@ u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf)
     return o && o->layer_on ? ol_floor_sigma(W, o->cfg.width) : 0;
 }
 
+/* Core task, after drv_optics_layer: the further set k (1..DRV_OPTICS_SETS) of the layer's settings - the route,
+ * width, bytes and curve stay the first set's. 0, or 1 */
+int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c)
+{
+    volatile op_t *o = op();
+
+    if (!o || !o->layer_on || !c || !k || k > DRV_OPTICS_SETS)
+        return 1;
+    mem_copy((void *)&o->xcfg[k - 1], c, sizeof(*c));
+    o->xcfg[k - 1].route = o->cfg.route;
+    o->xcfg[k - 1].width = o->cfg.width;
+    o->xcfg[k - 1].order = o->cfg.order;
+    o->xcfg[k - 1].gamma = o->cfg.gamma;
+    if (k > o->nsets)
+        o->nsets = k;
+    return 0;
+}
+
+/* Core task: the layer's settings of the jobs listed from now on (0 - the first set; a set not given - the first) */
+void drv_optics_set(u32 k)
+{
+    volatile op_t *o = op();
+
+    if (o)
+        o->set = k <= o->nsets ? k : 0;
+}
+
+/* The settings of a job's set (the worker; the arena block, uncached) */
+static const volatile drv_optics_layer_cfg *op_cfg(volatile op_t *o, u32 set)
+{
+    return set && set <= o->nsets ? &o->xcfg[set - 1] : &o->cfg;
+}
+
 /* Core task: the substage of the jobs listed from now on */
 void drv_optics_sub(u32 sub)
 {
@@ -2154,9 +2252,11 @@ static u32 op_q8f(u32 v)
 static void op_report_layer(volatile op_rec_t *r, u32 n)
 {
     u32 k, m, v, sd[OL_LANES], mean[OL_LANES];
+    char set[2] = {(char)(r->set ? 'A' + r->set - 1 : 0), 0};
 
-    log_printf(OMK_LOG_INFO, "optics: job %u: layer %s, route %s: reduction %u us (d0 %x), small frame %ux%u (asked %ux%u) "
-               "pitch %u, %u bytes at %08x (%s)", n, drv_optics_sub_name(r->sub), r->route == DRV_OPTICS_403 ? "403" :
+    log_printf(OMK_LOG_INFO, "optics: job %u: layer %s%s%s, route %s: reduction %u us (d0 %x), small frame %ux%u (asked "
+               "%ux%u) pitch %u, %u bytes at %08x (%s)", n, drv_optics_sub_name(r->sub), r->set ? ", settings " : "", set,
+               r->route == DRV_OPTICS_403 ? "403" :
                "pair", r->t_down, r->down_rc, r->l_wh & 0xffff, r->l_wh >> 16, r->l_asked & 0xffff, r->l_asked >> 16,
                r->l_pitch, r->l_len, r->l_bus, r->l_kind == OP_BUS_WINDOW ? "window" : r->l_kind == OP_BUS_DIRECT ?
                "direct" : "-");
@@ -2169,15 +2269,18 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                    r->order >> 16 & 0xff);
     if (r->sub == DRV_OPTICS_L4 && r->w_task) {
         log_printf(OMK_LOG_INFO, "optics: job %u: Gaussians in layer pixels: Bloom %u.%02u + %u.%02u, Halation %u.%02u + "
-                   "%u.%02u (after the transport's own)", n, op_q8i(r->sig[0]), op_q8f(r->sig[0]), op_q8i(r->sig[1]),
-                   op_q8f(r->sig[1]), op_q8i(r->sig[2]), op_q8f(r->sig[2]), op_q8i(r->sig[3]), op_q8f(r->sig[3]));
+                   "%u.%02u (after the transport's own); Bloom's tail %u.%02u in its plane's (x%u)", n, op_q8i(r->sig[0]),
+                   op_q8f(r->sig[0]), op_q8i(r->sig[1]), op_q8f(r->sig[1]), op_q8i(r->sig[2]), op_q8f(r->sig[2]),
+                   op_q8i(r->sig[3]), op_q8f(r->sig[3]), op_q8i(r->sig[4]), op_q8f(r->sig[4]), OL_TAIL);
         log_printf(r->f_err ? OMK_LOG_WARN : OMK_LOG_INFO, "optics: job %u: picture read: %u rows in %u passes, %u of %u rows "
                    "of cells reached, %u us, %u maps%s", n, r->f_rows, r->f_passes, r->f_cells, r->l_wh >> 16, r->f_us,
                    r->f_maps, r->f_err == 1 ? " - layer too small for the picture, not read" : r->f_err == 2 ?
                    " - no window, the rest from the layer" : "");
+        log_printf(OMK_LOG_INFO, "optics: job %u: picture read's time: rows' mean %u us, longest %u us; maps, write-backs and "
+                   "releases %u us; ticks given away %u us", n, r->f_row_avg, r->f_row_max, r->f_maps_us, r->f_slept);
         log_printf(OMK_LOG_INFO, "optics: job %u: calc: sources %u us, Bloom %u us (rows %u, columns %u), Halation %u us "
-                   "(rows %u, columns %u); the passes on %u of %u values (%u%%)", n, r->t_src, r->t_gb, r->g_us[0][0],
-                   r->g_us[0][1], r->t_gh, r->g_us[1][0], r->g_us[1][1], r->g_done, r->g_all,
+                   "(rows %u, columns %u), Bloom's tail %u us; the passes on %u of %u values (%u%%)", n, r->t_src, r->t_gb,
+                   r->g_us[0][0], r->g_us[0][1], r->t_gh, r->g_us[1][0], r->g_us[1][1], r->t_gt, r->g_done, r->g_all,
                    r->g_all >= 100 ? r->g_done / (r->g_all / 100) : 0);
         if (r->pr_err)
             log_printf(OMK_LOG_WARN, "optics: job %u: picture row not timed: %s", n, op_err(r->pr_err));

@@ -597,6 +597,141 @@ static void words_equal(void)
         printf("words: %u of %u differ from the first version\n", bad, 8 * n);
 }
 
+/* ---- the later parts: the emission, Bloom by darkness, Halation first, Bloom's tail ---- */
+
+/* The emission table: 0 under the threshold, a blown pixel OL_ONE, steeper than the excess near 255, the review's numbers
+ * at m 16 and the threshold 200 (245 ~0.35, 230 ~0.13 of a blown pixel); m 0 - the excess as it was */
+static void emission(void)
+{
+    ol_t o;
+    ol_par_t p;
+    u32 c, mono = 1, e245, e230;
+
+    layout(&o, LW, LH);
+    params(&p);
+    p.em = 16;
+    ol_read_table(&o, &p);
+    for (c = 1; c < 256; c++)
+        mono &= (o.tab[c] & 0xffff) >= (o.tab[c - 1] & 0xffff) && (o.tab[c] >> 16) >= (o.tab[c - 1] >> 16);
+    check(mono, "emission: monotonic");
+    check((o.tab[255] & 0xffff) == OL_ONE && (o.tab[255] >> 16) == OL_ONE, "emission: a blown pixel OL_ONE");
+    check(!(o.tab[200] & 0xffff) && !(o.tab[230] >> 16) && (o.tab[201] & 0xffff), "emission: 0 at the threshold");
+    e245 = o.tab[245] & 0xffff;
+    e230 = o.tab[230] & 0xffff;
+    if (verbose)
+        printf("emission at m 16, threshold 200: 245 -> %u, 230 -> %u of %u\n", e245, e230, OL_ONE);
+    check(e245 > OL_ONE * 30 / 100 && e245 < OL_ONE * 40 / 100, "emission: 245 ~0.35 of a blown pixel");
+    check(e230 > OL_ONE * 10 / 100 && e230 < OL_ONE * 16 / 100, "emission: 230 ~0.13 of a blown pixel");
+    check(e245 * (OL_ONE - p.tb) < (lin[245] - p.tb) * OL_ONE, "emission: below the excess (each to its blown pixel)");
+    p.em = 1;                               /* no shoulder: the excess, normalised */
+    ol_read_table(&o, &p);
+    check((o.tab[245] & 0xffff) + 1 >= (lin[245] - p.tb) * OL_ONE / (OL_ONE - p.tb) &&
+          (o.tab[245] & 0xffff) <= (lin[245] - p.tb) * OL_ONE / (OL_ONE - p.tb) + 1, "emission at m 1: the excess normalised");
+    p.em = 0;
+    ol_read_table(&o, &p);
+    check((o.tab[245] & 0xffff) == lin[245] - p.tb && (o.tab[245] >> 16) == lin[245] - p.th, "m 0: the excess");
+    p.em = 16;
+    p.th = OL_ONE;                          /* a threshold at white: nothing, no division by 0 */
+    ol_read_table(&o, &p);
+    check(!(o.tab[255] >> 16), "emission: a threshold at white gives nothing");
+}
+
+/* The words with the later keys: Bloom less on a bright place (bdark); Halation first - its colour the same however
+ * strong Bloom is, and the Y the same as Bloom first while nothing clips */
+static void words_later(void)
+{
+    ol_t o;
+    ol_par_t p;
+    u32 a, b, w0, w1, w2;
+
+    layout(&o, LW, LH);
+    params(&p);
+    ol_word_tables(&o, &p);
+    o.y[0] = 200;
+    a = ol_word_of(&o, &p, 400, 0, 200) & 0xff;
+    p.bdark = 256;
+    ol_word_tables(&o, &p);
+    b = ol_word_of(&o, &p, 400, 0, 200) & 0xff;
+    check(b < a && b > 0, "bloom_dark: less Bloom on a bright place");
+    check((ol_word_of(&o, &p, 400, 0, 20) & 0xff) == (ol_word_of(&o, &p, 400, 0, 20) & 0xff), "bloom_dark: deterministic");
+    p.bdark = 0;
+    p.hfirst = 1;
+    ol_word_tables(&o, &p);
+    w0 = ol_word_of(&o, &p, 0, 300, 20);
+    w1 = ol_word_of(&o, &p, 600, 300, 20);
+    w2 = ol_word_of(&o, &p, 2000, 300, 20);
+    check((w0 >> 16 & 0xff) == (w1 >> 16 & 0xff) && (w1 >> 16 & 0xff) == (w2 >> 16 & 0xff) && (w0 >> 16 & 0xff) > 128,
+          "halation_first: the colour does not fade under Bloom");
+    a = w1 & 0xff;
+    p.hfirst = 0;
+    ol_word_tables(&o, &p);
+    check((ol_word_of(&o, &p, 600, 300, 20) & 0xff) == a, "halation_first: the same Y while nothing clips");
+    check((ol_word_of(&o, &p, 2000, 300, 20) >> 16 & 0xff) < (w2 >> 16 & 0xff), "Bloom first: the colour fades");
+}
+
+/* Bloom's tail: the reduction and the enlargement keep the light's sum and a flat plane; mixed in at weight w, the light
+ * reaches farther than the main Gaussian's; its spread (second moment) is the tail's sigma (x OL_TAIL) and the
+ * reduction's and enlargement's own */
+static void tail(void)
+{
+    ol_t o;
+    u32 i, x, y, n, lw = 324, lh = 243, far0, far1;
+    double s0, s1, m, v, d;
+
+    layout(&o, lw, lh);
+    n = lw * lh;
+    for (i = 0; i < n; i++)
+        o.pb[i] = 1000;
+    ol_tail_down(&o);
+    for (i = 0, x = 1; i < o.tw * o.th; i++)
+        x &= o.pt[i] == 1000;
+    check(o.tw == 81 && o.th == 61 && x, "tail: a flat plane's reduction flat");
+    ol_tail_up(&o, 256);
+    for (i = 0, x = 1; i < n; i++)
+        x &= o.pb[i] == 1000;
+    check(x, "tail: a flat plane stays flat");
+    memset(o.pb, 0, 2 * n);                 /* a light of 3 x 3 in the middle */
+    for (y = 120; y < 123; y++)
+        for (x = 160; x < 163; x++)
+            o.pb[y * lw + x] = 4000;
+    for (i = 0, s0 = 0; i < n; i++)
+        s0 += o.pb[i];
+    ol_tail_down(&o);
+    ol_gauss(&o, o.pb, 3 * 256);            /* the main Gaussian: 3 layer pixels */
+    far0 = o.pb[121 * lw + 161 + 40];
+    o.pace = 0;
+    ol_tail_blur(&o, 5 * 256);              /* 5 tail pixels: 20 layer pixels */
+    ol_tail_up(&o, 128);
+    far1 = o.pb[121 * lw + 161 + 40];
+    check(far0 == 0 && far1 > 0, "tail: the light reaches farther");
+    memset(o.pb, 0, 2 * n);                 /* the tail alone (w 256): its sum and spread */
+    for (y = 120; y < 124; y++)
+        for (x = 160; x < 164; x++)
+            o.pb[y * lw + x] = 4000;
+    for (i = 0, s0 = 0; i < n; i++)
+        s0 += o.pb[i];
+    ol_tail_down(&o);
+    ol_tail_blur(&o, 5 * 256);
+    ol_tail_up(&o, 256);
+    for (i = 0, s1 = 0, m = 0; i < n; i++) {
+        s1 += o.pb[i];
+        m += (double)o.pb[i] * (i % lw);
+    }
+    m /= s1;
+    if (verbose)
+        printf("tail: the light's sum %.0f of %.0f\n", s1, s0);
+    check(s1 > s0 * 0.98 && s1 < s0 * 1.02, "tail: the light's sum kept");
+    for (i = 0, v = 0; i < n; i++) {
+        d = (i % lw) - m;
+        v += o.pb[i] * d * d;
+    }
+    v /= s1;
+    if (verbose)
+        printf("tail: variance %.1f layer pixels^2 (want 400 of the tail's Gaussian + ~2.7 of the bilinear enlargement)\n",
+               v);
+    check(near(v, 402.7, 0.03), "tail: its sigma the one asked for (x OL_TAIL), plus the enlargement's");
+}
+
 int main(int argc, char **argv)
 {
     (void)argv;
@@ -611,6 +746,9 @@ int main(int argc, char **argv)
     gauss_pace();
     reads_equal();
     words_equal();
+    emission();
+    words_later();
+    tail();
     if (!failed)
         printf("ok\n");
     return failed;

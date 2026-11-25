@@ -1120,6 +1120,8 @@ static void test_layer(int phase)
         CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 70 * 256 / 100);
         CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 100000 && host_opt_layer.cached == 0);
         CHECK(host_opt_layer.lcached == 0);
+        CHECK(host_opt_layer.em == 16 && host_opt_layer.bdark == 80 * 256 / 100 && host_opt_layer.hfirst == 1);
+        CHECK(host_opt_layer.tmix == 0 && host_opt_layer.st == 0);     /* the tail off by default */
     } else {
         CHECK(host_opt_sub == DRV_OPTICS_N);    /* the schedule's first entry later */
         CHECK(host_opt_layer.route == DRV_OPTICS_403 && host_opt_layer.width == 400);   /* 648 clamped to 400 */
@@ -1136,6 +1138,63 @@ static void test_layer(int phase)
     else
         CHECK(t && strstr(t, "layer_width = 648 out of 42..400") && strstr(t, "Halation sigma 10 px is below the layer's "
                                                                            "smallest") && strstr(t, "schedule of 4 entries"));
+    free(t);
+}
+
+/* The layer's further sets: schedule entries L4:X take [optics.X] over [optics] (a key not given there is [optics]'s),
+ * the press of each entry gets its set; bad set entries left out */
+extern drv_optics_layer_cfg host_opt_sets[DRV_OPTICS_SETS + 1];
+extern u32 host_opt_nsets, host_opt_set;
+
+static void test_layer_sets(void)
+{
+    long n;
+    char *t;
+    u32 k;
+    static const u32 want_sub[] = {DRV_OPTICS_N, DRV_OPTICS_L4, DRV_OPTICS_L4, DRV_OPTICS_L4, DRV_OPTICS_L2};
+    static const u32 want_set[] = {0, 0, 1, 2, 1};
+
+    omk_dir(LOG_DIR);
+    write_file("OMKIT.INI", "[optics]\nbloom = 3\nhalation = 3\nemission = 0\nbloom_dark = 0\nhalation_first = 0\n"
+                            "schedule = N, L4, L4:A, L4:b, L4:Z, W1:A, L2:A\n"
+                            "[optics.A]\nbloom = 5\nemission = 16\nbloom_tail = 30\nbloom_tail_sigma = 250\n"
+                            "bloom_dark = 80\n[optics.B]\nhalation_gain = 3000\nhalation_first = 1\n");
+    CHECK(cfg_load() == 1);
+    log_setup(1, OMK_LOG_INFO);
+    host_prev_ended = 1;
+    host_opt_worker_rc = 0;
+    host_ui_state = 0;
+    host_opt_nsets = 0;
+    host_opt_set = 99;
+    memset(host_opt_sets, 0, sizeof(host_opt_sets));
+    memset(&host_opt_layer, 0, sizeof(host_opt_layer));
+    memset(&host_opt, 0, sizeof(host_opt));
+    optics_setup();
+    CHECK(host_opt_nsets == 2);
+    CHECK(host_opt_layer.em == 0 && host_opt_layer.bdark == 0 && host_opt_layer.hfirst == 0 && host_opt_layer.tmix == 0);
+    CHECK(host_opt_layer.gb == 150 * 256 * 3 / 500 && host_opt_layer.gh == 200 * 256 * 3 / 500);
+    CHECK(host_opt_sets[1].gb == 150 * 256 * 5 / 500 && host_opt_sets[1].gh == 200 * 256 * 3 / 500);
+    CHECK(host_opt_sets[1].em == 16 && host_opt_sets[1].tmix == 30 * 256 / 100 && host_opt_sets[1].st == 250);
+    CHECK(host_opt_sets[1].bdark == 80 * 256 / 100 && host_opt_sets[1].hfirst == 0 && host_opt_sets[1].th == 225);
+    CHECK(host_opt_sets[2].gh == 3000 * 256 * 3 / 500 && host_opt_sets[2].hfirst == 1 && host_opt_sets[2].em == 0);
+    CHECK(host_opt_sets[2].tmix == 0 && host_opt_sets[2].st == 0);
+    optics_service(1000);                   /* the worker made, the first entry given */
+    CHECK(host_opt_sub == want_sub[0] && host_opt_set == want_set[0]);
+    for (k = 1; k < 5; k++) {
+        host_opt.ended[want_sub[k - 1]]++;
+        optics_service(2000 * k);
+        CHECK(host_opt_sub == want_sub[k] && host_opt_set == want_set[k]);
+    }
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &n);
+    CHECK(t && strstr(t, "optics: schedule of 5 entries"));
+    CHECK(t && strstr(t, "'L4:Z' is not a substage") && strstr(t, "'W1:A' is not a substage"));
+    CHECK(t && strstr(t, "optics: layer settings A: Bloom 5 (threshold 200, sigma 60 + 0 at 0%, gain 150% at 5, 80% less "
+                         "on white; tail 30% of sigma 250)"));
+    CHECK(t && strstr(t, "optics: layer settings B: Halation 3") && strstr(t, "before Bloom"));
+    CHECK(t && strstr(t, "optics: layer settings A: the source - the emission of a blown pixel as 16 whites"));
+    CHECK(t && strstr(t, "schedule 3 of 5: L4 with the settings A given to the next press"));
+    CHECK(t && strstr(t, "schedule 4 of 5: L4 with the settings B given"));
     free(t);
 }
 
@@ -1157,6 +1216,8 @@ int main(int argc, char **argv)
         test_schedule();
     else if (argc > 3 && !strcmp(argv[2], "layer"))
         test_layer(atoi(argv[3]));
+    else if (argc > 2 && !strcmp(argv[2], "layer_sets"))
+        test_layer_sets();
     else {
         test_cfg_template();
         test_log();

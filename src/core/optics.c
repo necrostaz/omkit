@@ -59,12 +59,28 @@
  *   bloom_threshold, halation_threshold    codes 0..255 of Y where the glow starts
  *   bloom_sigma, bloom_sigma2, bloom_mix   the Gaussians in pixels of the picture, the second's weight in percent
  *   halation_sigma, halation_sigma2, halation_mix
- *   bloom_gain, halation_gain              the light added at strength 5, percent of the excess
+ *   bloom_gain, halation_gain              the light added at strength 5, percent of the source (0..5000)
  *   halation_cb, halation_cr               the halation's colour: Cb, Cr a unit of its Y, percent (signed)
  *   halation_dark                          less halation on bright places: percent
- *   read, read_ms, read_cached             the picture's rows read for the sources, the time a job, the cached view
+ *   emission                               the source: 0 - the excess of a pixel's light over the threshold (the
+ *                                          first version); 1..64 (16) - the emission of a pixel whose blown light
+ *                                          stands for that many whites (the tone curve's shoulder undone): a lamp
+ *                                          glows, white paper just under 255 hardly does
+ *   bloom_dark                             less Bloom on bright places, as halation_dark: percent (80)
+ *   halation_first                         1 (default) - the halation's code, and so its colour, from the place's own
+ *                                          light, Bloom added after it (its colour does not fade under a strong
+ *                                          Bloom); 0 - Bloom first (the first version)
+ *   bloom_tail, bloom_tail_sigma           Bloom's long tail (a diffusion filter's glow): the share of Bloom's light,
+ *                                          percent (0 - none, the default), in a Gaussian of that sigma, pixels of
+ *                                          the picture (300), made on a plane 4 times smaller each way
+ *   read, read_ms, read_cached             the picture's rows read for the sources, the time a job (kept to a row),
+ *                                          the cached view
  *   layer_cached                           the layer read and written (L4) through the window's cached view, written
  *                                          back before the window is released
+ * With emission 0, bloom_dark 0, halation_first 0 and no tail the layer is the first version's, value for value.
+ * Further sets of these keys - all but route, layer_width, layer_bytes and gamma - in sections [optics.A] ..
+ * [optics.F] (a key not given there is [optics]'s), named by the schedule: L4:A - the jobs of that press get the
+ * set A. One session then gives a ladder of settings on one scene: schedule = N, L4:A, L4:B, L4:C.
  * The smallest sigma the transport gives (the ISP's reduction and enlargement) is logged at start; a sigma below it
  * comes out as it (a warning).
  *
@@ -87,6 +103,13 @@
 #define SCHED_MAX 24                        /* entries of [optics] schedule */
 #define LOOP_MAX 100000000u                 /* iterations of a schedule's loop: ~2 s at ~10 ns an instruction */
 #define SLEEP_MAX 2000                      /* ms of a schedule's sleep (the step gives up on the worker after 10 s) */
+/* The layer's defaults that the host model chose (the scenes of card162..165; docs of the module) */
+#define OPT_EMISSION 16                     /* a blown pixel stands for 16 whites */
+#define OPT_BLOOM_DARK 80                   /* Bloom 80 % less on white */
+#define OPT_BLOOM_THRESHOLD 200
+#define OPT_HAL_THRESHOLD 225
+#define OPT_BLOOM_GAIN 150
+#define OPT_HAL_GAIN 200
 
 /* The cached read's state on the card (store OPTICS, key 1) */
 typedef struct {
@@ -135,6 +158,7 @@ static struct {
 static struct {
     u32 n, k;                               /* entries; the one given now */
     u8 sub[SCHED_MAX];
+    u8 set[SCHED_MAX];                      /* the layer's settings: 0 - [optics], k - [optics.X], X = 'A' + k - 1 */
     u32 loop[SCHED_MAX], sleep[SCHED_MAX];
     u32 ended0;                             /* the driver's jobs ended (all substages) when entry k was given */
     int on, given, worker;                  /* worker: an entry needs the worker task */
@@ -275,7 +299,7 @@ static u32 bis_start(u32 run, u32 from)
 static void sch_parse(const char *s)
 {
     char word[24];
-    u32 n, k, v, i, slash, sleep;
+    u32 n, k, v, i, slash, sleep, set, colon;
     int bad;
 
     while (*s) {
@@ -287,6 +311,14 @@ static void sch_parse(const char *s)
         word[n] = 0;
         if (!n)
             break;
+        for (colon = 0; word[colon] && word[colon] != ':'; colon++)
+            ;
+        set = 0;
+        if (word[colon]) {                  /* NAME:X - the layer's settings X ([optics.X]) */
+            v = (u32)(word[colon + 1] | 0x20) - 'a';
+            set = word[colon + 2] || v >= DRV_OPTICS_SETS ? DRV_OPTICS_SETS + 1 : v + 1;
+            word[colon] = 0;
+        }
         for (i = 0; word[i] && word[i] != '/'; i++)
             ;
         slash = word[i] == '/';
@@ -309,13 +341,18 @@ static void sch_parse(const char *s)
             bad |= k != DRV_OPTICS_W1 || !v || v > SLEEP_MAX;
         else if (slash)
             bad |= (k != DRV_OPTICS_C3 && k != DRV_OPTICS_W1 && k != DRV_OPTICS_W2) || v < 10 || v > LOOP_MAX;
+        if (set)
+            bad |= set > DRV_OPTICS_SETS || k < DRV_OPTICS_L0 || k >= DRV_OPTICS_SUBS || slash;
         if (k == DRV_OPTICS_SUBS || bad || sch.n == SCHED_MAX) {
             if (slash)
                 word[i] = '/';
+            if (set)
+                word[colon] = ':';
             log_printf(OMK_LOG_WARN, "optics: schedule: '%s' %s - left out", word, sch.n == SCHED_MAX ? "is one too many" :
-                       "is not a substage, NAME/N (C3, W1, W2; N 10..100000000) or W1/sMS (1..2000)");
+                       "is not a substage, NAME/N (C3, W1, W2; N 10..100000000), W1/sMS (1..2000) or L0..L4:X (X A..F)");
             continue;
         }
+        sch.set[sch.n] = (u8)set;
         sch.sub[sch.n] = (u8)k;
         sch.loop[sch.n] = sleep ? 0 : v;
         sch.sleep[sch.n] = sleep ? v : 0;
@@ -350,16 +387,69 @@ static void crumbs(void)
                    w[26] >> 16, w[27] & 0xffff, w[27] >> 16);
 }
 
-/* An [optics] integer clamped to lo..hi (logged when it was out) */
-static int opt_int(const char *key, int def, int lo, int hi)
+/* An integer of section sec (else of [optics]: a further set's key not given is the first set's) clamped to lo..hi
+ * (logged when it was out) */
+static int opt_sint(const char *sec, const char *key, int def, int lo, int hi)
 {
-    int v = cfg_int("optics", key, def);
+    const char *from = cfg_str(sec, key, 0) ? sec : "optics";
+    int v = cfg_int(from, key, def);
 
     if (v < lo || v > hi) {
-        log_printf(OMK_LOG_WARN, "optics: %s = %d out of %d..%d, %d taken", key, v, lo, hi, v < lo ? lo : hi);
+        log_printf(OMK_LOG_WARN, "%s: %s = %d out of %d..%d, %d taken", from, key, v, lo, hi, v < lo ? lo : hi);
         v = v < lo ? lo : hi;
     }
     return v;
+}
+
+static int opt_int(const char *key, int def, int lo, int hi)
+{
+    return opt_sint("optics", key, def, lo, hi);
+}
+
+/* The keys of a set of the layer's settings (sec: [optics] or [optics.X]) that the worker takes a job: the strengths,
+ * thresholds, Gaussians, gains, colour, the darkness weights, the source, the tail, the reads; logged as `name` */
+static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *name)
+{
+    u32 sb, sh, gb, gh, tail, ts;
+
+    sb = (u32)opt_sint(sec, "bloom", 0, 0, 5);
+    sh = (u32)opt_sint(sec, "halation", 0, 0, 5);
+    c->tb = (u32)opt_sint(sec, "bloom_threshold", OPT_BLOOM_THRESHOLD, 0, 254);
+    c->th = (u32)opt_sint(sec, "halation_threshold", OPT_HAL_THRESHOLD, 0, 254);
+    c->sb = (u32)opt_sint(sec, "bloom_sigma", 60, 0, 1000) | (u32)opt_sint(sec, "bloom_sigma2", 0, 0, 1000) << 16;
+    c->sh = (u32)opt_sint(sec, "halation_sigma", 40, 0, 1000) | (u32)opt_sint(sec, "halation_sigma2", 0, 0, 1000) << 16;
+    c->mixb = (u32)opt_sint(sec, "bloom_mix", 0, 0, 100) * 256 / 100;
+    c->mixh = (u32)opt_sint(sec, "halation_mix", 0, 0, 100) * 256 / 100;
+    gb = (u32)opt_sint(sec, "bloom_gain", OPT_BLOOM_GAIN, 0, 5000);
+    gh = (u32)opt_sint(sec, "halation_gain", OPT_HAL_GAIN, 0, 5000);
+    c->gb = gb * 256 * sb / 500;
+    c->gh = gh * 256 * sh / 500;
+    c->hcb = opt_sint(sec, "halation_cb", -40, -200, 200) * 256 / 100;
+    c->hcr = opt_sint(sec, "halation_cr", 70, -200, 200) * 256 / 100;
+    c->dark = (u32)opt_sint(sec, "halation_dark", 70, 0, 100) * 256 / 100;
+    c->em = (u32)opt_sint(sec, "emission", OPT_EMISSION, 0, 64);
+    c->bdark = (u32)opt_sint(sec, "bloom_dark", OPT_BLOOM_DARK, 0, 100) * 256 / 100;
+    c->hfirst = (u32)opt_sint(sec, "halation_first", 1, 0, 1);
+    tail = (u32)opt_sint(sec, "bloom_tail", 0, 0, 100);
+    ts = (u32)opt_sint(sec, "bloom_tail_sigma", 300, 0, 1000);
+    c->tmix = ts ? tail * 256 / 100 : 0;
+    c->st = c->tmix ? ts : 0;
+    c->read = (u32)opt_sint(sec, "read", 1, 0, 1);
+    c->read_us = (u32)opt_sint(sec, "read_ms", 100, 0, 250) * 1000;
+    c->cached = (u32)opt_sint(sec, "read_cached", 0, 0, 1);
+    c->lcached = (u32)opt_sint(sec, "layer_cached", 0, 0, 1);
+    log_printf(OMK_LOG_INFO, "optics: layer%s: Bloom %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, %u%% less on "
+               "white; tail %u%% of sigma %u)", name, sb, c->tb, c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, gb,
+               (c->bdark * 100 + 128) / 256, (c->tmix * 100 + 128) / 256, c->st);
+    log_printf(OMK_LOG_INFO, "optics: layer%s: Halation %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb %d%% "
+               "Cr %d%%, dark %u%%, %s)", name, sh, c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256, gh,
+               c->hcb * 100 / 256, c->hcr * 100 / 256, c->dark * 100 / 256, c->hfirst ? "before Bloom" : "after Bloom");
+    if (c->em)
+        log_printf(OMK_LOG_INFO, "optics: layer%s: the source - the emission of a blown pixel as %u whites over the "
+                   "threshold; the picture read %s, %u ms", name, c->em, c->read ? "on" : "off", c->read_us / 1000);
+    else
+        log_printf(OMK_LOG_INFO, "optics: layer%s: the source - the excess over the threshold; the picture read %s, %u ms",
+                   name, c->read ? "on" : "off", c->read_us / 1000);
 }
 
 /* The layer's settings; 1 - the layer is on (a strength, or a layer substage in the schedule) */
@@ -392,21 +482,10 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
         c->order = DRV_OPTICS_ORDER_AUTO;
     }
     c->gamma = (u32)opt_int("gamma", 220, 200, 300);
-    c->tb = (u32)opt_int("bloom_threshold", 200, 0, 254);
-    c->th = (u32)opt_int("halation_threshold", 225, 0, 254);
-    c->sb = (u32)opt_int("bloom_sigma", 60, 0, 1000) | (u32)opt_int("bloom_sigma2", 0, 0, 1000) << 16;
-    c->sh = (u32)opt_int("halation_sigma", 40, 0, 1000) | (u32)opt_int("halation_sigma2", 0, 0, 1000) << 16;
-    c->mixb = (u32)opt_int("bloom_mix", 0, 0, 100) * 256 / 100;
-    c->mixh = (u32)opt_int("halation_mix", 0, 0, 100) * 256 / 100;
-    c->gb = (u32)opt_int("bloom_gain", 150, 0, 1000) * 256 * sb / 500;
-    c->gh = (u32)opt_int("halation_gain", 200, 0, 1000) * 256 * sh / 500;
-    c->hcb = opt_int("halation_cb", -40, -200, 200) * 256 / 100;
-    c->hcr = opt_int("halation_cr", 70, -200, 200) * 256 / 100;
-    c->dark = (u32)opt_int("halation_dark", 70, 0, 100) * 256 / 100;
-    c->read = (u32)opt_int("read", 1, 0, 1);
-    c->read_us = (u32)opt_int("read_ms", 100, 0, 250) * 1000;
     c->cached = (u32)opt_int("read_cached", 0, 0, 1);
     c->lcached = (u32)opt_int("layer_cached", 0, 0, 1);
+    c->read = (u32)opt_int("read", 1, 0, 1);
+    c->read_us = (u32)opt_int("read_ms", 100, 0, 250) * 1000;
     fl = (216 * 5184 + 50 * c->width) / (100 * c->width);   /* optlayer.h's ol_floor_sigma for 5184 */
     log_printf(OMK_LOG_INFO, "optics: layer: route %s, width %u (cells of %u px; the transport alone blurs by sigma ~%u px), "
                "bytes %s; picture read %s, %u ms%s", c->route == DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width,
@@ -414,11 +493,7 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
                " through the CACHED view" : "");
     log_printf(OMK_LOG_INFO, "optics: layer: the layer read and written %s", c->lcached ? "through the CACHED view (written "
                "back before the window is released)" : "past the cache");
-    log_printf(OMK_LOG_INFO, "optics: layer: Bloom %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5)", sb, c->tb,
-               c->sb & 0xffff, c->sb >> 16, c->mixb * 100 / 256, cfg_int("optics", "bloom_gain", 150));
-    log_printf(OMK_LOG_INFO, "optics: layer: Halation %u (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, colour Cb %d%% "
-               "Cr %d%%, dark %u%%)", sh, c->th, c->sh & 0xffff, c->sh >> 16, c->mixh * 100 / 256,
-               cfg_int("optics", "halation_gain", 200), c->hcb * 100 / 256, c->hcr * 100 / 256, c->dark * 100 / 256);
+    layer_keys(c, "optics", "");
     for (i = 0; i < 4; i++) {
         u32 v = i == 0 ? c->sb & 0xffff : i == 1 ? c->sb >> 16 : i == 2 ? c->sh & 0xffff : c->sh >> 16;
 
@@ -428,6 +503,39 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
                        v, fl, c->width, fl, (216 * 5184 + 50 * 400) / (100 * 400), 400);
     }
     return 1;
+}
+
+/* The further sets the schedule names (L4:A ...): each from [optics.X] over [optics], to the driver (after
+ * drv_optics_layer). A set not given (the driver refused it) - its entries get the first set */
+static void layer_sets(const drv_optics_layer_cfg *base)
+{
+    drv_optics_layer_cfg c;
+    char sec[12], name[12];
+    const char *se, *ke, *va;
+    u32 k, i, used;
+
+    mem_copy(sec, "optics.A", 9);           /* (an initialised array would call memcpy) */
+    mem_copy(name, " settings A", 12);
+
+    for (k = 1; k <= DRV_OPTICS_SETS; k++) {
+        for (i = 0, used = 0; i < sch.n; i++)
+            used |= sch.set[i] == k;
+        if (!used)
+            continue;
+        sec[7] = name[10] = (char)('A' + k - 1);
+        for (i = 0; i < cfg_count(); i++) {
+            cfg_entry(i, &se, &ke, &va);
+            if (str_ieq(se, sec))
+                break;
+        }
+        if (i == cfg_count())
+            log_printf(OMK_LOG_WARN, "optics: the schedule names settings %s, but [%s] has no keys: [optics]'s taken",
+                       name + 10, sec);
+        mem_copy(&c, base, sizeof(c));
+        layer_keys(&c, sec, name);
+        if (drv_optics_layer_set(k, &c))
+            log_printf(OMK_LOG_ERROR, "optics: settings %s not given to the driver: [optics]'s taken", name + 10);
+    }
 }
 
 /* Boot, after the store and before the modules: the level, the bisection and the store of level 2, the driver's step */
@@ -483,6 +591,7 @@ void optics_setup(void)
             if (!lv)
                 return;
         } else {
+            layer_sets(&lc);
             drv_optics_layer_floor(5184, &ws, &wb);
             log_printf(OMK_LOG_INFO, "optics: layer set up: the size hook in, the worker's buffer %u bytes at %08x; the "
                        "CPU kernels (the extension unit's multiplies, the read's loops) checked against plain C", ws, wb);
@@ -520,6 +629,7 @@ static void sch_service(u32 now, int busy, u32 ended)
 {
     u32 app, keys;
     int first;
+    char sn[2];
 
     (void)now;
     if (busy)
@@ -545,7 +655,10 @@ static void sch_service(u32 now, int busy, u32 ended)
     sch.given = 1;
     sch.ended0 = ended;
     drv_optics_loop(sch.loop[sch.k], sch.sleep[sch.k]);
+    drv_optics_set(sch.set[sch.k]);
     drv_optics_sub(sch.sub[sch.k]);
+    sn[0] = (char)(sch.set[sch.k] ? 'A' + sch.set[sch.k] - 1 : 0);
+    sn[1] = 0;
     if (sch.sleep[sch.k])
         log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s with a sleep of %u ms instead of the loop, given to the next "
                    "press", sch.k + 1, sch.n, drv_optics_sub_name(sch.sub[sch.k]), sch.sleep[sch.k]);
@@ -553,8 +666,9 @@ static void sch_service(u32 now, int busy, u32 ended)
         log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s with a loop of %u iterations, given to the next press",
                    sch.k + 1, sch.n, drv_optics_sub_name(sch.sub[sch.k]), sch.loop[sch.k]);
     else
-        log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s given to the next press%s", sch.k + 1, sch.n,
-                   drv_optics_sub_name(sch.sub[sch.k]), sch.k + 1 == sch.n ? " (the last entry: kept)" : "");
+        log_printf(OMK_LOG_INFO, "optics: schedule %u of %u: %s%s%s given to the next press%s", sch.k + 1, sch.n,
+                   drv_optics_sub_name(sch.sub[sch.k]), sch.set[sch.k] ? " with the settings " : "",
+                   sn, sch.k + 1 == sch.n ? " (the last entry: kept)" : "");
     dbg_event("optics: schedule", drv_optics_sub_name(sch.sub[sch.k]));
     dbg_mem_dump(first ? "before the first press of the schedule" : "a press of the schedule ended, the camera settled");
 }

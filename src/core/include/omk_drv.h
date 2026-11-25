@@ -285,8 +285,20 @@ typedef struct {
     u32 read_us;                            /* the read's time a job */
     u32 cached;                             /* the read through the window's cached view */
     u32 lcached;                            /* the layer read and written (L4) through the window's cached view */
+    u32 em;                                 /* the source: 0 - the excess over the threshold; 1..64 - the emission of a
+                                               blown pixel standing for em whites (optlayer.h's ol_emission) */
+    u32 bdark;                              /* Bloom by darkness, Q8 */
+    u32 hfirst;                             /* 1 - Halation's code from the place's own light, Bloom after it */
+    u32 st;                                 /* Bloom's tail: sigma, pixels of the picture (0 - none) */
+    u32 tmix;                               /* its weight, Q8 (0 - none) */
 } drv_optics_layer_cfg;
 int drv_optics_layer(const drv_optics_layer_cfg *c);
+/* Further sets of the layer's settings, 1..DRV_OPTICS_SETS (core task, after drv_optics_layer): a job takes the set in
+ * force when it is listed (drv_optics_set, between presses, as drv_optics_sub); the route, the width, the bytes and the
+ * curve are the first set's. 0, or 1 (bad, or no layer) */
+#define DRV_OPTICS_SETS 6
+int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c);
+void drv_optics_set(u32 k);                 /* 0 - the first set ([optics]), 1..DRV_OPTICS_SETS - the further ones */
 /* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize
  * the worker's buffer, *wbuf its address (the cached one) */
 u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf);

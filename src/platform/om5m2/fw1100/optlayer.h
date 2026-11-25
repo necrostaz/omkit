@@ -12,6 +12,13 @@
  * in Y (base: the layer's own light there - the add is smaller where it is bright already, as light adds up), and in Cb
  * and Cr the halation's share of it times its colour; Bloom is neutral. The ISP then adds Y and the chroma centred at
  * 128 with the gains 1024 (opticsdrv.c's blend hook).
+ * The later parts (ol_par_t's em, bdark, hfirst, tmix; each 0 - the first version's values exactly):
+ * - the source may be the emission instead of the excess (ol_emission): the tone curve's shoulder undone, a blown pixel
+ *   standing for em whites - the excess makes a code of 240 glow half as much as 255, a lamp in the scene is tens of
+ *   times brighter than white paper;
+ * - Bloom weighted by the darkness of the place, as Halation (on a bright place a filter's glow hardly shows);
+ * - Halation's code from the place's own light, Bloom after it: its colour does not fade under a strong Bloom;
+ * - Bloom's tail: a wide Gaussian on a plane OL_TAIL times smaller each way, mixed into Bloom's blur (ol_tail_*).
  *
  * The layer's word (format 0x305, 4 bytes a pixel): the byte of Y, Cb and Cr by ol_par_t's positions (the camera's
  * dump decides them, ol_lane_order); the fourth byte 0.
@@ -87,11 +94,23 @@ typedef struct {
     u32 sb1, sb2, mixb;                     /* Bloom's Gaussians: sigmas in layer pixels Q8 (0 - none), the second's
                                                weight Q8 (0 - one Gaussian) */
     u32 sh1, sh2, mixh;                     /* the same for Halation */
-    u32 gb, gh;                             /* gains of the added light, Q8 (256 - the excess once) */
+    u32 gb, gh;                             /* gains of the added light, Q8 (256 - the source once) */
     u32 dark;                               /* Halation weighted by darkness: Q8, 0 - not at all, 256 - none on white */
     s32 hcb, hcr;                           /* Halation's chroma a unit of its Y code, Q8 signed */
     u32 py, pcb, pcr;                       /* the bytes (0..3) of Y, Cb and Cr in a layer word */
+    /* The later parts; 0 each - the first version's values */
+    u32 em;                                 /* the source: 0 - the excess over the threshold; 1..OL_EM_MAX - the emission
+                                               of a pixel whose blown light stands for em whites (ol_emission) */
+    u32 bdark;                              /* Bloom weighted by darkness as Halation: Q8 */
+    u32 hfirst;                             /* 1 - Halation's code (and so its colour) from the place's own light, Bloom
+                                               added after it; 0 - Bloom first */
+    u32 st, tmix;                           /* Bloom's tail: a Gaussian of st (pixels of the tail's plane, Q8) on the
+                                               sources reduced OL_TAIL times (ol_tail_*), mixed in with the weight tmix
+                                               (Q8; 0 - no tail) */
 } ol_par_t;
+
+#define OL_EM_MAX 64                        /* whites a blown pixel stands for, at most: em OL_ONE stays below 2^18 */
+#define OL_TAIL 4                           /* the tail's plane: cells of OL_TAIL x OL_TAIL layer pixels */
 
 enum { OL_ROWS, OL_COLS };                  /* the passes, for the pace callback */
 
@@ -113,7 +132,10 @@ typedef struct {
     u32 *tab;                               /* 256: the read's excess of Bloom | of Halation << 16 */
     u32 *cw;                                /* 256: a word's chroma bytes by the halation's Y code */
     u16 *wd;                                /* 256: Halation's weight by the darkness of the place, Q8, by its code */
-    u32 shift;                              /* the read's sums are kept >> shift (u16) */
+    u16 *wb;                                /* 256: the same of Bloom */
+    u16 *pt;                                /* tw * th: Bloom's tail (ol_tail_*) */
+    u32 tw, th;                             /* the tail's plane: the layer's size / OL_TAIL, rounded up */
+    u32 shift;                             /* the read's sums are kept >> shift (u16) */
     u32 c8;                                 /* 1 - every cell is OL_READ_RUN words wide: the read packs (ol_read_pack) */
     u32 rbytes;                             /* 1 - the packing read loads bytes (the picture through the cache), 0 - words
                                                (past it: each word read once) */
@@ -131,6 +153,8 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
 
     o->lw = lw;
     o->lh = lh;
+    o->tw = (lw + OL_TAIL - 1) / OL_TAIL;
+    o->th = (lh + OL_TAIL - 1) / OL_TAIL;
     o->lin = (const u16 *)b;
     b += 512;
     o->enc = (const u8 *)b;
@@ -141,6 +165,10 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
     b += 1024;
     o->wd = (u16 *)b;
     b += 512;
+    o->wb = (u16 *)b;
+    b += 512;
+    o->pt = (u16 *)b;
+    b += (2 * o->tw * o->th + 3) & ~3u;
     o->acc = (u32 *)b;
     b += 4 * lw;
     o->pb = (u16 *)b;
@@ -269,16 +297,41 @@ static inline u32 ol_read_shift(const u8 *cwp, u32 lw, u32 passes)
     return s;
 }
 
-/* The read's table (after ol_columns): tab[c] = the excess of code c over Bloom's threshold | over Halation's << 16. A
- * half holds the sum of 16 pixels (16 OL_ONE < 65536), so the read adds at most 8 words before it splits the halves */
+/* The shoulder's inverse: a picture's tone curve rolls a scene's light L off into x = L / (1 + L (1 - 1/m)) (0..1 for
+ * L 0..m), so L = x / (1 - x (1 - 1/m)); a blown pixel (x = 1) stands for m whites. Here L / m in Q12 from x in Q12:
+ * x OL_ONE / (m OL_ONE - (m - 1) x) - OL_ONE at x = OL_ONE, x / m near 0 (x OL_ONE below 2^24, m OL_ONE below 2^18) */
+static inline u32 ol_shoulder(u32 x, u32 m)
+{
+    return x * OL_ONE / (m * OL_ONE - (m - 1) * x);
+}
+
+/* The emission of a pixel of linear light x (Q12) over the threshold t (Q12, below OL_ONE): the shoulder's light above
+ * the threshold's, OL_ONE at a blown pixel - so a code of 245 emits ~0.35 of a blown one at m 16 and a threshold of 200,
+ * 230 ~0.13, where the excess x - t gives 0.79 and 0.41 (the light of a lamp and of white paper, both near 255 in the
+ * picture, are far apart in the scene) */
+static inline u32 ol_emission(u32 x, u32 t, u32 m)
+{
+    u32 s = ol_shoulder(x, m), q = ol_shoulder(t, m);
+
+    return s > q ? (s - q) * OL_ONE / (OL_ONE - q) : 0;
+}
+
+/* The read's table (after ol_columns): tab[c] = the source of code c for Bloom | for Halation << 16 - the excess over
+ * the threshold, or the emission (p->em). A half holds the sum of 16 pixels (16 OL_ONE < 65536), so the read adds at
+ * most 8 words before it splits the halves */
 static inline void ol_read_table(ol_t *o, const ol_par_t *p)
 {
-    u32 i, l, eb, eh;
+    u32 i, l, eb, eh, m = p->em > OL_EM_MAX ? OL_EM_MAX : p->em;
 
     for (i = 0; i < 256; i++) {
         l = o->lin[i];
-        eb = l > p->tb ? l - p->tb : 0;
-        eh = l > p->th ? l - p->th : 0;
+        if (m) {
+            eb = ol_emission(l, p->tb, m);
+            eh = ol_emission(l, p->th, m);
+        } else {
+            eb = l > p->tb ? l - p->tb : 0;
+            eh = l > p->th ? l - p->th : 0;
+        }
         o->tab[i] = eb | eh << 16;
     }
 }
@@ -761,6 +814,131 @@ static inline u32 ol_blur2(ol_t *o, u16 *plane, u32 s1, u32 s2, u32 mix)
     return 0;
 }
 
+/* Bloom's tail (a diffusion filter's glow reaches 150..400 px of the picture, ~8..12 % of its width - far wider than
+ * its near part, and too wide for the layer's own plane in the time: ~19 layer pixels of sigma make a box of 11 a pass,
+ * no paired columns, and the whole plane lit). It is made on a plane OL_TAIL times smaller each way, as one level of a
+ * pyramid: the Bloom's sources reduced by a mean over each cell (ol_tail_down, before the Bloom's own Gaussian), the
+ * Gaussian there (ol_tail_blur), then enlarged back bilinearly and mixed into the Bloom's blur with its weight
+ * (ol_tail_up): pb = (256 - w) G(pb) + w T. The mean and the bilinear enlargement keep the light's sum. */
+
+/* The tail's sources: pt[cell] = the mean of the Bloom's sources over the cell (o->acc: the sums of a row of cells) */
+static OL_KERNEL void ol_tail_down(ol_t *o)
+{
+    u32 lw = o->lw, tw = o->tw, ty, tx, y, y0, y1, x, n, k, s;
+    u32 *acc = o->acc;
+    const u16 *row;
+    u16 *out = o->pt;
+
+    for (ty = 0; ty < o->th; ty++) {
+        y0 = ty * OL_TAIL;
+        y1 = y0 + OL_TAIL < o->lh ? y0 + OL_TAIL : o->lh;
+        for (tx = 0; tx < tw; tx++)
+            acc[tx] = 0;
+        for (y = y0, row = o->pb + OL_MUL(y0, lw); y < y1; y++, row += lw) {
+            for (tx = 0, x = 0; x + OL_TAIL <= lw; tx++, x += OL_TAIL)
+                acc[tx] += (u32)row[x] + row[x + 1] + row[x + 2] + row[x + 3];
+            for (; x < lw; x++)             /* a last cell narrower than OL_TAIL */
+                acc[tx] += row[x];
+        }
+        for (tx = 0, x = 0; tx < tw; tx++, x += OL_TAIL) {
+            s = acc[tx];
+            if (y1 - y0 == OL_TAIL && x + OL_TAIL <= lw) {
+                *out++ = (u16)((s + 8) >> 4);   /* a whole cell */
+                continue;
+            }
+            k = x + OL_TAIL <= lw ? OL_TAIL : lw - x;   /* a cell at the right or bottom edge: what it has */
+            n = OL_MUL(k, y1 - y0);
+            *out++ = (u16)((s + n / 2) / n);
+        }
+    }
+}
+
+/* The tail's Gaussian (sigma: tail pixels, Q8) on the plane pt, with the layer's work rows (acc, ring, tmp, the rows'
+ * ranges: all free between the layer's Gaussians, and large enough for the smaller plane) */
+static inline u32 ol_tail_blur(ol_t *o, u32 sigma)
+{
+    ol_t t;                                 /* what ol_gauss uses (a structure's copy would call memcpy) */
+    u32 r;
+
+    t.lw = o->tw;
+    t.lh = o->th;
+    t.rng = o->rng;
+    t.acc = o->acc;
+    t.ring = o->ring;
+    t.tmp = o->tmp;
+    t.pace = o->pace;
+    t.ctx = o->ctx;
+    t.done = t.all = 0;
+    r = ol_gauss(&t, o->pt, sigma);
+    o->done += t.done;
+    o->all += t.all;
+    return r;
+}
+
+/* The bilinear weights (x8) of OL_TAIL = 4: layer pixel 4j + q lies at j + (q - 1.5) / 4 of the tail's cell centres,
+ * between cells j - 1 and j (q 0, 1: weights 3:5, 1:7) or j and j + 1 (q 2, 3: 7:1, 5:3); the edges held. Along a
+ * column of the tail: the two rows and their weights of a layer row (ol_tail_up); along a row: all four at once */
+
+/* A layer row's values of the tail's columns (x8): v[i] = r0[i] w0 + r1[i] w1 (w0 + w1 = 8) */
+static OL_KERNEL void ol_tail_col(u32 *v, u32 *end, const u16 *r0, const u16 *r1, u32 w0, u32 w1)
+{
+    do {
+        *v++ = OL_MUL(*r0++, w0) + OL_MUL(*r1++, w1);
+    } while (v != end);
+}
+
+/* One layer pixel of the tail (t: x64) mixed into the Bloom's blur: (pb (256 - w) + T w + 128) >> 8 */
+#define OL_TAIL_MIX(p, t) (*(p) = (u16)((OL_MUL(*(p), iw) + OL_MUL(((t) + 32) >> 6, w) + 128) >> 8))
+
+/* One layer row of the tail: v[0..tw) its values in the row (x8), interpolated along it (x64 in all), four pixels a
+ * cell of the tail, mixed into pb (lw pixels; a last cell may be narrower). The small factors by the extension unit
+ * too: the compiler makes 3 s or 5 b of shifts and adds into the CPU's slow mul */
+static OL_KERNEL void ol_tail_row(u16 *pb, const u32 *v, u32 lw, u32 tw, u32 w)
+{
+    u32 iw = 256 - w, a, b, c, b5, b7, j;
+    u16 *end = pb + lw;
+
+    for (j = 0, a = v[0]; j < tw; j++, a = b) {
+        b = v[j];
+        c = j + 1 < tw ? v[j + 1] : b;
+        b5 = OL_MUL(b, 5);
+        b7 = b5 + b + b;
+        OL_TAIL_MIX(pb, OL_MUL(a, 3) + b5);          /* 3a + 5b */
+        if (++pb == end)
+            break;
+        OL_TAIL_MIX(pb, a + b7);                     /* a + 7b */
+        if (++pb == end)
+            break;
+        OL_TAIL_MIX(pb, b7 + c);                     /* 7b + c */
+        if (++pb == end)
+            break;
+        OL_TAIL_MIX(pb, b5 + OL_MUL(c, 3));          /* 5b + 3c */
+        if (++pb == end)
+            break;
+    }
+}
+
+/* The tail enlarged back to the layer and mixed into the Bloom's blur pb with the weight w (Q8; o->acc: a row) */
+static inline void ol_tail_up(ol_t *o, u32 w)
+{
+    u32 y, jy, qy, tw = o->tw, th = o->th;
+    const u16 *b;
+    u16 *row = o->pb;
+
+    for (y = 0, jy = 0, qy = 0; y < o->lh; y++, row += o->lw) {
+        b = o->pt + OL_MUL(jy, tw);
+        if (qy < 2)                         /* rows jy - 1 and jy: 3:5, 1:7 */
+            ol_tail_col(o->acc, o->acc + tw, jy ? b - tw : b, b, qy ? 1 : 3, qy ? 7 : 5);
+        else                                /* rows jy and jy + 1: 7:1, 5:3 */
+            ol_tail_col(o->acc, o->acc + tw, b, jy + 1 < th ? b + tw : b, qy == 2 ? 7 : 5, qy == 2 ? 1 : 3);
+        ol_tail_row(row, o->acc, o->lw, tw, w);
+        if (++qy == OL_TAIL) {
+            qy = 0;
+            jy++;
+        }
+    }
+}
+
 /* The sigma the worker blurs with, in layer pixels Q8: of a Gaussian of `sigma` pixels of the picture (width W) on a layer
  * lw wide whose reduction and enlargement smooth by `floor` pixels (Gaussians add up in variance), 0 - the transport
  * alone is that wide already */
@@ -801,6 +979,7 @@ static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
 
     for (hy = 0; hy < 256; hy++) {
         o->wd[hy] = (u16)(256 - (p->dark * o->lin[hy] >> 12));
+        o->wb[hy] = (u16)(256 - (p->bdark * o->lin[hy] >> 12));
         o->cw[hy] = ol_clamp8(128 + (hy * p->hcb >> 8)) << (8 * p->pcb) | ol_clamp8(128 + (hy * p->hcr >> 8)) << (8 * p->pcr);
     }
     o->neutral = ol_neutral(p);
@@ -808,19 +987,29 @@ static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
 }
 
 /* The layer word of a pixel with the blurs b (Bloom) and h (Halation) and its own Y code c (ol_word_tables made): the
- * added light in Y, the halation's colour in Cb and Cr */
+ * added light in Y, the halation's colour in Cb and Cr. Each added light weighted by the darkness of the place (Bloom's
+ * weight 256 - none - unless bdark: (v 256) >> 8 is v). The halation's code is what it adds over the light before it:
+ * over Bloom's (the first version), or over the place's own (hfirst: its colour does not fade under a strong Bloom) */
 static inline u32 ol_word_of(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c)
 {
-    u32 base = o->lin[c], t1, t2, e2;
+    u32 base = o->lin[c], t1, t2, e1, e2, ab, ah;
 
-    t1 = base + (OL_MUL(b, p->gb) >> 8);
+    ab = OL_MUL(OL_MUL(b, p->gb) >> 8, o->wb[c]) >> 8;
+    ah = OL_MUL(OL_MUL(h, p->gh) >> 8, o->wd[c]) >> 8;
+    if (p->hfirst) {                        /* Halation first: its code from the base */
+        t1 = base + ah;
+        ah = ab;                            /* the second light added */
+    } else {
+        t1 = base + ab;
+    }
     if (t1 > OL_ONE)
         t1 = OL_ONE;
-    t2 = t1 + (OL_MUL(OL_MUL(h, p->gh) >> 8, o->wd[c]) >> 8);
+    t2 = t1 + ah;
     if (t2 > OL_ONE)
         t2 = OL_ONE;
+    e1 = o->enc[t1];
     e2 = o->enc[t2];
-    return (e2 - o->enc[base]) << o->ys | o->cw[e2 - o->enc[t1]];
+    return (e2 - o->enc[base]) << o->ys | o->cw[p->hfirst ? e1 - o->enc[base] : e2 - e1];
 }
 
 /* The word of pixel i; nothing added - the neutral word (what ol_word_of gives then) */

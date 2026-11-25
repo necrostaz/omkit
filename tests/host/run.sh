@@ -58,6 +58,10 @@ for phase in 1 2; do
     out=$("$BIN/test_core" "$tmp/layer$phase" layer $phase 2>&1)
     if [ "$out" = ok ]; then pass "core: optics layer settings $phase"; else fail "core: optics layer settings $phase"; echo "$out" | sed 's/^/        /'; fi
 done
+# ... and its further sets: schedule entries L4:X with [optics.X] over [optics]
+mkdir "$tmp/layer_sets"
+out=$("$BIN/test_core" "$tmp/layer_sets" layer_sets 2>&1)
+if [ "$out" = ok ]; then pass "core: optics layer settings by the press"; else fail "core: optics layer settings by the press"; echo "$out" | sed 's/^/        /'; fi
 
 # The test scenario (tests/host/test_shoot.c): its state machine against a simulated camera, by keys and by wifi events
 for path in keys wifi; do

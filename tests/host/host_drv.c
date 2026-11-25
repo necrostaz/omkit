@@ -883,6 +883,25 @@ int drv_optics_layer(const drv_optics_layer_cfg *c)
     return host_opt_layer_rc;
 }
 
+/* The further sets and the set of each press */
+drv_optics_layer_cfg host_opt_sets[DRV_OPTICS_SETS + 1];
+u32 host_opt_nsets, host_opt_set;
+
+int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c)
+{
+    if (!k || k > DRV_OPTICS_SETS)
+        return 1;
+    host_opt_sets[k] = *c;
+    if (k > host_opt_nsets)
+        host_opt_nsets = k;
+    return 0;
+}
+
+void drv_optics_set(u32 k)
+{
+    host_opt_set = k;
+}
+
 u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf)
 {
     *wsize = 0;
