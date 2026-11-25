@@ -180,6 +180,16 @@ void cfg_once_drop(void)
     once_on = 0;
 }
 
+const char *cfg_once_str(const char *section, const char *key)
+{
+    u32 i;
+
+    for (i = count; once_on && i-- > once_from;)
+        if (str_ieq(entries[i].section, section) && str_ieq(entries[i].key, key))
+            return entries[i].value;
+    return 0;
+}
+
 const char *cfg_str(const char *section, const char *key, const char *def)
 {
     u32 i;

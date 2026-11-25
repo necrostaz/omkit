@@ -37,6 +37,15 @@ for path in keys wifi; do
     if [ "$out" = ok ]; then pass "core: test scenario ($path)"; else fail "core: test scenario ($path)"; echo "$out" | sed 's/^/        /'; fi
 done
 
+# The scenario without hands (core/handsfree.c), each case a start of its own: the hold, the USB dialog answered, the
+# result file and the restart (full); MTP asked for once at the start after it (next); connected to the computer before
+# the hold (missed); the application stuck, the power-off job not taken, the watchdog (stuck); not from OMKIT.INI (ini)
+for case in full next missed stuck ini; do
+    mkdir "$tmp/hands_$case"
+    out=$("$BIN/test_shoot" "$tmp/hands_$case" hands $case 2>&1)
+    if [ "$out" = ok ]; then pass "core: hands-free ($case)"; else fail "core: hands-free ($case)"; echo "$out" | sed 's/^/        /'; fi
+done
+
 # A module sees only src/sdk/include: the public header declares no driver, and the driver header is not there
 if printf '#include "omk_api.h"\n#ifdef OMK_DRV_H\n#error driver\n#endif\nint f(const omk_api *a) { return a->version; }\n' |
         "$HOST_CC" -x c -fsyntax-only -Werror -Isrc/sdk/include - && [ ! -e src/sdk/include/omk_drv.h ]; then

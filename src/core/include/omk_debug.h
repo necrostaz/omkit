@@ -31,7 +31,8 @@ enum {                                      /* HELLO's p4 */
     DBG_F_RING = 1, DBG_F_PREV = 2, DBG_F_WRITE = 4, DBG_F_NO_CARD = 8, DBG_F_PTP = 16, DBG_F_BUFFERS = 32,
     DBG_F_RESTART = 64,                     /* RESTART restarts the camera */
     DBG_F_SHOOT = 128,                      /* SHOOT: the test scenario over USB */
-    DBG_F_INFO = 256                        /* GET INFO: the build, the run */
+    DBG_F_INFO = 256,                       /* GET INFO: the build, the run */
+    DBG_F_HANDS_FREE = 512                  /* SHOOT.RUN's hands_free = on: USB held as charge only, a restart at the end */
 };
 #define DBG_STAGE 16384                     /* the most a GET of BANK or MEM sends */
 #define DBG_XFER_SIZE 65536                 /* the job buffer: READ, LIST, SNAP, WDATA pieces */

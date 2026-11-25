@@ -43,8 +43,10 @@ static struct {
     u32 takes0, counter, half_seen, half_ms, full_at, write_t, stuck_t, stuck_sent, started;
     u32 shooting_since, arm_told;           /* ARMED: since when the camera shoots (0 - it does not); the wait was logged */
     u32 paused, resume;                     /* ARMED after a power-off or sleep began; then to the step, not the delay */
+    const char *why;                        /* how the last one ended (a constant text) */
     u8 down[2];                             /* our presses: half, full */
 } s;
+static int once_due = -1;                   /* SHOOT.RUN: -1 not read yet, 1 a scenario from it is due, 0 none */
 
 static const char *trim(char *b)
 {
@@ -209,6 +211,7 @@ static void finish(u32 result, const char *why, u32 now)
 {
     release_all();
     s.result = result;
+    s.why = why;
     log_printf(result == SHOOT_DONE ? OMK_LOG_INFO : OMK_LOG_WARN, "shoot: %s: %u of %u pictures made, %u not seen made, %u s",
                why, s.taken, s.total, s.failed, (now - s.started) / 1000);
     go(S_IDLE, now);
@@ -312,6 +315,12 @@ void shoot_stop(void)
         finish(SHOOT_STOPPED, "stopped", omk_ms());
 }
 
+void shoot_abort(const char *why)
+{
+    if (s.state != S_IDLE)
+        finish(SHOOT_FAILED, why, omk_ms());
+}
+
 /* A power-off or sleep began: not the end of the scenario. The firmware begins one and cancels it in normal work - the
  * USB cable taken out in the PC mode is a power-off (reason 1) that the lever, still on, cancels (camera, card155): then the
  * camera shoots again. So the keys are released and the scenario waits for the camera to shoot again (ARMED, a new
@@ -344,6 +353,7 @@ void shoot_status(shoot_info *out)
     out->step = s.step;
     out->steps = s.nsteps;
     out->waiting = s.state == S_ARMED;
+    out->why = s.state == S_IDLE && s.why ? s.why : "";
 }
 
 /* OMKIT\SHOOT.RUN: read with OMKIT.INI's keys under it, then removed; 1 - a scenario to start now */
@@ -367,14 +377,25 @@ static int take_once(void)
     return 1;
 }
 
+/* Early in the start (core_main, before the hooks): a scenario without hands must hold USB before the firmware chooses
+ * its mode. Once per start */
+int shoot_once(void)
+{
+    if (once_due < 0)
+        once_due = take_once();
+    return once_due;
+}
+
 void shoot_setup(u32 now)
 {
     const char *run = cfg_str(SEC, "run", "off");
     static const char *const keys[] = {"run", "start_delay", "steps", "shots", "interval", "settle", "trigger", "half",
-                                       "hold", "write", "arm_wait"};
+                                       "hold", "write", "arm_wait", "hands_free", "session"};
     const char *sec, *key, *val;
     u32 i, k;
-    int once = take_once();
+    int once = shoot_once();
+
+    once_due = 0;                           /* taken: a second setup in the same start starts nothing */
 
     (void)now;
     for (i = 0; i < cfg_count(); i++) {

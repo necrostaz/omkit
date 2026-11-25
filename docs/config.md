@@ -262,3 +262,37 @@ debug tool writes this file for a test session (`omkdebug.py session --scenario 
 steps = look:Kodak Portra 400, stock
 shots = 1
 ```
+
+### 10.2. Without hands: `hands_free = on` in `SHOOT.RUN`
+
+Two keys are taken **only from `SHOOT.RUN`** (in `OMKIT.INI` they are ignored, with a warning in the log):
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `hands_free` | on/off | `off` | the scenario runs with the USB cable left in, as if "charge only" had been chosen; a restart at its end |
+| `session` | text | empty | a name the computer gives the run (up to 16 characters), written back in the result |
+
+With `hands_free = on`, for that one start:
+
+- **USB is held as charge only.** Early in the start, before the modules, `core` places a hook on the camera's use of
+  its USB choice: whatever the choice - the USB dialog's item, or the camera's USB mode setting - the camera takes
+  "charge only": it shoots and does not connect to the computer. If the camera shows its USB dialog, `core` presses OK
+  and the hook turns the item into "charge only". The camera's settings are not changed.
+- **At the end** - the scenario done, failed, stopped or out of time, or the camera's application stuck (30 s after its
+  task dump, `[core] taskdump`) - `core` writes the result to `OMKIT\SHOOT.END`, lets USB go and restarts
+  the camera: an ordinary power-off for a reboot (the settings saved, the card unmounted) with a wake-up alarm of one
+  second, started by a task of the firmware other than the camera's application, so that it works also while the
+  application hangs. If that power-off does not begin or stops half way, the watchdog resets the camera (nothing more
+  is saved).
+- **The next start** connects to the computer in the MTP mode: with the camera's USB mode set to MTP by itself; with
+  the USB dialog, `core` answers it once with MTP (`SHOOT.END` asks for it, and `core` takes the request off before it
+  answers).
+- If the camera has connected to the computer before `core` could hold USB (its USB mode set to MTP or Storage: the
+  camera chooses at the card's mount, about when `core` starts), the scenario ends at once, the result says so and the
+  camera stays connected. **For a session without hands, leave the camera's USB mode at asking (the dialog).**
+
+`OMKIT\SHOOT.END` has a fixed length of 256 bytes (it is rewritten in place) and `key=value` lines: `session`, `run` (the
+power-on that ran the scenario), `build`, `result` (`done`, `failed`, `stopped`), `why`, `taken`, `total`, `failed`,
+`usb_hook` (how many USB choices the hook changed), `connect` (`mtp` - the next start answers the dialog with MTP; `none`).
+It is written also with `[debug] card_writes = off`: like the removal of `SHOOT.RUN`, it is the computer's request.
+`omkdebug.py session --hands-free` writes `SHOOT.RUN` with these keys and reads the result ([debug.md](debug.md#6-a-test-session)).

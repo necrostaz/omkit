@@ -350,12 +350,14 @@ int drv_power_pending(void)
     return host_power_pending;
 }
 
+u32 host_k3;                                /* K3 of the power probe: the firmware's power-off or sleep began */
+
 u32 drv_power_probe(u32 *w, u32 max)
 {
     u32 n;
 
     for (n = 0; n < max && n < 6; n++)
-        w[n] = n ? 0 : (u32)host_power_pending;
+        w[n] = n == 0 ? (u32)host_power_pending : n == 1 ? host_k3 : 0;
     return n;
 }
 
@@ -940,4 +942,83 @@ __attribute__((weak)) int drv_look_find(const char *name)
 __attribute__((weak)) void drv_prof_choose(u32 prof)
 {
     (void)prof;
+}
+
+/* ---- the test scenario without hands (core/handsfree.c) ---- */
+__attribute__((weak)) const char *core_run(void)
+{
+    return "HOSTRUN1";
+}
+
+u32 host_stuck_since;                       /* what taskdump_stuck_since gives (taskdump.c is not in the host build) */
+
+__attribute__((weak)) u32 taskdump_stuck_since(void)
+{
+    return host_stuck_since;
+}
+
+int host_usb_install_rc;                    /* drv_usb_hold_install's answer */
+u32 host_usb_mode, host_usb_hits, host_usb_choice, host_usb_factor, host_usb_link, host_usb_installs;
+u32 host_ok_presses, host_hfw_posts, host_resets, host_reset_cause;
+int host_hfw_rc;                            /* drv_restart_hfw's answer */
+
+int drv_usb_hold_install(void)
+{
+    host_usb_installs++;
+    return host_usb_install_rc;
+}
+
+void drv_usb_hold(u32 mode)
+{
+    host_usb_mode = mode;
+}
+
+u32 drv_usb_hold_get(void)
+{
+    return host_usb_mode;
+}
+
+u32 drv_usb_hold_hits(void)
+{
+    return host_usb_hits;
+}
+
+/* As the firmware's choice: with the hold on, a choice applied becomes the mode held (host_usb_take) */
+void host_usb_take(u32 choice)
+{
+    if (host_usb_mode) {
+        host_usb_hits++;
+        choice = host_usb_mode;
+    }
+    host_usb_choice = choice;
+}
+
+void drv_usb_probe(drv_usb_info *u)
+{
+    u32 keys;
+
+    u->choice = host_usb_choice;
+    u->factor = host_usb_factor;
+    u->link = host_usb_link;
+    if (drv_ui_probe(&u->app, &keys) < 0)
+        u->app = 0xffffffff;
+}
+
+int drv_ok_key(int down)
+{
+    if (down)
+        host_ok_presses++;
+    return 0;
+}
+
+int drv_restart_hfw(void)
+{
+    host_hfw_posts++;
+    return host_hfw_rc;
+}
+
+void drv_reset(u32 cause)
+{
+    host_resets++;
+    host_reset_cause = cause;
 }

@@ -7,6 +7,8 @@
 #include "omk_core.h"
 #include "omk_log.h"
 #include "omk_shoot.h"
+#include "omk_handsfree.h"
+#include "omk_power.h"
 #include "host_drv.h"
 
 static int failed;
@@ -373,9 +375,165 @@ static void test_once(void)
     CHECK(si.state == SHOOT_DONE && si.taken == 1);
 }
 
+/* ---- the scenario without hands (core/handsfree.c) ---- */
+static void write_once(const char *text)
+{
+    char p[512];
+    FILE *f;
+
+    snprintf(p, sizeof(p), "%s/SHOOT.RUN", host_dir);
+    f = fopen(p, "wb");
+    fputs(text, f);
+    fclose(f);
+}
+
+static int read_end(char *b, u32 max)
+{
+    char p[512];
+    FILE *f;
+    size_t n;
+
+    snprintf(p, sizeof(p), "%s/SHOOT.END", host_dir);
+    f = fopen(p, "rb");
+    if (!f)
+        return -1;
+    n = fread(b, 1, max - 1, f);
+    fclose(f);
+    b[n] = 0;
+    return (int)n;
+}
+
+/* The core loop with the hands-free part: the scenario, then hf_service; the camera's USB as the firmware would apply it.
+ * Stops early at a power-off job posted, with stop_on_post */
+static void run_hands(u32 ms, int stop_on_post)
+{
+    u32 end = now_ms() + ms, next = now_ms(), posts = host_hfw_posts;
+
+    while ((s32)(now_ms() - end) < 0 && !(stop_on_post && host_hfw_posts != posts)) {
+        camera_step();
+        if ((s32)(now_ms() - next) >= 0) {
+            next = now_ms() + shoot_service(now_ms(), 250);
+            hf_service(now_ms());
+        }
+        if (cam.usb && host_ok_presses && host_usb_choice == DRV_USB_DIALOG) {
+            host_usb_take(1);               /* OK in the dialog takes the item under the cursor: Storage, say */
+            cam.usb = host_usb_choice != DRV_USB_CHARGE;
+        }
+        drv_sleep(10);
+    }
+}
+
+/* A start with the cable in and the dialog up: the hold, OK pressed, charge only; the scenario; SHOOT.END; USB let go; the
+ * power-off job; then the next start answers the dialog with MTP once */
+static void test_hands_full(void)
+{
+    char b[300];
+    shoot_info si;
+
+    reset_cam();
+    cam.usb = 1;                            /* the PC mode: the dialog */
+    host_usb_choice = DRV_USB_DIALOG;
+    write_once("[shoot]\r\nsteps = keep\r\nshots = 2\r\nstart_delay = 0\r\nhands_free = on\r\nsession = AB12CD34\r\n");
+    hf_setup(shoot_once());
+    CHECK(host_usb_installs == 1 && host_usb_mode == DRV_USB_CHARGE && hf_active());
+    CHECK(!exists("SHOOT.RUN"));
+    shoot_setup(now_ms());
+    run_hands(60000, 1);
+    shoot_status(&si);
+    CHECK(host_ok_presses == 1 && host_usb_hits == 1 && host_usb_choice == DRV_USB_CHARGE);
+    CHECK(si.state == SHOOT_DONE && si.taken == 2);
+    CHECK(host_usb_mode == 0 && !hf_active());
+    CHECK(read_end(b, sizeof(b)) == HF_RESULT_SIZE);
+    CHECK(strstr(b, "session=AB12CD34\r\nrun=HOSTRUN1\r\n") && strstr(b, "result=done\r\n") &&
+          strstr(b, "taken=2\r\ntotal=2\r\n") && strstr(b, "connect=mtp \r\n"));
+    CHECK(host_hfw_posts == 1 && host_resets == 0);
+    power_hook(POWER_HOOK_OFF, 11);         /* HLS_CALLBACK runs the job: the power-off hook, the settings, the card */
+    run_hands(500, 0);
+    host_k3 = 1;
+    run_hands(500, 0);
+    power_hook(POWER_HOOK_CARD_OFF, 0);
+    run_hands(5000, 0);
+    CHECK(host_hfw_posts == 1 && host_resets == 0);
+}
+
+/* The start after it: SHOOT.END asks for MTP once; the dialog answered with OK, the hook makes it MTP, then lets go */
+static void test_hands_next(void)
+{
+    char b[300], p[512];
+    FILE *f;
+
+    snprintf(p, sizeof(p), "%s/SHOOT.END", host_dir);
+    f = fopen(p, "wb");
+    fprintf(f, "session=AB12CD34\r\nresult=done\r\nconnect=mtp \r\n%*s\r\n", HF_RESULT_SIZE - 47, "");
+    fclose(f);
+    reset_cam();
+    cam.usb = 1;
+    host_usb_choice = DRV_USB_DIALOG;
+    hf_setup(0);
+    CHECK(host_usb_mode == DRV_USB_MTP);
+    CHECK(read_end(b, sizeof(b)) == HF_RESULT_SIZE && strstr(b, "connect=none\r\n"));
+    run_hands(5000, 0);
+    CHECK(host_ok_presses == 1 && host_usb_choice == DRV_USB_MTP && host_usb_mode == 0);
+    hf_setup(0);                            /* asked once only */
+    CHECK(host_usb_mode == 0);
+}
+
+/* The camera connects to the computer (its USB mode MTP, chosen before core started): the scenario ends at once, no
+ * restart - the computer finds it connected */
+static void test_hands_missed(void)
+{
+    char b[300];
+    shoot_info si;
+
+    reset_cam();
+    cam.usb = 1;
+    host_usb_choice = DRV_USB_MTP;
+    write_once("[shoot]\r\nsteps = keep\r\nhands_free = on\r\nsession = 00000002\r\n");
+    hf_setup(shoot_once());
+    shoot_setup(now_ms());
+    run_hands(10000, 0);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_FAILED && host_ok_presses == 0 && host_hfw_posts == 0 && host_usb_mode == 0);
+    CHECK(read_end(b, sizeof(b)) > 0 && strstr(b, "session=00000002") && strstr(b, "result=failed") &&
+          strstr(b, "connected to the computer") && strstr(b, "connect=none"));
+}
+
+/* The application stuck: the scenario ends 30 s after the task dump; the power-off job is not taken (no power-off hook),
+ * posted once more, then the watchdog */
+static void test_hands_stuck(void)
+{
+    char b[300];
+    shoot_info si;
+
+    reset_cam();
+    host_usb_choice = DRV_USB_CHARGE;       /* the hook was in time: charge only at once */
+    write_once("[shoot]\r\nsteps = keep\r\nshots = 20\r\ninterval = 3000\r\nhands_free = on\r\nsession = 00000003\r\n");
+    hf_setup(shoot_once());
+    shoot_setup(now_ms());
+    run_hands(8000, 0);
+    host_stuck_since = now_ms() | 1;
+    run_hands(29000, 0);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_RUNNING && si.taken >= 5 && host_hfw_posts == 0);
+    run_hands(2000, 0);
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_FAILED && all_released());
+    CHECK(read_end(b, sizeof(b)) > 0 && strstr(b, "why=the application stuck") && strstr(b, "connect=mtp"));
+    run_hands(5000, 0);
+    CHECK(host_hfw_posts == 2 && host_resets == 1 && host_reset_cause == 0x4f4d4b48);
+}
+
+/* hands_free in OMKIT.INI is not taken: one-shot only (OMKIT.INI of this group has it) */
+static void test_hands_ini(void)
+{
+    write_once("[shoot]\r\nsteps = keep\r\n");
+    hf_setup(shoot_once());
+    CHECK(host_usb_installs == 0 && !hf_active());
+}
+
 int main(int argc, char **argv)
 {
-    int wifi = argc > 2 && !strcmp(argv[2], "wifi");
+    int wifi = argc > 2 && !strcmp(argv[2], "wifi"), hands = argc > 2 && !strcmp(argv[2], "hands");
     FILE *f;
     char path[512];
 
@@ -385,11 +543,30 @@ int main(int argc, char **argv)
     if (!f)
         return 2;
     fprintf(f, "[shoot]\r\nshots = 2\r\ninterval = 1000\r\nsettle = 500\r\nhalf = 1000\r\nhold = 150\r\nwrite = 5000\r\n"
-               "arm_wait = 20000\r\ntrigger = %s\r\n", wifi ? "wifi" : "keys");
+               "arm_wait = 20000\r\ntrigger = %s\r\n%s", wifi ? "wifi" : "keys", hands ? "hands_free = on\r\n" : "");
     fclose(f);
     mem_init();
     CHECK(cfg_load() == 1);
     log_setup(0, OMK_LOG_DEBUG);
+    if (hands) {                            /* each a start of its own: SHOOT.RUN is taken once per program */
+        const char *t = argc > 3 ? argv[3] : "";
+
+        if (!strcmp(t, "full"))
+            test_hands_full();
+        else if (!strcmp(t, "next"))
+            test_hands_next();
+        else if (!strcmp(t, "missed"))
+            test_hands_missed();
+        else if (!strcmp(t, "stuck"))
+            test_hands_stuck();
+        else
+            test_hands_ini();
+        if (failed)
+            fprintf(stderr, "%d checks failed\n", failed);
+        else
+            printf("ok\n");
+        return failed != 0;
+    }
     test_parse();
     test_done(wifi);
     if (!wifi) {
