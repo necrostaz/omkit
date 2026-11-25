@@ -1146,17 +1146,17 @@ static u32 __attribute__((noinline)) op_bench_stack(void)
     return op_bench_box(v, v + OP_BENCH_N);
 }
 
-static u32 __attribute__((noinline)) op_loop_plain(u32 n, u32 a)
+static u32 __attribute__((noipa)) op_loop_plain(u32 n, u32 a)
 {
     u32 b = 1;
 
     do {
-        b = b + a + 1;
+        b = (b ^ a) + 1;                    /* as the loop below with an exclusive or for the multiplication */
     } while (--n);
     return b;
 }
 
-static u32 __attribute__((noinline)) op_loop_mul(u32 n, u32 a)
+static u32 __attribute__((noipa)) op_loop_mul(u32 n, u32 a)
 {
     u32 b = 1;
 
@@ -1168,6 +1168,7 @@ static u32 __attribute__((noinline)) op_loop_mul(u32 n, u32 a)
 
 static void op_bench(volatile op_rec_t *r, ol_t *L)
 {
+    volatile u32 sink;                      /* the loops' results kept: the compiler leaves no loop out */
     u32 t;
 
     r->bx_stack = op_bench_stack();
@@ -1175,11 +1176,12 @@ static void op_bench(volatile op_rec_t *r, ol_t *L)
         r->bx_wbuf = op_bench_box(L->pc, L->pc + OP_BENCH_N);   /* the second Gaussian's plane: not in use yet */
     r->bx_core = op_bench_box(op_bench_core, op_bench_core + OP_BENCH_N);
     t = drv_ticks();
-    op_loop_plain(OP_TURNS, r->job | 3);
+    sink = op_loop_plain(OP_TURNS, r->job | 3);
     r->lp_plain = drv_ticks_since(t);
     t = drv_ticks();
-    op_loop_mul(OP_TURNS, r->job | 3);
+    sink = op_loop_mul(OP_TURNS, r->job | 3);
     r->lp_mul = drv_ticks_since(t);
+    (void)sink;
 }
 
 /* One row of the picture timed (L4, before the read, out of its budget): the first row, words read with their sum,
