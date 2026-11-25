@@ -1106,7 +1106,8 @@ static void test_layer(int phase)
                                          "bloom_mix = 25\nhalation_cb = -50\n" :
                                          "[optics]\nroute = 403\nlayer_bytes = 120\nlayer_width = 648\n"
                                          "halation = 1\nhalation_sigma = 10\nlayer_cached = 1\n"
-                                         "schedule = L0, L1, l2, L4\n");
+                                         "schedule = L0, L1, l2, L4\nread_ms = 70\nhalation_toe = 5\n"
+                                         "halation_max = 60\nbloom_max = 250\njobs = both\n");
     CHECK(cfg_load() == 1);
     log_setup(1, OMK_LOG_INFO);
     host_prev_ended = 1;
@@ -1129,7 +1130,9 @@ static void test_layer(int phase)
               host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 6);
         CHECK(host_opt_layer.bench == 0 && host_look_rows == 1);
         CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 70 * 256 / 100);
-        CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 100000 && host_opt_layer.cached == 0);
+        CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 0 && host_opt_layer.cached == 0);
+        CHECK(!host_opt_layer.btoe && !host_opt_layer.bmax && !host_opt_layer.htoe && !host_opt_layer.hmax);  /* no curve */
+        CHECK(host_opt_layer.jobs == DRV_OPTICS_JOBS_FIRST);           /* the second job of RAW+JPEG without the layer */
         CHECK(host_opt_layer.lcached == 0);
         CHECK(host_opt_layer.em == 16 && host_opt_layer.bdark == 80 * 256 / 100 && host_opt_layer.hfirst == 1);
         CHECK(host_opt_layer.emb == 16);                                /* Bloom's source: the common one */
@@ -1141,6 +1144,9 @@ static void test_layer(int phase)
         CHECK(host_opt_layer.order == (1u | 2u << 8 | 0u << 16) && host_opt_layer.gb == 150 * 256 / 100);
         CHECK(host_opt_layer.sbv == DRV_OPTICS_ROWS && host_opt_layer.shv == 1);
         CHECK(host_opt_layer.lcached == 1);
+        CHECK(host_opt_layer.htoe == 5 * 4095 / 100 && host_opt_layer.hmax == 60 * 4095 / 100);
+        CHECK(host_opt_layer.bmax == 200 * 4095 / 100 && !host_opt_layer.btoe);   /* 250 clamped to 200 */
+        CHECK(host_opt_layer.jobs == DRV_OPTICS_JOBS_BOTH);
     }
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
@@ -1148,7 +1154,15 @@ static void test_layer(int phase)
     CHECK(t && strstr(t, phase == 1 ? "the layer read and written past the cache" :
                                       "the layer read and written through the CACHED view"));
     if (phase == 1)
-        CHECK(t && strstr(t, "optics: probe level 0: a step in the look's stills on the mask route; the stills get L4"));
+        CHECK(t && strstr(t, "optics: probe level 0: a step in the look's stills on the mask route; the stills get L4") &&
+              strstr(t, "optics: layer: the strength's curve after the blur (percent of white; 0 - none): Bloom toe 0, "
+                        "at most 0; Halation toe 0, at most 0") &&
+              strstr(t, "optics: layer: jobs = first - the second job of a RAW+JPEG press (the ORF's preview) without "
+                        "the layer") && strstr(t, "picture read on (every row of cells, 2 rows each)") &&
+              !strstr(t, "read_ms is not taken"));
+    else if (!(t && strstr(t, "optics: layer: read_ms is not taken") && strstr(t, "Halation toe 5, at most 60") &&
+               strstr(t, "jobs = both - both jobs")))
+        CHECK(0);
     else
         CHECK(t && strstr(t, "layer_width = 648 out of 42..400") && strstr(t, "Halation sigma 10 px is below the layer's "
                                                                            "smallest") && strstr(t, "schedule of 4 entries"));

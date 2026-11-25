@@ -269,6 +269,7 @@ typedef struct {
     u32 cached, cached_same;                /* of them: a cached read begun; ended with the same sum as past the cache */
     u32 armed;                              /* the arming not taken yet */
     u32 listed, noroom, lost;               /* steps put into lists, lists with no room, jobs not reported (ring) */
+    u32 seconds;                            /* second jobs of RAW+JPEG presses listed without the layer (jobs = first) */
     u32 ended[DRV_OPTICS_SUBS];             /* our jobs ended (H3), by the substage they were listed with */
 } drv_optics_info;
 int drv_optics_install(u32 level);
@@ -318,7 +319,15 @@ typedef struct {
      * 100 by default since card168: a diffusion filter glows by day as by night) */
     u32 day[6];
     u32 bench;                              /* 1 - the bench of card164/165 in every L4 job (CPU time, a test) */
+    /* The strength's curves after the blur (card169; optlayer.h's ol_curve): Bloom's and Halation's toe and ceiling of
+     * the added light, Q12 of white (0 each: no curve, the light as before) */
+    u32 btoe, bmax, htoe, hmax;
+    /* The jobs of a RAW+JPEG press that get the layer (card169): DRV_OPTICS_JOBS_FIRST - the first only (FileType 1,
+     * whose picture is the JPEG; the second, FileType 3, makes the ORF's preview: camera's pictures compared), BOTH */
+    u32 jobs;
 } drv_optics_layer_cfg;
+#define DRV_OPTICS_JOBS_FIRST 0
+#define DRV_OPTICS_JOBS_BOTH 1
 #define DRV_OPTICS_ROWS 0xff
 #define DRV_OPTICS_TAIL_MAX 230             /* 90 %: the near part keeps 10 % (its share divides the tail, Q8) */
 #define DRV_OPTICS_DAY_CODE 200            /* the day's share: the layer's pixels at this code or above */

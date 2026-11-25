@@ -912,6 +912,225 @@ static void haze(void)
     check(!memcmp(o.pc, o.pt, 2 * o.tw * o.th), "haze: 0 - the sources as without it");
 }
 
+/* ---- card169: the cover read and the strength's curve ---- */
+
+/* A picture of CH rows of cells (16 rows each) of PW pixels: dark with lights of 1..12 px and thin lines (the glints of a
+ * wire), the 4:2:2 words as the camera's */
+#define CH 12
+#define CPH (16 * CH)
+static u32 cpic[CPH][PW / 2];
+static u8 cyy[CPH][PW];
+
+static void cover_picture(u32 seed0)
+{
+    u32 x, y, k, n, x0, y0, w, h, v;
+
+    seed = seed0;
+    for (y = 0; y < CPH; y++)
+        for (x = 0; x < PW; x++)
+            cyy[y][x] = (u8)(20 + (x / 40 + y / 7) % 30);
+    for (k = 0; k < 600; k++) {             /* blobs and lines */
+        w = k % 3 ? 1 + rnd(12) : 20 + rnd(200);
+        h = k % 3 ? 1 + rnd(12) : 1 + rnd(2);
+        x0 = rnd(PW - w);
+        y0 = rnd(CPH - h);
+        v = 200 + rnd(56);
+        for (y = y0; y < y0 + h; y++)
+            for (x = x0; x < x0 + w; x++)
+                cyy[y][x] = (u8)v;
+    }
+    for (y = 0; y < CPH; y++)
+        for (x = 0, n = 0; x < PW; x += 2, n++)
+            cpic[y][n] = cyy[y][x] | 128u << 8 | (u32)cyy[y][x + 1] << 16 | 128u << 24;
+}
+
+/* The cover read of the picture into o (lw wide, CH rows of cells), up to `upto` rows read in all (0 - all); pack 0 - the
+ * generic loop even at 324; the means by ol_sources */
+static void cover_read(ol_t *o, ol_par_t *p, u32 lw, u32 pack, u32 bytes, u32 upto)
+{
+    u32 cy, k, n = 0;
+
+    layout(o, lw, CH);
+    params(p);
+    p->em = 16;
+    p->emb = 4;
+    p->tb = lin[180];
+    p->th = lin[225];
+    ol_columns(o->cwp, PW, lw);
+    o->shift = ol_read_shift(o->cwp, lw, OL_COVER / 2);
+    ol_read_table(o, p);
+    ol_rows(o, CPH);
+    o->c8 &= pack;
+    o->rbytes = bytes;
+    memset(o->pb, 0, 2 * lw * CH);
+    memset(o->ph, 0, 2 * lw * CH);
+    memset(o->nrow, 0, CH);
+    memset(o->y, 0, lw * CH);
+    for (cy = 0; cy < CH; cy++)
+        for (k = 0; k < OL_COVER; k++, n++)
+            if (!upto || n < upto)
+                ol_cover_cells(o, cpic[ol_cover_y(o, cy, k, CPH)], cy, k);
+    ol_sources(o, p);
+}
+
+/* The cover read against its definition: the mean of the read's table over Y0 of the rows 4 and 12 of each cell (the
+ * sums of a row >> shift, the mean by division, as ol_sources) - packed and generic, by bytes and words, at 324, 250
+ * and 42; the same twice (no state carried); a stop leaves the rows of cells not read to the layer's Y */
+static void cover(void)
+{
+    static u16 sb[324 * CH], sh[324 * CH];
+    ol_t o;
+    ol_par_t p;
+    u32 lw, v, cy, cx, k, x, i, b, h, y, bad = 0, rows = 1, x0, rb, rh, d, pk, means = 1;
+    static const u32 widths[] = {324, 250, 42};
+
+    cover_picture(4242);
+    for (v = 0; v < 3; v++)
+        for (pk = 0; pk < 4; pk++) {
+            lw = widths[v];
+            if (lw != 324 && pk)
+                continue;
+            cover_read(&o, &p, lw, pk >> 1 ? 0 : 1, pk & 1, 0);
+            for (cy = 0; cy < CH; cy++) {
+                for (cx = 0, x0 = 0; cx < lw; x0 += o.cwp[cx], cx++) {
+                    for (k = 0, rb = rh = 0; k < OL_COVER; k++) {
+                        y = ol_cover_y(&o, cy, k, CPH);
+                        if (lw == 324)
+                            rows &= y == 16 * cy + (k ? 12 : 4);
+                        for (x = x0, b = h = 0; x < x0 + o.cwp[cx]; x++) {
+                            b += o.tab[cpic[y][x] & 0xff] & 0xffff;
+                            h += o.tab[cpic[y][x] & 0xff] >> 16;
+                        }
+                        rb += b >> o.shift;
+                        rh += h >> o.shift;
+                    }
+                    d = (u32)o.cwp[cx] * OL_COVER;
+                    i = cy * lw + cx;
+                    bad += o.pb[i] != (rb << o.shift) / d || o.ph[i] != (rh << o.shift) / d;
+                }
+            }
+            if (lw == 324 && !(pk >> 1))
+                for (cy = 0; cy < CH; cy++)
+                    means &= o.nrow[cy] == (OL_COVER | OL_MEANS);
+            if (!v && !pk) {
+                memcpy(sb, o.pb, sizeof(sb));
+                memcpy(sh, o.ph, sizeof(sh));
+            } else if (!v) {
+                bad += memcmp(sb, o.pb, sizeof(sb)) != 0 || memcmp(sh, o.ph, sizeof(sh)) != 0;
+            }
+        }
+    check(rows, "cover: the rows 4 and 12 of a cell of 16");
+    check(means, "cover: the packed read makes the means itself");
+    check(!bad, "cover: the means of the samples, packed and generic, by bytes and words, at 324, 250, 42");
+    cover_read(&o, &p, 324, 1, 1, 0);
+    check(!memcmp(sb, o.pb, sizeof(sb)) && !memcmp(sh, o.ph, sizeof(sh)), "cover: the same sources again (deterministic)");
+    cover_read(&o, &p, 324, 1, 1, 2 * 5 + 1);   /* a stop after 5 rows of cells and one row of the 6th */
+    for (i = 0, bad = 0; i < 324 * CH; i++)
+        bad += i < 324 * 5 ? o.pb[i] != sb[i] || o.ph[i] != sh[i] : o.pb[i] != (o.tab[0] & 0xffff) || o.ph[i] != 0;
+    check(!bad, "cover: a stop - the rows of cells read as before, the rest from the layer's Y (here 0)");
+    if (verbose)
+        printf("cover: the means of the samples at 324, 250, 42; deterministic; a stop falls back on the layer's Y\n");
+}
+
+/* The cover read against the full read (all 16 rows of a cell, both pixels: the first version's sums and means) on
+ * pictures of lights and thin lines, and against the one row of card168 (row 0 of each cell): the picture's sum of the
+ * Halation's sources kept (within 10 %), the error a cell well below the one row's; no cell 9 times its full value (one
+ * row of 16: up to 16) */
+static void cover_vs_full(void)
+{
+    static u16 ch_[324 * CH], fh[324 * CH];
+    ol_t o;
+    ol_par_t p;
+    u32 s, i, cy, j, worst = 0;
+    double sf = 0, sc = 0, ec = 0, e1 = 0, d;
+
+    for (s = 0; s < 4; s++) {
+        cover_picture(1000 + s);
+        cover_read(&o, &p, 324, 1, 1, 0);
+        memcpy(ch_, o.ph, sizeof(ch_));     /* the cover's */
+        memset(o.pb, 0, sizeof(fh));        /* the full read: 16 rows of both pixels */
+        memset(o.ph, 0, sizeof(fh));
+        memset(o.nrow, 0, CH);
+        o.y0 = 0;
+        o.shift = ol_read_shift(o.cwp, 324, 16);
+        for (cy = 0; cy < CH; cy++)
+            for (j = 0; j < 16; j++)
+                ol_read_cells(&o, cpic[16 * cy + j], cy);
+        ol_sources(&o, &p);
+        memcpy(fh, o.ph, sizeof(fh));
+        for (i = 0; i < 324 * CH; i++) {
+            sf += fh[i];
+            sc += ch_[i];
+            d = (double)ch_[i] - fh[i];
+            ec += d * d;
+            if (fh[i] > 20 && ch_[i] > 9 * fh[i] + 9)
+                worst++;
+        }
+        memset(o.pb, 0, sizeof(fh));        /* the one row of card168's read */
+        memset(o.ph, 0, sizeof(fh));
+        memset(o.nrow, 0, CH);
+        for (cy = 0; cy < CH; cy++)
+            ol_read_cells(&o, cpic[16 * cy], cy);
+        ol_sources(&o, &p);
+        for (i = 0; i < 324 * CH; i++) {
+            d = (double)o.ph[i] - fh[i];
+            e1 += d * d;
+        }
+    }
+    check(sc > 0.9 * sf && sc < 1.1 * sf, "cover vs full: the picture's sum of the sources kept within 10 %");
+    check(ec < 0.6 * e1, "cover vs full: a cell's error well below the one row's of card168");
+    check(!worst, "cover vs full: no cell 9 times its full value");
+    if (verbose)
+        printf("cover vs full: sum %.0f of %.0f; squared error a picture: cover %.0f, one row %.0f\n", sc, sf, ec, e1);
+}
+
+/* The strength's curve: none - the light as it was; the toe takes a weak light away and keeps a strong one less the toe;
+ * the ceiling holds every light under it and keeps a weak one; both monotonic. In the words: a weak halation fades, a
+ * strong one stays; the ceiling holds the code added */
+static void curve(void)
+{
+    static u16 t[OL_CURVE];
+    ol_t o;
+    ol_par_t p;
+    u32 i, x, mono = 1, ok = 1, a, b;
+
+    ol_curve(t, 0, 0);
+    for (i = 0; i < OL_CURVE; i++)
+        ok &= t[i] == 2 * i;
+    check(ok, "curve: none - x itself");
+    ol_curve(t, 205, 0);                    /* the toe 5 % */
+    for (i = 1, ok = 1; i < OL_CURVE; i++) {
+        x = 2 * i;
+        mono &= t[i] >= t[i - 1];
+        ok &= t[i] <= x && (x < 4096 || t[i] + 205u >= x);
+    }
+    check(mono && ok && t[20] < 2 * 20 / 4 && t[2000] + 210u >= 4000, "curve: the toe - weak away, strong less the toe");
+    ol_curve(t, 0, 2048);                   /* at most half a white */
+    for (i = 1, ok = 1, mono = 1; i < OL_CURVE; i++) {
+        mono &= t[i] >= t[i - 1];
+        ok &= t[i] < 2048;
+    }
+    check(mono && ok && t[50] >= 95 && t[OL_CURVE - 1] > 1600, "curve: the ceiling - under it, a weak light kept");
+    check(ol_curved(t, 1u << 20) == t[OL_CURVE - 1] && ol_curved(t, 9) == t[4], "curve: its entries");
+    layout(&o, LW, LH);
+    params(&p);
+    p.hfirst = 1;
+    ol_word_tables(&o, &p);
+    check(!o.bc && !o.hc, "curve: off without a toe or a ceiling");
+    a = ol_word_of(&o, &p, 0, 60, 20) & 0xff;
+    b = ol_word_of(&o, &p, 0, 3000, 20) & 0xff;
+    p.htoe = 410;                           /* 10 % */
+    ol_word_tables(&o, &p);
+    check(o.hc && (ol_word_of(&o, &p, 0, 60, 20) & 0xff) < a / 2 + 1 && (ol_word_of(&o, &p, 0, 3000, 20) & 0xff) + 12 >= b,
+          "curve: the toe in the word - a weak halation fades, a strong one stays");
+    p.htoe = 0;
+    p.hmax = 410;
+    ol_word_tables(&o, &p);
+    check((ol_word_of(&o, &p, 0, 4000, 20) & 0xff) <= (u32)(o.enc[o.lin[20] + 410] - 20), "curve: the ceiling in the word");
+    if (verbose)
+        printf("curve: none, toe, ceiling; in the words\n");
+}
+
 int main(int argc, char **argv)
 {
     (void)argv;
@@ -932,6 +1151,9 @@ int main(int argc, char **argv)
     scene();
     words_mono();
     haze();
+    cover();
+    cover_vs_full();
+    curve();
     if (!failed)
         printf("ok\n");
     return failed;

@@ -105,8 +105,8 @@
  * touches, on CPU 0, through its cache. The worker also has its work buffer (an arena block of its own lines, used
  * through the cache of CPU 0 only, as its stack). The core task reports (drv_optics_service).
  *
- * L4's time, a job (the log's lines; optlayer.h has how each part is made cheap): the picture's read in its budget
- * (read_ms), the layer read, the sources, the Gaussians (rows and columns apart, and the share of the values the rows'
+ * L4's time, a job (the log's lines; optlayer.h has how each part is made cheap): the picture's read (the cover read:
+ * every row of cells, to the end - card169), the layer read, the sources, the Gaussians (rows and columns apart, and the share of the values the rows'
  * ranges left to work on), the layer written; one row of the picture timed alone (read; read with the sums; through the
  * cached view too with read_cached) and a bench (a box row on the stack, in the work buffer, in core's memory; a loop
  * with and without a multiplication). Between the parts and the Gaussians' passes the worker gives the CPU away when
@@ -122,7 +122,12 @@
  * read), and Bloom's by the near part's share when there is a tail (ol_tail_add adds the tail at w / (256 - w)). With
  * the strengths comes whether the colour tables in force are black and white (OP_MONO, core's isp_mono): the job's
  * halation then has no colour (Cb, Cr 0 a unit of its Y; its Y as in colour) - a black-and-white film's halo is light,
- * and the layer's chroma is added after the tables made the picture grey. */
+ * and the layer's chroma is added after the tables made the picture grey.
+ *
+ * The jobs of a RAW+JPEG press (card169, [optics] jobs): the first (FileType 1) makes the JPEG, the second (FileType 3)
+ * the ORF's preview (3200x2400, the whole 4:3 frame) - the camera's pictures of card168 show it. With jobs = first (the
+ * default) W lists no step of ours in the second: the press costs one job of the layer, not two; jobs = both - as
+ * before. */
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
@@ -315,7 +320,7 @@ typedef struct {
     u32 lcached;                            /* 1 - the layer read and written through the window's cached view */
     u32 sig[5];                             /* the Gaussians, layer pixels Q8: Bloom 1, 2, Halation 1, 2; the tail's in
                                                its own plane's pixels */
-    u32 f_rows, f_passes, f_us, f_cells, f_maps, f_err;   /* the picture's read: rows, passes, us, rows of cells reached */
+    u32 f_rows, f_us, f_cells, f_maps, f_err;   /* the picture's read: rows, us, rows of cells read, maps, error */
     u32 f_row_max, f_row_avg, f_maps_us, f_slept;   /* ... its longest row and the rows' running mean (us, with what
                                                the CPU did meanwhile), the maps, write-backs and releases, the ticks
                                                given away */
@@ -330,6 +335,7 @@ typedef struct {
                                                sets it, the step that reads takes it back (drv_lock) */
     u32 jobs;                               /* steps begun: the ring's writer index (drv_lock) */
     u32 listed, noroom;                     /* W: steps put into lists; lists with no room for it */
+    u32 seconds;                            /* W: second jobs of RAW+JPEG presses listed without the layer (jobs first) */
     u32 sub;                                /* the substage of new jobs (core: drv_optics_sub) */
     u32 loop, loop_sleep;                   /* drv_optics_loop: the empty loop's iterations (0 - OPT_LOOP); W1 sleeps this
                                                many ms instead of the loop (0 - no) */
@@ -1274,121 +1280,91 @@ static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
     op_unmap(r, win);
 }
 
-/* The picture's rows read into the sources (L4, [optics] read): passes of rows at offsets in the cells' height by bit
- * reversal, so that wherever the time runs out the rows read are spread evenly; in a pass the picture's two banks of the
- * window one after the other (one map each), each with its share of the time left, its rows of cells in an interleaved
- * order. Through the window past the cache, or through its cached view (the cache written back and dropped before and
- * after). The rows of cells no row reached take the layer's own Y (ol_sources).
- * The budget (read_ms) is kept to a row: everything in it counts (the maps, the write-backs, the releases, a tick given
- * away, the time the CPU ran other tasks), and a row - or a bank's map - is begun only when the time left holds one more
- * row as long as the rows' running mean (card165 read past its 100 ms by up to 37 ms: the bank's map and write-back were
- * outside its slice, and its last row was begun with no regard to how long a row takes) */
+/* The picture's rows read into the sources (L4, [optics] read; card169): the cover read of optlayer.h - every row of cells
+ * from OL_COVER rows of the picture (ol_cover_y: 4 and 12 of its 16), one pixel of each pair, to the end whatever the
+ * time, so the sources of a picture are the same from job to job (card168 read in passes until a budget of 70 ms ran out:
+ * 56..141 rows of cells of 243 by the load of the CPU, one row of 16 each, the rest from the layer's Y - a wire's glint on
+ * the row read made its cells' sources 15 times what they are, and which glints glowed changed from press to press).
+ * The rows go down the picture in order, a window a bank (mapped when the next row is in another one); a row across two
+ * banks is replaced by the row after it (wholly in the next bank: a row is far shorter than a bank). Through the window
+ * past the cache, or through its cached view (the cache written back and dropped after the map and before the release).
+ * Between rows op_pace gives the CPU away every OPT_YIELD_US and looks at the stop and abandon words: a stop ends the
+ * read, and the rows of cells not read then take the layer's own Y (ol_sources) - as do all of them when no window
+ * comes (an error). Only the stop words and an error end it: no budget */
 static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const ol_par_t *P, pace_t *p)
 {
     const volatile drv_optics_layer_cfg *cf = op_cfg(o, r->set);
-    u32 W = r->width, H = r->height, rb = r->pitch * 2, lw = L->lw, lh = L->lh, chmin, j, off, bank, b0, b1, rows, left;
-    u32 t0, budget = cf->read_us, done = 0, slice, ts, tr, el, cy, y, bus, win, base, q, k, cached = cf->cached;
-    u32 avg, begun, s0 = p->slept;
+    u32 W = r->width, H = r->height, rb = r->pitch * 2, lw = L->lw, lh = L->lh, cy, k, y, bus, bank, cur = ~0u, win = 0;
+    u32 base = 0, a, t0, ts, tr, sum = 0, s0 = p->slept, cached = cf->cached;
 
     if (ol_columns(L->cwp, W, lw)) {
         r->f_err = 1;
         return;
     }
-    L->shift = ol_read_shift(L->cwp, lw, 16);
+    L->shift = ol_read_shift(L->cwp, lw, OL_COVER / 2);   /* OL_COVER rows of one pixel a pair: as one row of both */
     ol_read_table(L, P);
     ol_rows(L, H);
-    op_row_probe(o, r, L);                  /* out of the read's budget */
+    op_row_probe(o, r, L);                  /* out of the read: a row of both pixels, timed */
     L->rbytes = cached;                     /* through the cache the packing read loads bytes, past it words */
-    avg = cached ? r->pr_csums : r->pr_sums;   /* the rows' running mean: the probe's row to begin with */
-    if (!avg)
-        avg = 1000;
     t0 = drv_ticks();
-    chmin = H / lh;
-    b0 = r->bus >> 27;
-    b1 = (r->bus + rb * (H - 1) + 2 * W - 1) >> 27;
-    for (j = 0; j < 16 && chmin; j++) {
-        off = ol_bitrev4(j) * chmin / 16;
-        if (off < 32) {
-            if (done >> off & 1)
+    for (cy = 0; cy < lh; cy++) {
+        for (k = 0; k < OL_COVER; k++) {
+            y = ol_cover_y(L, cy, k, H);
+            if (y >= H)
                 continue;
-            done |= 1u << off;
-        }
-        begun = 0;
-        left = 0;                           /* the pass's rows still to read, all banks */
-        for (cy = 0; cy < lh; cy++)
-            if (L->ry[cy] + off < H)
-                left++;
-        for (bank = b0; bank <= b1; bank++) {
-            el = drv_ticks_since(t0);
-            if (el + avg >= budget)
-                goto out;
-            for (cy = 0, rows = 0; cy < lh; cy++) {
-                y = L->ry[cy] + off;
+            bus = r->bus + OL_MUL(y, rb);
+            if (bus >> 27 != (bus + 2 * W - 1) >> 27) {   /* across two banks: the next row (the one before at the end) */
+                y = y + 1 < H ? y + 1 : y - 1;
                 bus = r->bus + OL_MUL(y, rb);
-                if (y < H && bus >> 27 == bank && (bus + 2 * W - 1) >> 27 == bank)
-                    rows++;
             }
-            if (!rows)
-                continue;
-            if (!begun) {
-                begun = 1;
-                r->f_passes++;
-            }
-            slice = (budget - el) / left * rows;   /* the bank's share, its map and write-backs in it */
-            left -= rows;
-            for (cy = 0; cy < lh; cy++) {   /* the bank's first row: its window */
-                bus = r->bus + OL_MUL(L->ry[cy] + off, rb);
-                if (bus >> 27 == bank)
-                    break;
-            }
-            ts = drv_ticks();
-            base = op_map(r, bus, 2 * W, &win);
-            r->f_maps++;
-            if (!base) {
-                r->f_err = 2;
-                r->err = 0;                 /* the read only: the layer goes on from its own Y */
-                goto out;
-            }
-            base = win ? base & ~OP_BANK_MASK : 0;   /* a window shows the whole bank; 0: the CPU's own memory */
-            if (cached)
-                drv_fw_cache_flush();
-            r->f_maps_us += drv_ticks_since(ts);
-            for (q = 0; q < 4; q++) {       /* the rows of cells 0, 4, 8, ..., then 2, 6, ..., 1, 5, ..., 3, 7, ... */
-                for (cy = (q == 1 ? 2 : q == 2 ? 1 : q); cy < lh; cy += 4) {
-                    y = L->ry[cy] + off;
-                    bus = r->bus + OL_MUL(y, rb);
-                    if (y >= H || bus >> 27 != bank || (bus + 2 * W - 1) >> 27 != bank)
-                        continue;
-                    if (op_pace(p))         /* first: a tick given away counts in the time below */
-                        goto bank_end;
-                    if (drv_ticks_since(ts) + avg >= slice || drv_ticks_since(t0) + avg >= budget)
-                        goto bank_end;
-                    tr = drv_ticks();
-                    k = base ? base | (bus & OP_BANK_MASK) : op_direct(bus);
-                    ol_read_cells(L, (const volatile u32 *)(cached ? k - OP_UNCACHED : k), cy);
-                    r->f_rows++;
-                    tr = drv_ticks_since(tr);
-                    if (tr > r->f_row_max)
-                        r->f_row_max = tr;
-                    avg = ((avg << 1) + avg + tr + 2) >> 2;
+            bank = bus >> 27;
+            if (bank != cur) {
+                ts = drv_ticks();
+                if (cur != ~0u) {
+                    if (cached)
+                        drv_fw_cache_flush();   /* no line of the picture stays in the cache */
+                    op_unmap(r, win);
+                    cur = ~0u;
                 }
+                base = op_map(r, bus, 2 * W, &win);
+                r->f_maps++;
+                if (!base) {
+                    r->f_err = 2;
+                    r->err = 0;             /* the read only: the rows of cells not read from the layer's own Y */
+                    r->f_maps_us += drv_ticks_since(ts);
+                    goto out;
+                }
+                base = win ? base & ~OP_BANK_MASK : 0;   /* a window shows the whole bank; 0: the CPU's own memory */
+                if (cached)
+                    drv_fw_cache_flush();
+                cur = bank;
+                r->f_maps_us += drv_ticks_since(ts);
             }
-bank_end:
-            ts = drv_ticks();
-            if (cached)
-                drv_fw_cache_flush();       /* no line of the picture stays in the cache */
-            op_unmap(r, win);
-            r->f_maps_us += drv_ticks_since(ts);
-            if (p->stop && (p->stop[0] | p->stop[1]))
+            if (op_pace(p))                 /* a stop: the rest from the layer's Y */
                 goto out;
+            tr = drv_ticks();
+            a = base ? base | (bus & OP_BANK_MASK) : op_direct(bus);
+            ol_cover_cells(L, (const volatile u32 *)(cached ? a - OP_UNCACHED : a), cy, k);
+            r->f_rows++;
+            tr = drv_ticks_since(tr);
+            sum += tr;
+            if (tr > r->f_row_max)
+                r->f_row_max = tr;
         }
     }
 out:
+    if (cur != ~0u) {
+        ts = drv_ticks();
+        if (cached)
+            drv_fw_cache_flush();
+        op_unmap(r, win);
+        r->f_maps_us += drv_ticks_since(ts);
+    }
     for (k = 0; k < lh; k++)
         if (L->nrow[k])
             r->f_cells++;
     r->f_us = drv_ticks_since(t0);
-    r->f_row_avg = avg;
+    r->f_row_avg = r->f_rows ? sum / r->f_rows : 0;
     r->f_slept = p->slept - s0;
 }
 
@@ -1537,6 +1513,10 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.hfirst = cf->hfirst;
     P.tmix = P.gb ? (cf->tmix > DRV_OPTICS_TAIL_MAX ? DRV_OPTICS_TAIL_MAX : cf->tmix) : 0;
     P.haze = cf->haze;                      /* in the tail's sources: none without a tail (ol_word_tables) */
+    P.btoe = cf->btoe;                      /* the strength's curves after the blur (0: none) */
+    P.bmax = cf->bmax;
+    P.htoe = cf->htoe;
+    P.hmax = cf->hmax;
     P.st = r->sig[4] = P.tmix ? ol_cpu_sigma(cf->st, fl, r->width, lw) / OL_TAIL : 0;   /* in the tail's pixels */
     if (P.st < 64)
         P.tmix = 0;                         /* a tail below 0.25 of its pixel: none (ol_gauss would do nothing) */
@@ -1783,6 +1763,16 @@ u32 drv_optics_step(u8 *h)
     return 0;
 }
 
+/* The job h is the second of a RAW+JPEG press (its request C: RawJpeg 1, FileType 3; read as the step reads it). The
+ * camera's pictures (card168: the layer's rows read differ between the two jobs of a press, and the JPEG shows the
+ * first job's, the ORF's 3200x2400 preview the second's) tell that the JPEG is the first job's picture */
+static int op_second(const u8 *h)
+{
+    u32 c = *(const u32 *)(h + H_REQ);
+
+    return op_bus_kind(c, 512) == OP_BUS_DIRECT && *(const u8 *)(c + C_RAWJPEG) == 1 && *(const u8 *)(c + C_FILETYPE) == 3;
+}
+
 /* W (graindrv.c, CPU 0), after the development 0x901 of our job h: the steps after it into out[] - ours, then for the
  * layer's substages the chain (PAIR: 0x603932cb, 0x603934ba; 403: our last step) - their number, 0 - none (no probe or
  * layer, substage N, or no room: `room` entries are free before the selector's step). Without the chain the caller puts
@@ -1809,6 +1799,10 @@ u32 drv_optics_list(u8 *h, u32 room, u32 *out)
         str |= o->str & OP_MONO;            /* black and white: the tables in force, whoever gave the strengths */
         if (!(str & 0xffff))
             sub = DRV_OPTICS_N;             /* Bloom and Halation 0: no step at all (the job as without the layer) */
+        else if (cf->jobs == DRV_OPTICS_JOBS_FIRST && op_second(h)) {
+            sub = DRV_OPTICS_N;             /* the ORF's preview: no step (the job as without the layer) */
+            o->seconds++;
+        }
     }
     n = sub < DRV_OPTICS_L0 ? 2 : o->cfg.route == DRV_OPTICS_PAIR ? 3 : 2;   /* with the plain pass after ours */
     if (sub != DRV_OPTICS_N && room < n) {
@@ -1940,10 +1934,10 @@ static void op_box_ref(u16 *v, u32 n, u32 step, u32 r, u32 alpha, u16 *tmp)
  * pseudo-random row), and ol_gauss (its row and column kernels with the unit's multiplies: two columns a step and one)
  * against op_box_ref's passes on small sparse planes. In the emulator this runs at every start, on the camera too - a
  * kernel the CPU computes otherwise keeps the layer off. 0, or a bit set: 1 OL_MUL, 2 ol_mulhi, 4 the read by bytes, 8 by
- * words, 16 the Gaussian */
+ * words, 16 the Gaussian, 32 the cover read by bytes, 64 by words */
 #define KCHECK_CELLS 8
 #define KCHECK_BYTES (1024 + 4 * OL_READ_RUN * KCHECK_CELLS + 4 * KCHECK_CELLS)
-#define KCHECK_LAYER 32768                  /* bytes for ol_layout of the small planes (20 or 21 x 10) */
+#define KCHECK_LAYER 49152                  /* bytes for ol_layout of the small planes (20 or 21 x 10) and its tables */
 static u32 op_kcheck(u8 *b)
 {
     u32 *tab = (u32 *)b, *row = tab + 256, *out = row + OL_READ_RUN * KCHECK_CELLS, i, k, j, x = 0x12345678, y, e = 0;
@@ -1973,6 +1967,15 @@ static u32 op_kcheck(u8 *b)
         for (i = 0; i < KCHECK_CELLS; i++)
             if (out[i] != ol_read_run(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab))
                 e |= 4 << k;
+    }
+    for (k = 0; k < 4; k++) {               /* the cover read's loop: bytes and words, stored and added */
+        for (i = 0; i < KCHECK_CELLS; i++)
+            out[i] = i * 0x00010003u;
+        ol_read_pack0(row, out, out + KCHECK_CELLS, tab, !(k & 1), k >> 1);
+        for (i = 0; i < KCHECK_CELLS; i++)
+            if (out[i] != (k >> 1 ? i * 0x00010003u : 0) + ol_read_run0(row + OL_READ_RUN * i,
+                                                                      row + OL_READ_RUN * (i + 1), tab))
+                e |= 32 << (k & 1);
     }
     for (k = 0; k < 4; k++) {               /* widths 20 (pairs) and 21; sigma 3 (r 2) and 1.18 layer px (r 0) */
         w = k & 1 ? 21 : 20;
@@ -2328,12 +2331,14 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                    "%u.%02u (after the transport's own); Bloom's tail %u.%02u in its plane's (x%u)", n, op_q8i(r->sig[0]),
                    op_q8f(r->sig[0]), op_q8i(r->sig[1]), op_q8f(r->sig[1]), op_q8i(r->sig[2]), op_q8f(r->sig[2]),
                    op_q8i(r->sig[3]), op_q8f(r->sig[3]), op_q8i(r->sig[4]), op_q8f(r->sig[4]), OL_TAIL);
-        log_printf(r->f_err ? OMK_LOG_WARN : OMK_LOG_INFO, "optics: job %u: picture read: %u rows in %u passes, %u of %u rows "
-                   "of cells reached, %u us, %u maps%s", n, r->f_rows, r->f_passes, r->f_cells, r->l_wh >> 16, r->f_us,
-                   r->f_maps, r->f_err == 1 ? " - layer too small for the picture, not read" : r->f_err == 2 ?
-                   " - no window, the rest from the layer" : "");
-        log_printf(OMK_LOG_INFO, "optics: job %u: picture read's time: rows' mean %u us, longest %u us; maps, write-backs and "
-                   "releases %u us; ticks given away %u us", n, r->f_row_avg, r->f_row_max, r->f_maps_us, r->f_slept);
+        log_printf(r->f_err || r->f_cells < (r->l_wh >> 16) ? OMK_LOG_WARN : OMK_LOG_INFO, "optics: job %u: picture read: "
+                   "%u rows (%u a row of cells, one pixel a pair), %u of %u rows of cells%s, %u us, %u maps%s", n,
+                   r->f_rows, OL_COVER, r->f_cells, r->l_wh >> 16, r->f_cells < (r->l_wh >> 16) ? " - the REST FROM THE "
+                   "LAYER'S Y" : " (all)", r->f_us, r->f_maps, r->f_err == 1 ? " - layer too small for the picture, not "
+                   "read" : r->f_err == 2 ? " - no window" : "");
+        log_printf(OMK_LOG_INFO, "optics: job %u: picture read's time: rows' mean %u us, longest %u us (with what the CPU "
+                   "did meanwhile); maps, write-backs and releases %u us; ticks given away %u us", n, r->f_row_avg,
+                   r->f_row_max, r->f_maps_us, r->f_slept);
         log_printf(OMK_LOG_INFO, "optics: job %u: strengths Bloom %u, Halation %u (%s%s); scene: mean Y %u, %u.%u%% at the "
                    "threshold, day %u%%; gains Bloom %u%%, Halation %u%%", n, r->str & 0xff, r->str >> 8 & 0xff,
                    r->str & OP_TEST ? "a test's" : "the look's rows", r->str & OP_MONO ? "; black and white: the "
@@ -2534,6 +2539,11 @@ void drv_optics_service(drv_optics_info *st)
                        "11: %u %u %u, case 12: %u %u %u); chains left out %u", b, o->blends[0][0], o->blends[1][0],
                        o->blends[2][0], o->blends[0][1], o->blends[1][1], o->blends[2][1], o->fallbacks);
         }
+    }
+    if (o->seconds != c.seconds) {
+        c.seconds = o->seconds;
+        log_printf(OMK_LOG_INFO, "optics: layer: %u second jobs of RAW+JPEG presses without the layer (jobs = first: the "
+                   "JPEG is the first job's picture, the second makes the ORF's preview)", c.seconds);
     }
     c.armed = o->armed;
     c.listed = o->listed;

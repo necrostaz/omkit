@@ -92,8 +92,15 @@
  *                                          the tail's sources (0 - none; with a tail only) - a diffusion filter
  *                                          scatters a part of everything it passes: bright surfaces glow into the
  *                                          dark around them, the shadows lift, the contrast falls
- *   read, read_ms, read_cached             the picture's rows read for the sources, the time a job (kept to a row),
- *                                          the cached view
+ *   bloom_toe, bloom_max                   Bloom's strength's curve after the blur, percent of white (0 - none, the
+ *   halation_toe, halation_max             default): the toe takes a weak glow away (a glint's), the ceiling holds a
+ *                                          strong one under it (a lamp's halo without a flat disc) - optlayer.h's
+ *                                          ol_curve
+ *   jobs                                   first (default) - only the first job of a RAW+JPEG press gets the layer
+ *                                          (it makes the JPEG; the second makes the ORF's preview), both - both
+ *   read, read_cached                      the picture's rows read for the sources (every row of cells, two rows of
+ *                                          the picture each, whatever the time - card169), the cached view; read_ms
+ *                                          (the budget of card168's read) is not taken
  *   layer_cached                           the layer read and written (L4) through the window's cached view, written
  *                                          back before the window is released
  * With emission 0, bloom_dark 0, halation_first 0 and no tail the layer is the first version's, value for value.
@@ -132,6 +139,7 @@
 #define OPT_BLOOM_GAIN 150
 #define OPT_HAL_GAIN 200
 #define OPT_HAZE_MAX 25                     /* bloom_haze, percent of all the light */
+#define OPT_Q12 4095                        /* white in linear light (optlayer.h's OL_ONE): the curves' percents */
 /* The day's weight (card168: the scenes' logs of card167 - evening rooms mean Y 78..94 and 0.3..5.4 % at the threshold,
  * night 62..71 and 1.3..1.9 %, the day of card162 100 and 14.7 %): the share tells the day, the mean only past 95 */
 #define OPT_DAY_MEAN0 95
@@ -542,8 +550,19 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     if (haze && !c->tmix)
         log_printf(OMK_LOG_WARN, "optics: layer%s: bloom_haze %u%% without Bloom's tail (bloom_tail): no haze", name, haze);
     c->read = (u32)opt_sint(sec, "read", 1, 0, 1);
-    c->read_us = (u32)opt_sint(sec, "read_ms", 100, 0, 250) * 1000;
+    c->read_us = 0;                         /* card169: the cover read has no budget (read_ms is not taken) */
+    if (cfg_str(sec, "read_ms", 0))
+        log_printf(OMK_LOG_WARN, "optics: layer%s: read_ms is not taken: the picture's read covers every row of cells "
+                   "whatever the time", name);
     c->cached = (u32)opt_sint(sec, "read_cached", 0, 0, 1);
+    c->btoe = (u32)opt_sint(sec, "bloom_toe", 0, 0, 50) * OPT_Q12 / 100;
+    c->bmax = (u32)opt_sint(sec, "bloom_max", 0, 0, 200) * OPT_Q12 / 100;
+    c->htoe = (u32)opt_sint(sec, "halation_toe", 0, 0, 50) * OPT_Q12 / 100;
+    c->hmax = (u32)opt_sint(sec, "halation_max", 0, 0, 200) * OPT_Q12 / 100;
+    t = cfg_str(cfg_str(sec, "jobs", 0) ? sec : "optics", "jobs", "first");
+    c->jobs = str_ieq(t, "both") ? DRV_OPTICS_JOBS_BOTH : DRV_OPTICS_JOBS_FIRST;
+    if (!str_ieq(t, "both") && !str_ieq(t, "first"))
+        log_printf(OMK_LOG_WARN, "optics: layer%s: jobs = %s unknown (first, both), first taken", name, t);
     c->lcached = (u32)opt_sint(sec, "layer_cached", 0, 0, 1);
     log_printf(OMK_LOG_INFO, "optics: layer%s: Bloom %s (threshold %u, sigma %u + %u at %u%%, gain %u%% at 5, %u%% less on "
                "white; tail %u%% of sigma %u, haze %u%%)", name, sb == DRV_OPTICS_ROWS ? "by the look's rows" : sb == 0 ? "0, a test" :
@@ -564,13 +583,20 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
                c->day[5]);
     if (c->em)
         log_printf(OMK_LOG_INFO, "optics: layer%s: the source - the emission of a blown pixel as %u whites over the "
-                   "threshold; the picture read %s, %u ms", name, c->em, c->read ? "on" : "off", c->read_us / 1000);
+                   "threshold; the picture read %s", name, c->em, c->read ? "on" : "off");
     else
-        log_printf(OMK_LOG_INFO, "optics: layer%s: the source - the excess over the threshold; the picture read %s, %u ms",
-                   name, c->read ? "on" : "off", c->read_us / 1000);
+        log_printf(OMK_LOG_INFO, "optics: layer%s: the source - the excess over the threshold; the picture read %s",
+                   name, c->read ? "on" : "off");
     if (c->emb != c->em)
         log_printf(OMK_LOG_INFO, "optics: layer%s: Bloom's own source - %s %u whites (bloom_emission; Halation's above)",
                    name, c->emb ? "the emission of a blown pixel as" : "the excess over the threshold, not", c->emb);
+    log_printf(OMK_LOG_INFO, "optics: layer%s: the strength's curve after the blur (percent of white; 0 - none): Bloom toe "
+               "%u, at most %u; Halation toe %u, at most %u", name, (c->btoe * 100 + OPT_Q12 / 2) / OPT_Q12,
+               (c->bmax * 100 + OPT_Q12 / 2) / OPT_Q12, (c->htoe * 100 + OPT_Q12 / 2) / OPT_Q12,
+               (c->hmax * 100 + OPT_Q12 / 2) / OPT_Q12);
+    log_printf(OMK_LOG_INFO, "optics: layer%s: jobs = %s", name, c->jobs == DRV_OPTICS_JOBS_BOTH ? "both - both jobs of a "
+               "RAW+JPEG press get the layer (the ORF's preview too)" : "first - the second job of a RAW+JPEG press (the "
+               "ORF's preview) without the layer");
 }
 
 /* The layer's settings; 1 - the layer is on (a strength, or a layer substage in the schedule) */
@@ -606,12 +632,12 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
     c->cached = (u32)opt_int("read_cached", 0, 0, 1);
     c->lcached = (u32)opt_int("layer_cached", 0, 0, 1);
     c->read = (u32)opt_int("read", 1, 0, 1);
-    c->read_us = (u32)opt_int("read_ms", 100, 0, 250) * 1000;
+    c->read_us = 0;
     fl = (216 * 5184 + 50 * c->width) / (100 * c->width);   /* optlayer.h's ol_floor_sigma for 5184 */
     log_printf(OMK_LOG_INFO, "optics: layer: route %s, width %u (cells of %u px; the transport alone blurs by sigma ~%u px), "
-               "bytes %s; picture read %s, %u ms%s", c->route == DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width,
-               fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" : t, c->read ? "on" : "off", c->read_us / 1000, c->cached ?
-               " through the CACHED view" : "");
+               "bytes %s; picture read %s%s", c->route == DRV_OPTICS_403 ? "403" : "pair", c->width, 5184 / c->width,
+               fl, c->order == DRV_OPTICS_ORDER_AUTO ? "auto" : t, c->read ? "on (every row of cells, 2 rows each)" : "off",
+               c->cached ? " through the CACHED view" : "");
     log_printf(OMK_LOG_INFO, "optics: layer: the layer read and written %s", c->lcached ? "through the CACHED view (written "
                "back before the window is released)" : "past the cache");
     layer_keys(c, "optics", "");
@@ -708,7 +734,7 @@ void optics_setup(void)
         rc = drv_optics_layer(&lc);
         if (rc) {
             log_printf(OMK_LOG_ERROR, "optics: the layer not set up, code %d%s: no Bloom and Halation", rc, rc >= 30 &&
-                       rc < 62 ? " (a CPU kernel of the layer does not give what plain C gives)" : "");
+                       rc < 158 ? " (a CPU kernel of the layer does not give what plain C gives)" : "");
             if (!lv)
                 return;
         } else {

@@ -26,7 +26,11 @@
  *   shadows lift; it lights the whole layer (every word gets the word's arithmetic);
  * - the scene's darkness (ol_scene, ol_day): the layer's mean Y and its share at a code (200) weigh a day scene,
  *   whose gains the caller lowers (a blown pixel there is a bright surface, not a lamp);
- * - the words of a run of lit pixels in one loop (ol_words_lit): no call a pixel.
+ * - the words of a run of lit pixels in one loop (ol_words_lit): no call a pixel;
+ * - the cover read (ol_cover_*): every row of cells from two rows of the picture, one pixel of a pair - the same sources
+ *   from job to job, whatever the time (before it: rows in passes until a budget ran out, the rest from the layer's Y);
+ * - the strength's curve after the blur (ol_curve; bloom_toe, bloom_max, halation_toe, halation_max): a toe that takes
+ *   a weak glow away and a ceiling that holds a strong one (all 0 - the light as it was).
  *
  * The layer's word (format 0x305, 4 bytes a pixel): the byte of Y, Cb and Cr by ol_par_t's positions (the camera's
  * dump decides them, ol_lane_order); the fourth byte 0.
@@ -120,10 +124,15 @@ typedef struct {
     u32 haze;                               /* Bloom's haze: the share of every pixel's light (not only over the
                                                threshold) in the tail's sources, Q12 (0 - none; with a tail only) - a
                                                diffusion filter scatters a part of all the light it passes */
+    u32 btoe, bmax, htoe, hmax;             /* the strength's curve after the blur (ol_curve), Q12 of white: Bloom's
+                                               and Halation's toe and ceiling (0 each - no curve: the light as it was) */
 } ol_par_t;
 
 #define OL_EM_MAX 64                        /* whites a blown pixel stands for, at most: em OL_ONE stays below 2^18 */
 #define OL_TAIL 4                           /* the tail's plane: cells of OL_TAIL x OL_TAIL layer pixels */
+#define OL_COVER 2                          /* the cover read: rows of the picture a row of cells, at 1/4 and 3/4 of it */
+#define OL_MEANS 0x80                       /* nrow: the row of cells has its means already (ol_cover_cells) */
+#define OL_CURVE 4096                       /* the strength's curve: entries, the added light 0..2 whites in steps of 2 */
 
 enum { OL_ROWS, OL_COLS };                  /* the passes, for the pace callback */
 
@@ -159,6 +168,9 @@ typedef struct {
     void *ctx;
     u32 done, all;                          /* values the passes worked on; of the whole planes */
     u32 tabd;                               /* 1 - tab[] made for this job (ol_read_table): ol_sources does not again */
+    u32 y0;                                 /* 1 - the sums are of one pixel a pair (Y0: the cover read), 0 - of both */
+    u16 *kb, *kh;                           /* OL_CURVE each: the strength's curves of Bloom and Halation (ol_curve) */
+    u32 bc, hc;                             /* 1 - the curve in use (ol_word_tables), 0 - the light as it was */
 } ol_t;
 
 /* The work buffer's parts for a layer lw x lh from address b (4-aligned): the pointers set in o (lin and enc too: the
@@ -186,6 +198,10 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
     b += 512;
     o->hz = (u16 *)b;
     b += 512;
+    o->kb = (u16 *)b;
+    b += 2 * OL_CURVE;
+    o->kh = (u16 *)b;
+    b += 2 * OL_CURVE;
     o->pt = (u16 *)b;
     b += (2 * o->tw * o->th + 3) & ~3u;
     o->acc = (u32 *)b;
@@ -482,21 +498,136 @@ static OL_KERNEL void ol_read_row(const ol_t *o, const volatile u32 *row, u16 *d
 static inline void ol_read_cells(ol_t *o, const volatile u32 *row, u32 cy)
 {
     ol_read_row(o, row, o->pb + cy * o->lw, o->ph + cy * o->lw);
-    if (o->nrow[cy] < 255)
+    if (o->nrow[cy] < OL_MEANS - 1)
         o->nrow[cy]++;
 }
 
-/* The means of a row of cells read k times: floor((x << shift) / d), d = 2 cwp k, as the high word of (x << shift) m with
- * m = 0xffffffff / d + 1 - exact while (x << shift) d < 2^32 - and both factors below 2^31 for ol_mulhi (d >= 4: see
- * ol_sources); the reciprocal made again only where the column's pairs change (a layer 324 wide: never) */
-static OL_KERNEL void ol_means_row(u16 *pb, u16 *ph, const u8 *cwp, const u8 *ce, u32 k, u32 shift)
+/* The cover read (card169): every row of cells read the same way, whatever the time - OL_COVER rows of the picture a row
+ * of cells, at 1/4 and 3/4 of its height (16 rows: 4 and 12; the midpoints of its two halves, so the samples are 8 rows
+ * apart over the whole picture and a cell's slope does not bias its mean), one pixel of each pair (Y0: every other
+ * column - half the table's loads; the cache lines are the same). The read of a row of cells is the same from job to job:
+ * a thin bright line counts by its share of the cell's samples (1 of 2 rows, not 1 of the 1 row read before, which
+ * made a wire's glint a cell's whole source), and no row of cells falls back on the layer's own Y (only on an error or a
+ * stop). The sums: 16 samples a cell of 8 pairs - each half at most 16 OL_ONE, below 65536 */
+
+/* The picture's row of the sample k (0..OL_COVER - 1) of the row of cells cy (after ol_rows; H the picture's height) */
+static inline u32 ol_cover_y(const ol_t *o, u32 cy, u32 k, u32 H)
+{
+    u32 y0 = o->ry[cy], y1 = cy + 1 < o->lh ? o->ry[cy + 1] : H;
+
+    return y0 + (2 * k + 1) * (y1 - y0) / (2 * OL_COVER);
+}
+
+/* The Y0 of the words of a row [row, end) through the read's table: the sums of Bloom | Halation << 16 */
+static OL_KERNEL u32 ol_read_run0(const volatile u32 *row, const volatile u32 *end, const u32 *tab)
+{
+    u32 s = 0, w;
+
+    do {
+        w = *row++;
+        s += OL_TABW(tab, (w & 0xff) << 2);
+    } while (row != end);
+    return s;
+}
+
+/* ol_read_pack's cover read: out[cx] = the Y0 sums of a cell of OL_READ_RUN words (Bloom | Halation << 16), added to
+ * out[cx] when add (the second row of a row of cells), else stored; bytes as ol_read_pack's. On the camera an unrolled
+ * loop of 4 (bytes) or 5 (words) instructions a word; drv_optics_layer checks it against ol_read_run0 at start */
+#ifdef __mn10300__
+#define OL_PACK0(first, load, mask)                                                                                         \
+    "1:\n\t" first "\n\t.irp k,0,8,16,24\n\t" load " (\\k,%3),%1\n\t" load " (\\k+4,%3),%2\n\t"                        \
+    "asl2 %1\n\tasl2 %2\n\t" mask "mov (%1,%5),%1\n\tmov (%2,%5),%2\n\tadd %1,%0\n\tadd %2,%0\n\t.endr\n\t"            \
+    "add 32,%3\n\tmov %0,(%4)\n\tinc4 %4\n\tcmp %6,%4\n\tbne 1b"
+#define OL_PACK0_ASM(str)                                                                                                   \
+    __asm__ __volatile__(str : "=&d"(s), "=&d"(a), "=&d"(b), "+a"(row), "+a"(out) : "a"(tab), "a"(end) : "cc", "memory")
+#endif
+static OL_KERNEL void ol_read_pack0(const volatile u32 *row, u32 *out, const u32 *end, const u32 *tab, u32 bytes,
+                                    u32 add)
+{
+#ifdef __mn10300__
+    u32 s, a, b;
+
+    if (bytes && add)
+        OL_PACK0_ASM(OL_PACK0("mov (%4),%0", "movbu", ""));
+    else if (bytes)
+        OL_PACK0_ASM(OL_PACK0("clr %0", "movbu", ""));
+    else if (add)
+        OL_PACK0_ASM(OL_PACK0("mov (%4),%0", "mov", "and 1020,%1\n\tand 1020,%2\n\t"));
+    else
+        OL_PACK0_ASM(OL_PACK0("clr %0", "mov", "and 1020,%1\n\tand 1020,%2\n\t"));
+#else
+    (void)bytes;
+    do {
+        *out = (add ? *out : 0) + ol_read_run0(row, row + OL_READ_RUN, tab);
+        out++;
+        row += OL_READ_RUN;
+    } while (out != end);
+#endif
+}
+
+/* The packed sums of 16 samples into the means of a row of cells: floor(sum / 16) of each half (what ol_means_row
+ * gives for them) */
+static OL_KERNEL void ol_read_split16(const u32 *s, u16 *db, u16 *dh, const u16 *de)
+{
+    do {
+        u32 v = *s++;
+
+        *db++ = (u16)((v & 0xffff) >> 4);
+        *dh++ = (u16)(v >> 20);
+    } while (db != de);
+}
+
+/* The sample k of the row of cells cy: the picture's row `row` (ol_cover_y's) into its sums. Cells of OL_READ_RUN words
+ * and no shift (a layer 324 wide on 5184): the row's sums packed in o->acc (not in use while the picture is read), the
+ * means made at the last sample (OL_MEANS) - so a row of cells' samples are read one after the other; a stop between
+ * them leaves the row of cells unread (the layer's Y). Else: added to the sums (Y0, >> shift), the means by ol_sources */
+static inline void ol_cover_cells(ol_t *o, const volatile u32 *row, u32 cy, u32 k)
+{
+    u32 lw = o->lw, n, j, s, b, h;
+    u16 *db = o->pb + OL_MUL(cy, lw), *dh = o->ph + OL_MUL(cy, lw);
+    const u8 *c = o->cwp, *ce = c + lw;
+
+    o->y0 = 1;
+    if (o->c8 && !o->shift) {
+        ol_read_pack0(row, o->acc, o->acc + lw, o->tab, o->rbytes, k);
+        if (k == OL_COVER - 1) {
+            ol_read_split16(o->acc, db, dh, db + lw);
+            o->nrow[cy] = OL_COVER | OL_MEANS;
+        }
+        return;
+    }
+    do {
+        n = *c++;
+        b = h = 0;
+        do {
+            j = n > 2 * OL_READ_RUN ? 2 * OL_READ_RUN : n;   /* 16 samples: each half below 65536 */
+            n -= j;
+            s = ol_read_run0(row, row + j, o->tab);
+            row += j;
+            b += s & 0xffff;
+            h += s >> 16;
+        } while (n);
+        *db = (u16)(*db + (b >> o->shift));
+        *dh = (u16)(*dh + (h >> o->shift));
+        db++;
+        dh++;
+    } while (c != ce);
+    if (o->nrow[cy] < OL_MEANS - 1)
+        o->nrow[cy]++;
+}
+
+/* The means of a row of cells of n samples a pair (2 k: both pixels of k rows; k: Y0 of k rows): floor((x << shift) /
+ * d), d = cwp n, as the high word of (x << shift) m with m = 0xffffffff / d + 1 - exact while (x << shift) d < 2^32 - and
+ * both factors below 2^31 for ol_mulhi (d >= 4: see ol_sources); the reciprocal made again only where the column's pairs
+ * change (a layer 324 wide: never) */
+static OL_KERNEL void ol_means_row(u16 *pb, u16 *ph, const u8 *cwp, const u8 *ce, u32 n, u32 shift)
 {
     u32 c = 0, m = 0;
 
     do {
         if (*cwp != c) {
             c = *cwp;
-            m = 0xffffffffu / (2 * c * k) + 1;
+            m = 0xffffffffu / (c * n) + 1;
         }
         cwp++;
         *pb = (u16)ol_mulhi((u32)*pb << shift, m);
@@ -512,7 +643,7 @@ static OL_KERNEL void ol_means_row(u16 *pb, u16 *ph, const u8 *cwp, const u8 *ce
  * (ol_means_row); a narrower layer (cells of more pairs) divides */
 static OL_KERNEL void ol_sources(ol_t *o, const ol_par_t *p)
 {
-    u32 cx, cy, i, t, d, k, cm = 0, cn = 255, recip, lw = o->lw;
+    u32 cx, cy, i, t, d, k, cm = 0, cn = 255, recip, lw = o->lw, spp = o->y0 ? 1 : 2;
     u16 *pb = o->pb, *ph = o->ph;
     const u8 *y;
 
@@ -524,14 +655,16 @@ static OL_KERNEL void ol_sources(ol_t *o, const ol_par_t *p)
         if (o->cwp[cx] < cn)
             cn = o->cwp[cx];
     }
-    recip = o->shift < 16 && cn >= 2 && (65535u << o->shift) < 0xffffffffu / (2 * cm * 255);
+    recip = o->shift < 16 && spp * cn >= 4 && (65535u << o->shift) < 0xffffffffu / (2 * cm * 255);
     for (cy = 0, i = 0; cy < o->lh; cy++, i += lw) {
         k = o->nrow[cy];
-        if (k && recip) {
-            ol_means_row(pb + i, ph + i, o->cwp, o->cwp + lw, k, o->shift);
+        if (k & OL_MEANS) {
+            continue;                       /* the cover read made them */
+        } else if (k && recip) {
+            ol_means_row(pb + i, ph + i, o->cwp, o->cwp + lw, spp * k, o->shift);
         } else if (k) {
             for (cx = 0; cx < lw; cx++) {
-                d = 2 * (u32)o->cwp[cx] * k;
+                d = spp * (u32)o->cwp[cx] * k;
                 pb[i + cx] = (u16)(((u32)pb[i + cx] << o->shift) / d);
                 ph[i + cx] = (u16)(((u32)ph[i + cx] << o->shift) / d);
             }
@@ -1089,9 +1222,34 @@ static inline u32 ol_neutral(const ol_par_t *p)
     return 128u << (8 * p->pcb) | 128u << (8 * p->pcr);
 }
 
+/* The strength's curve after the blur (card169): the added light x (Q12, before the weight by darkness) of entry i = x / 2
+ * (0..2 whites) into
+ *   g = x^2 / (x + toe)          - the toe: a weak glow (x well below toe) fades, a strong one loses about toe;
+ *   v = max g / (g + max)        - the ceiling: v is g while g is well below max, never above max;
+ * toe 0 - g is x; max 0 - v is g. The slope is 1 at the toe's end and below the ceiling, so the gains keep their sense.
+ * A blown wire's glint lifts a cell a little - the toe takes it away; a lamp's core is held under max, so its halo has
+ * no flat disc with an edge (the red channel at 255). Q12 throughout: x^2 < 2^26, max g < 2^26 */
+static inline void ol_curve(u16 *t, u32 toe, u32 max)
+{
+    u32 i, x, g, v;
+
+    for (i = 0; i < OL_CURVE; i++) {
+        x = 2 * i;
+        g = toe ? x * x / (x + toe) : x;
+        v = max ? max * g / (g + max) : g;
+        t[i] = (u16)v;
+    }
+}
+
+/* A light through a curve (o->kb or o->kh): its entry, the last one past 2 whites */
+static inline u32 ol_curved(const u16 *t, u32 x)
+{
+    return t[x >= 2 * OL_CURVE ? OL_CURVE - 1 : x >> 1];
+}
+
 /* The word's tables (after the curves are in o and before ol_word, ol_tail_down): Halation's weight by the darkness of
  * a code, 256 - dark lin / 4096 (and Bloom's); the chroma bytes of a halation's Y code hy (0..255: enc is monotonic);
- * Bloom's haze of a code (haze lin / 4096); the neutral word */
+ * Bloom's haze of a code (haze lin / 4096); the strength's curves (none when their toe and max are 0); the neutral word */
 static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
 {
     s32 hy;
@@ -1103,20 +1261,33 @@ static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
         o->cw[hy] = ol_clamp8(128 + (hy * p->hcb >> 8)) << (8 * p->pcb) | ol_clamp8(128 + (hy * p->hcr >> 8)) << (8 * p->pcr);
     }
     o->hazed = p->haze && p->tmix;
+    o->bc = p->btoe || p->bmax;
+    o->hc = p->htoe || p->hmax;
+    if (o->bc)
+        ol_curve(o->kb, p->btoe, p->bmax);
+    if (o->hc)
+        ol_curve(o->kh, p->htoe, p->hmax);
     o->neutral = ol_neutral(p);
     o->ys = 8 * p->py;
 }
 
 /* The layer word of a pixel with the blurs b (Bloom) and h (Halation) and its own Y code c (ol_word_tables made): the
- * added light in Y, the halation's colour in Cb and Cr. Each added light weighted by the darkness of the place (Bloom's
- * weight 256 - none - unless bdark: (v 256) >> 8 is v). The halation's code is what it adds over the light before it:
- * over Bloom's (the first version), or over the place's own (hfirst: its colour does not fade under a strong Bloom) */
+ * added light in Y, the halation's colour in Cb and Cr. Each added light through its strength's curve when it has one
+ * (ol_curve), then weighted by the darkness of the place (Bloom's weight 256 - none - unless bdark: (v 256) >> 8 is v).
+ * The halation's code is what it adds over the light before it: over Bloom's (the first version), or over the place's
+ * own (hfirst: its colour does not fade under a strong Bloom) */
 static inline u32 ol_word_of(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c)
 {
     u32 base = o->lin[c], t1, t2, e1, e2, ab, ah;
 
-    ab = OL_MUL(OL_MUL(b, p->gb) >> 8, o->wb[c]) >> 8;
-    ah = OL_MUL(OL_MUL(h, p->gh) >> 8, o->wd[c]) >> 8;
+    ab = OL_MUL(b, p->gb) >> 8;
+    ah = OL_MUL(h, p->gh) >> 8;
+    if (o->bc)
+        ab = ol_curved(o->kb, ab);
+    if (o->hc)
+        ah = ol_curved(o->kh, ah);
+    ab = OL_MUL(ab, o->wb[c]) >> 8;
+    ah = OL_MUL(ah, o->wd[c]) >> 8;
     if (p->hfirst) {                        /* Halation first: its code from the base */
         t1 = base + ah;
         ah = ab;                            /* the second light added */
