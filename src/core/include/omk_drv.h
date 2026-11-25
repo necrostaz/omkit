@@ -377,7 +377,8 @@ enum { DRV_USB_DIALOG = 0, DRV_USB_STORAGE = 1, DRV_USB_MTP = 2, DRV_USB_CHARGE 
 typedef struct {
     u32 choice;                             /* the USB choice now */
     u32 factor;                             /* the start's factor: 4 - started for the computer (the cable to a host) */
-    u32 link;                               /* TPC_CAMC's state byte: not 0 - the USB device class is on (a data link) */
+    u32 link;                               /* TPC_CAMC's state byte (0x623a0b04): 1 in MTP, 2 in the dialog and in charge
+                                               only (camera); for the log */
     u32 app;                                /* the application state, 0xffffffff - not readable (the PC mode of USB) */
 } drv_usb_info;
 int drv_usb_hold_install(void);             /* the hook in place: 0; otherwise the driver's code (once is enough) */

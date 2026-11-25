@@ -51,6 +51,7 @@ class World:
         self.hands_result = "done"          # ... its result; "missed" - USB not held: it comes up in MTP, armed
         self.end_restart = True             # ... core's restart at its end happens
         self.prev_run = None
+        self.mute = False                   # on USB, but core does not run (came on from charging): HELLO fails
 
     def at(self, dt, what):
         self.events.append([self.now + dt, what])
@@ -131,6 +132,8 @@ class FakeCam:
         flags = (1 | 4 | 16 | 32 | omkdebug.F_SHOOT | omkdebug.F_INFO | omkdebug.F_HANDS_FREE |
                  (omkdebug.F_RESTART if w.restart_ok else 0))
         if sub == omkdebug.HELLO:
+            if w.mute:
+                raise omkdebug.Refused("WPD error 0x8007001f")
             return 0x2001, [omkdebug.MAGIC, 1, 1 << 16 | 42, flags, 1]
         if sub == omkdebug.STATUS:
             return 0x2001, list(w.job)
@@ -281,6 +284,27 @@ class SessionSteps(unittest.TestCase):
         rc, _ = self.hands(w)
         self.assertEqual(rc, 1)
         self.assertIn("no result of this session", w.said[-1])
+
+    def test_camera_on_usb_without_core(self):
+        w = World()
+        w.mute = True                                       # came on from charging by the cable: no core
+
+        def on_say(m):
+            if "OMKit does not answer" in m:                # the owner: the lever off and on - a full start
+                w.at(5, lambda: setattr(w, "mute", False))
+        rc = self.make(w, user=False, on_say=on_say).run(Args(pull_log=False, pull_pictures=0, restart=True))
+        self.assertEqual(rc, 0, w.said)
+        told = [m for m in w.said if "OMKit does not answer" in m]
+        self.assertEqual(len(told), 1)
+        self.assertIn("switch it off with the lever and on again", told[0])
+        self.assertFalse(any("connect: no camera yet" in m for m in w.said))
+
+    def test_camera_on_usb_without_core_for_good(self):
+        w = World()
+        w.mute = True
+        rc = self.make(w, user=False).run(Args(restart=True, connect_timeout=40))
+        self.assertEqual(rc, 1)
+        self.assertIn("no camera in 40 s (one was on USB, but OMKit did not answer", w.said[-1])
 
     def test_hands_free_needs_a_core_that_can(self):
         w = World()

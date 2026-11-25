@@ -528,7 +528,8 @@ void drv_reset(u32 cause)
 #define USB_SITE 0x60d15549
 #define USB_CHOICE 0x621bcb1c
 #define USB_FACTOR 0x621bcbcc               /* the start's factor (getter 0x60d12988): 4 - the cable to a host at the mount */
-#define USB_TPC_ON 0xa23a0b04               /* u8, the USB device class on (TPC_CAMC 0x614ba240), read past the cache */
+#define USB_TPC_STATE 0xa23a0b04            /* u8, TPC_CAMC's state (0x614ba240 writes 2): 1 in MTP, 2 in the dialog and in charge
+                                               only (camera, card163); read past the cache, for the log */
 #define KEY_OK 0x02000004                   /* the OK key's event: code 4 "Ok" (names 0x60258ec8), as Trg1 is 0x2000100 */
 
 enum { USB_MODE, USB_HITS, USB_LAST, USB_SLOTS = 16 };
@@ -588,7 +589,7 @@ void drv_usb_probe(drv_usb_info *u)
 
     u->choice = *(const volatile u32 *)USB_CHOICE;   /* the core task is on CPU 0, as the application: the same cache */
     u->factor = *(const volatile u32 *)USB_FACTOR;
-    u->link = *(const volatile u8 *)USB_TPC_ON;
+    u->link = *(const volatile u8 *)USB_TPC_STATE;
     u->app = drv_power_probe(w, 6) == 6 ? w[5] : 0xffffffff;
 }
 

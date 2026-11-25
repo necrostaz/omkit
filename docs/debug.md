@@ -173,4 +173,5 @@ scenario ends at once (the tool says so). The tool's verdicts:
 | `the camera stayed on USB - the restart request was not taken` | the first restart did not happen |
 | `the camera did not restart at the end` | `core` kept the camera on: it was connected to the computer before USB could be held |
 | `the camera came up connected to the computer with the scenario waiting` | a `core` that did not hold USB; the scenario is stopped |
+| `the camera is on USB but OMKit does not answer` | `core` does not run: the camera came on from charging by the cable without a full start (any step of any session says this after 15 s); switch it off with the lever and on again |
 | `no camera in N s` | the camera hangs, stays off or stays in charge only: take the battery out and put it back, switch the camera on, then pull the log (the scenario's run is the one before) |

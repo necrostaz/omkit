@@ -87,7 +87,7 @@ static void log_usb(const char *when)
     drv_usb_info u;
 
     drv_usb_probe(&u);
-    log_printf(OMK_LOG_INFO, "hands-free: %s: USB choice %u (%s), start factor %u, data link %u, app %x, hook %u times",
+    log_printf(OMK_LOG_INFO, "hands-free: %s: USB choice %u (%s), start factor %u, TPC state %u, app %x, hook %u times",
                when, u.choice, choice_name(u.choice), u.factor, u.link, u.app, drv_usb_hold_hits());
 }
 

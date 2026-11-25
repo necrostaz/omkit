@@ -810,6 +810,8 @@ class StepFailed(Exception):
 
 RESULT_FILE = "OMKIT\\SHOOT.END"          # core's result of a scenario without hands (docs/config.md, 10.2)
 HANDS_FREE_ARM_WAIT = 120000                # ms: as charge only the camera shoots within seconds of its start
+MUTE_S = 15.0                               # s: on USB without the debug service this long - core does not run (MTP
+                                            # comes up within a second or two after core's operations at a full start)
 
 
 def default_target(spec: str) -> tuple[Path, str]:
@@ -861,6 +863,7 @@ class Session:
         self.cam = None
         self.after: dict = {}
         self.session_id = session_id or secrets.token_hex(4).upper()
+        self.mute = False
 
     def drop(self):
         if self.cam is not None:
@@ -871,7 +874,8 @@ class Session:
         self.cam = None
 
     def try_connect(self):
-        """A camera with the debug service, or None"""
+        """A camera with the debug service, or None; self.mute: the camera is on USB but the service does not answer"""
+        self.mute = False
         try:
             cam = self.connect()
         except Exception:                   # no device, another device, or a COM error of one going away
@@ -880,6 +884,7 @@ class Session:
             hello(cam)
             return cam
         except Exception:
+            self.mute = True
             try:
                 cam.close()
             except Exception:
@@ -887,8 +892,10 @@ class Session:
             return None
 
     def wait_camera(self, timeout: float, what: str, hint: str | None = None, other_than: str | None = None) -> dict:
-        """Until a camera answers (with other_than: in another run than that one); its INFO"""
-        t0, told = self.clock(), False
+        """Until a camera answers (with other_than: in another run than that one); its INFO. A camera on USB whose debug
+        service does not answer for MUTE_S in a row: core does not run - the camera came on from charging by the cable
+        without a full start (camera, card163) - and the tool says how to start it"""
+        t0, told, mute_since, mute_told = self.clock(), False, None, False
         self.drop()
         while self.clock() - t0 < timeout:
             cam = self.try_connect()
@@ -901,11 +908,22 @@ class Session:
                     self.cam = cam
                     return d
                 cam.close()
-            if hint and not told and self.clock() - t0 > 10:
+            if not self.mute:
+                mute_since = None
+            elif mute_since is None:
+                mute_since = self.clock()
+            elif not mute_told and self.clock() - mute_since >= MUTE_S:
+                self.say(f"{what}: the camera is on USB but OMKit does not answer - core does not run (the camera came on "
+                         "from charging by the cable, without a full start?): switch it off with the lever and on again, "
+                         "choose MTP if it asks")
+                mute_told = True
+            if hint and not told and self.clock() - t0 > 10 and mute_since is None:   # no camera at all
                 self.say(hint)
                 told = True
             self.sleep(2.0)
-        raise StepFailed(f"{what}: no camera in {timeout:.0f} s")
+        raise StepFailed(f"{what}: no camera in {timeout:.0f} s" + (" (one was on USB, but OMKit did not answer: switch "
+                                                                   "it off with the lever and on again)" if mute_told
+                                                                   else ""))
 
     def wait_gone(self, timeout: float) -> bool:
         """Until the camera no longer answers"""
