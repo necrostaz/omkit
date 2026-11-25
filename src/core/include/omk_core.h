@@ -5,7 +5,7 @@
 #include "omk_drv.h"
 #include "omk_mem.h"
 
-#define CORE_VERSION "1.44"
+#define CORE_VERSION "1.45"
 #ifndef CORE_BUILD                          /* the Makefile: git branch@commit of the build, "-dirty" with changes */
 #define CORE_BUILD "unknown"
 #endif
@@ -27,6 +27,7 @@ u32 cfg_bad_lines(u32 *first);          /* how many lines failed to parse, and t
  * its keys win. 1 read (wrong: its lines not understood), 0 not there, -1 longer than 1 KB (not used). Once per start */
 int cfg_once(const char *name, const char *section, u32 *wrong);
 void cfg_once_drop(void);                   /* its keys forgotten (it could not be consumed) */
+const char *cfg_once_str(const char *section, const char *key);   /* a key of the one-shot file itself, or 0 */
 
 int str_ieq(const char *a, const char *b);
 u32 str_len(const char *s);
@@ -47,6 +48,7 @@ u32 crc32_update(u32 crc, const void *data, u32 n);           /* start with 0 */
 int core_in_task(void);                     /* main.c: 1 - the caller is the core task (by its stack) */
 void core_mark_ended(void);                 /* main.c: the run reached the end of a power-off */
 int core_prev_ended(void);                  /* main.c: 1 - the previous run ended with a power-off (or it is not known) */
+const char *core_run(void);                 /* main.c: this power-on's name (8 hex digits) */
 /* debug.c: core is about to write to the card (begin 1) or is done (0) - the log, a store, a file of the debug service;
  * what - the path. Snapshots of the file tasks around it when the debug service is on; nothing otherwise */
 void core_card_write(int begin, const char *what);

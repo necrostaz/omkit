@@ -1,5 +1,6 @@
 """tools/omkdebug.py session: its steps against a simulated camera - the debug service's answers, a restart by core or by
-hand, the cable taken out for the scenario and put back (or a hub's port switched off and on), time limits."""
+hand, the cable taken out for the scenario and put back (or a hub's port switched off and on), a scenario without hands
+(the cable in as charge only, a restart at its end), time limits."""
 import binascii
 import struct
 import sys
@@ -13,6 +14,7 @@ import omkdebug  # noqa: E402
 
 CORE_BIN = "OMKIT\\CORE.BIN"
 SHOOT_RUN = "OMKIT\\SHOOT.RUN"
+SHOOT_END = "OMKIT\\SHOOT.END"
 
 
 def header(boot, tail, head, seq, run=b"RUN00001", flags=0, size=65536):
@@ -47,6 +49,11 @@ class World:
         self.shoot_ends = None
         self.job = [0, 0, 0, 0, 0]
         self.said = []
+        self.hands = None                   # a scenario without hands: what this camera does with it
+        self.hands_result = "done"          # ... its result; "missed" - USB not held: it comes up in MTP, armed
+        self.end_restart = True             # ... core's restart at its end happens
+        self.prev_run = None
+        self.mute = False                   # on USB, but core does not run (came on from charging): HELLO fails
 
     def at(self, dt, what):
         self.events.append([self.now + dt, what])
@@ -65,17 +72,35 @@ class World:
             self.shoot_ends = None
 
     def boot(self):
-        """A real start: the new CORE.BIN's build runs, SHOOT.RUN is taken (removed) and its scenario armed"""
+        """A real start: the new CORE.BIN's build runs, SHOOT.RUN is taken (removed) and its scenario armed. Without
+        hands: the cable stays in but the camera keeps off the computer (charge only), shoots, writes SHOOT.END and
+        restarts"""
+        self.prev_run = self.run
         self.runs += 1
         self.prev_run = self.run
         self.run = f"RUN{self.runs:05d}"
         self.build = omkdebug.build_of(self.files.get(CORE_BIN, b"")) or self.build
         self.shoot = {"state": 0, "waiting": 0, "total": 0, "taken": 0}
         once = self.files.pop(SHOOT_RUN, None)
+        self.online = self.cable
         if once:
             steps = [x for x in once.split(b"steps = ")[1].split(b"\r")[0].split(b",") if x.strip()]
             self.shoot.update(state=1, waiting=1, total=len(steps))
-        self.online = self.cable
+            if b"hands_free = on" in once and self.hands_result != "missed":
+                sid = once.split(b"session = ")[1].split(b"\r")[0].decode()
+                self.online = False         # charge only: not on the bus
+                self.shoot["waiting"] = 0
+                self.at(10 * len(steps) + 5, lambda: self.hands_end(sid, len(steps)))
+
+    def hands_end(self, sid, n):
+        ok = self.hands_result == "done"
+        self.shoot.update(state=2 if ok else 3, taken=n if ok else 0)
+        text = (f"session={sid}\r\nrun={self.run}\r\nbuild={self.build}\r\nresult={self.hands_result}\r\n"
+                f"why={'' if ok else 'the camera did not come to shooting in time'}\r\ntaken={self.shoot['taken']}\r\n"
+                f"total={n}\r\nfailed=0\r\n")
+        self.files[SHOOT_END] = text.encode().ljust(254) + b"\r\n"
+        if self.end_restart:
+            self.at(8, self.boot)
 
     def unplug(self):
         self.cable = self.online = False
@@ -107,8 +132,11 @@ class FakeCam:
     def cmd(self, *p):
         self._alive()
         w, sub = self.w, p[0]
-        flags = 1 | 4 | 16 | 32 | omkdebug.F_SHOOT | omkdebug.F_INFO | (omkdebug.F_RESTART if w.restart_ok else 0)
+        flags = (1 | 4 | 16 | 32 | omkdebug.F_SHOOT | omkdebug.F_INFO | omkdebug.F_HANDS_FREE |
+                 (omkdebug.F_RESTART if w.restart_ok else 0))
         if sub == omkdebug.HELLO:
+            if w.mute:
+                raise omkdebug.Refused("WPD error 0x8007001f")
             return 0x2001, [omkdebug.MAGIC, 1, 1 << 16 | 42, flags, 1]
         if sub == omkdebug.STATUS:
             return 0x2001, list(w.job)
@@ -195,6 +223,7 @@ class Args:
         self.pull_log, self.pull_pictures, self.out = False, 0, "."
         self.connect_timeout, self.restart_timeout, self.scenario_timeout = 60.0, 120.0, 600.0
         self.usb_off = self.usb_on = self.offline = None
+        self.hands_free = False
         self.__dict__.update(kw)
 
 
@@ -208,6 +237,103 @@ class SessionSteps(unittest.TestCase):
             if on_say:
                 on_say(m)
         return omkdebug.Session(lambda: FakeCam(w), say, clock=lambda: w.now, sleep=w.sleep, shell=shell)
+
+    def hands(self, w, **kw):
+        """A session without hands: nobody touches the cable"""
+        a = Args(scenario="look:1, stock", hands_free=True, restart=True, wait=True, **kw)
+        ses = self.make(w, user=False)
+        return ses.run(a), ses
+
+    def test_hands_free(self):
+        w = World()
+        with tempfile.TemporaryDirectory() as d:
+            core = Path(d) / "CORE.BIN"
+            core.write_bytes(b"\nbuild=feature/usb-handsfree@4444444\n")
+            out = Path(d) / "out"
+            w.files["OMKIT\\LOG\\CORE.LOG"] = b"log"
+            rc, ses = self.hands(w, put=[str(core)], pull_log=True, pull_pictures=1, out=str(out))
+            self.assertEqual(rc, 0, w.said)
+            self.assertEqual(w.run, "RUN00003")             # two restarts: into the scenario and after it
+            self.assertFalse(any("take the USB cable out" in m for m in w.said))
+            self.assertIn(f"session={ses.session_id}", w.files[SHOOT_END].decode())
+            self.assertTrue(any("scenario: done: 2 of 2 pictures made" in m and "run RUN00002" in m for m in w.said))
+            self.assertIn("run RUN00002", (out / "ramlog_prev.txt").read_text())
+            self.assertIn("run RUN00003", (out / "ramlog.txt").read_text())
+        self.assertIn("hands-free run", w.said[-1])
+
+    def test_hands_free_failed_scenario_still_pulls_the_log(self):
+        w = World()
+        w.hands_result = "failed"
+        w.files["OMKIT\\LOG\\CORE.LOG"] = b"log"
+        with tempfile.TemporaryDirectory() as d:
+            rc, _ = self.hands(w, pull_log=True, out=d)
+            self.assertTrue((Path(d) / "ramlog_prev.txt").exists())
+        self.assertEqual(rc, 1)
+        self.assertIn("FAILED at 'hands-free run'", w.said[-1])
+        self.assertIn("the camera did not come to shooting in time", w.said[-1])
+
+    def test_hands_free_camera_not_back(self):
+        w = World()
+        w.end_restart = False                               # hangs, or stays in charge only
+        rc, _ = self.hands(w, restart_timeout=30, scenario_timeout=60)
+        self.assertEqual(rc, 1)
+        self.assertIn("no camera in 90 s", w.said[-1])
+        self.assertIn("take the battery out", w.said[-1])
+
+    def test_hands_free_usb_not_held(self):
+        w = World()
+        w.hands_result = "missed"                           # comes up in MTP with the scenario armed
+        rc, _ = self.hands(w)
+        self.assertEqual(rc, 1)
+        self.assertIn("USB was not held as charge only", w.said[-1])
+
+    def test_hands_free_stale_result(self):
+        w = World()
+        w.files[SHOOT_END] = b"session=0BADF00D\r\nresult=done\r\n"
+        w.end_restart = True
+        orig = w.hands_end
+        w.hands_end = lambda sid, n: (orig("FFFFFFFF", n))  # an older core: writes nothing of this session
+        rc, _ = self.hands(w)
+        self.assertEqual(rc, 1)
+        self.assertIn("no result of this session", w.said[-1])
+
+    def test_camera_on_usb_without_core(self):
+        w = World()
+        w.mute = True                                       # came on from charging by the cable: no core
+
+        def on_say(m):
+            if "OMKit does not answer" in m:                # the owner: the lever off and on - a full start
+                w.at(5, lambda: setattr(w, "mute", False))
+        rc = self.make(w, user=False, on_say=on_say).run(Args(pull_log=False, pull_pictures=0, restart=True))
+        self.assertEqual(rc, 0, w.said)
+        told = [m for m in w.said if "OMKit does not answer" in m]
+        self.assertEqual(len(told), 1)
+        self.assertIn("switch it off with the lever and on again", told[0])
+        self.assertFalse(any("connect: no camera yet" in m for m in w.said))
+
+    def test_camera_on_usb_without_core_for_good(self):
+        w = World()
+        w.mute = True
+        rc = self.make(w, user=False).run(Args(restart=True, connect_timeout=40))
+        self.assertEqual(rc, 1)
+        self.assertIn("no camera in 40 s (one was on USB, but OMKit did not answer", w.said[-1])
+
+    def test_hands_free_needs_a_core_that_can(self):
+        w = World()
+        orig = FakeCam.cmd
+
+        def cmd(self, *p):
+            code, r = orig(self, *p)
+            if p[0] == omkdebug.HELLO:
+                r[3] &= ~omkdebug.F_HANDS_FREE
+            return code, r
+        FakeCam.cmd = cmd
+        try:
+            rc, _ = self.hands(w)
+        finally:
+            FakeCam.cmd = orig
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot run a scenario without hands", w.said[-1])
 
     def test_full_cycle(self):
         w = World()
@@ -358,6 +484,12 @@ class SessionSteps(unittest.TestCase):
     def test_texts(self):
         t = omkdebug.shoot_run_text("look:1, stock", 2, 0).decode()
         self.assertIn("[shoot]\r\nsteps = look:1, stock\r\nshots = 2\r\nstart_delay = 0\r\n", t)
+        self.assertNotIn("hands_free", t)
+        t = omkdebug.shoot_run_text("keep", None, None, "12AB34CD").decode()
+        self.assertIn("hands_free = on\r\nsession = 12AB34CD\r\narm_wait = 120000\r\n", t)
+        r = omkdebug.parse_result(b"session=12AB34CD\r\nresult=failed\r\nwhy=stuck\r\ntaken=1\r\n".ljust(254) + b"\r\n")
+        self.assertEqual((r["session"], r["result"], r["taken"]), ("12AB34CD", "failed", "1"))
+        self.assertIn("failed: 1 of ? pictures made", omkdebug.result_text(r))
         self.assertEqual(omkdebug.default_target("x/filmlook.omm")[1], "OMKIT\\MODULES\\FILMLOOK.OMM")
         self.assertEqual(omkdebug.default_target("a.ini=omkit/ini/a.ini")[1], "OMKIT\\INI\\A.INI")
         self.assertEqual(omkdebug.parse_info("core=1.42\nbuild=b@c\n")["build"], "b@c")

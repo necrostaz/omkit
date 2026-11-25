@@ -14,7 +14,7 @@ PYTHON ?= python3
 # as u16/u32 words, structures over arena blocks), as embedded code usually does; the type-based alias rule must not
 # let the optimizer reorder such reads and writes
 CFLAGS := -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-strict-aliasing -nostdlib -Wall -Wextra -Isrc/core/include -Isrc/sdk/include $(EXTRA)
-OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o optics.o taskdump.o dring.o debug.o shoot.o drv.o pictprof.o editor.o import.o ptp.o ispdrv.o graindrv.o opticsdrv.o kernel.o thunks.o)
+OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o optics.o taskdump.o dring.o debug.o shoot.o handsfree.o drv.o pictprof.o editor.o import.o ptp.o ispdrv.o graindrv.o opticsdrv.o kernel.o thunks.o)
 LD_SCRIPTS := src/core/core.ld src/platform/$(PLATFORM)/fw.ld
 
 all: $(OUT)/CORE.BIN
@@ -34,8 +34,8 @@ $(BUILD_STAMP): FORCE
 	@mkdir -p $(OUT)
 	@echo '$(BUILD_ID)' | cmp -s - $@ || echo '$(BUILD_ID)' > $@
 
-$(OUT)/main.o $(OUT)/debug.o: $(BUILD_STAMP)
-$(OUT)/main.o $(OUT)/debug.o: CFLAGS += -DCORE_BUILD='"$(BUILD_ID)"'
+$(OUT)/main.o $(OUT)/debug.o $(OUT)/handsfree.o: $(BUILD_STAMP)
+$(OUT)/main.o $(OUT)/debug.o $(OUT)/handsfree.o: CFLAGS += -DCORE_BUILD='"$(BUILD_ID)"'
 
 # The MN10300 toolchain must be there before anything is compiled for the camera
 toolchain-check:
@@ -129,7 +129,7 @@ HOST_CC ?= gcc
 TEST := $(OUT)/test
 HOST_CFLAGS := -std=gnu99 -Wall -Wextra -Werror
 HOST_INC := -Isrc/core/include -Isrc/sdk/include -Itests/host
-HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c dring.c debug.c shoot.c)
+HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c dring.c debug.c shoot.c handsfree.c)
 HOST_DEPS := src/core/include/*.h src/sdk/include/*.h tests/host/host_drv.h tests/host/host_drv.c
 HAVE_TC = $(shell command -v $(TC)gcc 2>/dev/null)
 HAVE_NUMPY = $(shell $(PYTHON) -c "import numpy" 2>/dev/null && echo yes)

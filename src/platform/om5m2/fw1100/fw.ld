@@ -30,6 +30,16 @@ f_setting_read = 0x602f4c5b;
  * 1 released; the shell's "ui key skey" -> 0x601310b8); posting an event to the application's queue (d0 event, d1 0) */
 f_key_api = 0x6032b57f;
 f_app_event = 0x60046624;
+/* the hands-free restart (drv.c drv_restart_hfw): a power-off job for the HFW callback executor (task HLS_CALLBACK), as
+ * the factory reset posts its own (0x6089ab75); the firmware's reset on request (the watchdog) as the last resort */
+f_scheap_alloc = 0x60023796;            /* d0 size -> a0, cached heap of CPU 0 */
+f_camera_common = 0x6089e157;           /* -> a0 CameraCommon */
+f_shutdown = 0x6089e774;                /* CameraCommon::shutDown (a0 object, d0 mode, d1 reason, a1 flag); hooked by core */
+f_hfw_job_new = 0x608591a7;             /* the job's constructor */
+f_hfw_executor = 0x60858d8e;            /* -> a0 the executor */
+f_hfw_post = 0x60858e51;                /* d0 replace, a0 executor, a1 job */
+f_reset_request = 0x60058ae0;           /* d0 the cause */
+usb_back = 0x60d1554e;                  /* the USB hold: checkPcMode past the displaced instructions at 0x60d15549 */
 f_lock = 0x6006e645;
 f_unlock = 0x6006e68e;
 f_phyalloc = 0x60023818;                /* scheap_phyalloc: uncached heap, one for all CPUs */

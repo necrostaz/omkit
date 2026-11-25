@@ -12,6 +12,7 @@
 #include "omk_mod.h"
 #include "omk_debug.h"
 #include "omk_shoot.h"
+#include "omk_handsfree.h"
 
 #define SERVICE_MS 250
 #define CORE_STORE_SIZE 256
@@ -251,6 +252,11 @@ int core_prev_ended(void)
     return prev_ended;
 }
 
+const char *core_run(void)
+{
+    return run_id;
+}
+
 /* Power-off, at the card-off gate, just before the last save */
 void core_mark_ended(void)
 {
@@ -288,6 +294,9 @@ void core_main(void)
     log_diagnostics();
     count_boot(store_open("CORE", CORE_STORE_SIZE));
     log_checkpoint("boot: config, log and store ready");
+    /* SHOOT.RUN now, not after the modules: a scenario without hands must hold USB before the firmware applies its USB
+     * choice - in the start with the cable in that is the card's mount, about when core starts (handsfree.c) */
+    hf_setup(shoot_once());
     if (drv_wait_init(cfg_bool("core", "core_events", 1)) > 0)
         log_printf(OMK_LOG_DEBUG, "boot: the core task waits on an event flag");
     else if (cfg_bool("core", "core_events", 1))
@@ -337,6 +346,7 @@ void core_main(void)
         dbg_where(DBG_W_POWER);
         if (!power_service(now)) {
             shoot_power_lost();             /* keys released, the scenario waits for the camera to shoot again */
+            hf_service(now);                /* a restart of its own under way: its stages */
             continue;                       /* power-off or sleep: no card, no module work */
         }
         if (!loaded) {
@@ -349,6 +359,7 @@ void core_main(void)
                                                the profile change, before the store's writes */
         dbg_where(DBG_W_SHOOT);
         tick = shoot_service(now, SERVICE_MS);   /* sooner while a test scenario runs */
+        hf_service(now);
         busy = drv_card_busy() || drv_prof_take_recent();
         if (busy && !deferred)
             deferred_ms = now;

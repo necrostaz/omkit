@@ -448,5 +448,28 @@ int drv_look_find(const char *name);
  * alarm of 1 s. Outside the PC mode the application ignores it. Core task only, never under drv_lock. 0 posted, -1 not on
  * this platform */
 int drv_restart_request(void);
+/* The restart past the application (the test scenario without hands, core/handsfree.c): the same reboot power-off, run by
+ * a firmware task of its own instead of the application's. 0 posted; -2 the firmware takes no such job now (try again
+ * soon); -1 not on this platform; -3 no memory */
+int drv_restart_hfw(void);
+void drv_reset(u32 cause);                  /* the last resort: a reset by the watchdog, nothing saved; does not return */
+
+/* The USB hold (core/handsfree.c): a hook on the firmware's use of its USB choice turns every choice into the mode held -
+ * charge only (the camera shoots, no data link) or MTP; the firmware does the rest. The choice's values are the
+ * firmware's own: 0 its dialog (or none yet), 1 Storage, 2 MTP, 3 charge only (13 Webcam, others) */
+enum { DRV_USB_DIALOG = 0, DRV_USB_STORAGE = 1, DRV_USB_MTP = 2, DRV_USB_CHARGE = 3 };
+typedef struct {
+    u32 choice;                             /* the USB choice now */
+    u32 factor;                             /* the start's factor: 4 - started for the computer (the cable to a host) */
+    u32 link;                               /* TPC_CAMC's state byte (0x623a0b04): 1 in MTP, 2 in the dialog and in charge
+                                               only (camera); for the log */
+    u32 app;                                /* the application state, 0xffffffff - not readable (the PC mode of USB) */
+} drv_usb_info;
+int drv_usb_hold_install(void);             /* the hook in place: 0; otherwise the driver's code (once is enough) */
+void drv_usb_hold(u32 mode);                /* 0 - the firmware's own choice; DRV_USB_CHARGE or DRV_USB_MTP - that one */
+u32 drv_usb_hold_get(void);
+u32 drv_usb_hold_hits(void);                /* choices the hook changed since the start */
+void drv_usb_probe(drv_usb_info *u);
+int drv_ok_key(int down);                   /* the OK key, by the keys' own path (as the shutter button): 0 - taken */
 
 #endif

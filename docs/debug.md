@@ -134,6 +134,7 @@ python tools/omkdebug.py session --put build/CORE.BIN --put OMKIT.INI --scenario
 | `--scenario` | with `--restart`: the file `OMKIT\SHOOT.RUN` ([config.md](config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)), which runs once at the next start (`--shots`, `--start-delay` go into it); without: the scenario starts now over USB | the steps are checked by the camera |
 | `--restart` | the camera restarts and comes back | it left USB, then answers with a new run; the build that runs is the one of the `CORE.BIN` put |
 | `--wait` | the scenario runs once the camera shoots: the tool asks you to take the cable out and to put it back when the pictures are made (or `--usb-off CMD --usb-on CMD` switch a hub's port off and on, for `--offline` seconds) | the camera comes back in the same run; the scenario's result |
+| `--hands-free` | instead of `--restart` and `--wait`: the scenario runs with the cable in (below) | the result of this session in `OMKIT\SHOOT.END` |
 | `--pull-log`, `--pull-pictures N` | the RAM logs of this power-on (`ramlog.txt`) and of the one before (`ramlog_prev.txt`; each also as read, `ramlog.bin`, `ramlog_prev.bin`), `CORE.LOG` and the last N pictures into the output folder; `--crumbs` adds the optics layer's crumbs (`crumbs.txt`), `--pull-mem ADDR:LEN` memory (`mem_ADDR.bin`, repeatable) | each piece's CRC-32 |
 
 Every step has a time limit (`--connect-timeout`, `--restart-timeout`, `--scenario-timeout`); the first step that fails
@@ -153,4 +154,30 @@ battery out for a cold start.
 **The USB mode after the restart.** The camera comes back with the cable in, so it shows its USB dialog again: choose
 MTP (the tool waits and reminds you). With the camera's USB mode set to MTP rather than to asking, it should connect
 without the dialog (not tried yet). It does not take pictures in the MTP mode, which is why the cable has to go out for
-the scenario.
+the scenario - or the session goes without hands.
+
+**Without hands.** `--hands-free` needs `--scenario` and a `core` that has it (`hello` lists the flag `hands-free`, or
+put such a `CORE.BIN` in the same session):
+
+```text
+python tools/omkdebug.py session --put build/CORE.BIN --scenario keep --shots 3 --hands-free --pull-log ^
+    --pull-pictures 3 -o run2
+```
+
+The tool writes `OMKIT\SHOOT.RUN` with `hands_free = on` and a session name ([config.md](config.md#102-without-hands-hands_free--on-in-shootrun)),
+restarts the camera and waits. The camera starts again with the cable in but keeps it as charge only - it shoots and is
+not on the computer -, runs the scenario, writes its result, restarts once more and comes back in the MTP mode; the
+tool then reads the result, and `--pull-log` takes the RAM log of the scenario's run (`ramlog_prev.txt`, the power-on
+before) with `CORE.LOG`. Leave the camera's USB mode at asking: `core` answers the dialog itself, with "charge only" for
+the scenario and with MTP after it; with the mode set to MTP the camera connects before `core` could hold USB, and the
+scenario ends at once (the tool says so). The tool's verdicts:
+
+| What the tool says | What happened |
+|---|---|
+| `scenario: done: N of N pictures made` | all well; exit status 0 |
+| `scenario: failed: ... (why)` | the scenario ended badly (`why` from the camera); the logs are pulled all the same |
+| `the camera stayed on USB - the restart request was not taken` | the first restart did not happen |
+| `the camera did not restart at the end` | `core` kept the camera on: it was connected to the computer before USB could be held |
+| `the camera came up connected to the computer with the scenario waiting` | a `core` that did not hold USB; the scenario is stopped |
+| `the camera is on USB but OMKit does not answer` | `core` does not run: the camera came on from charging by the cable without a full start (any step of any session says this after 15 s); switch it off with the lever and on again |
+| `no camera in N s` | the camera hangs, stays off or stays in charge only: take the battery out and put it back, switch the camera on, then pull the log (the scenario's run is the one before) |

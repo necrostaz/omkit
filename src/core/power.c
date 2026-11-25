@@ -16,7 +16,7 @@
 #define PROBE_WORDS 7
 
 static volatile u32 state, seq, acked, reason, since_ticks;
-static volatile u32 hook_ticks[POWER_HOOKS], hook_arg[POWER_HOOKS];
+static volatile u32 hook_ticks[POWER_HOOKS], hook_arg[POWER_HOOKS], hook_count[POWER_HOOKS];
 static u32 handled = POWER_RUN, handled_ms, sleep_ticks, sleep_ms, sleep_sec, sleep_frac;
 static int sleep_rtc;                       /* 0 - the subprocessor clock was read when sleep began */
 static int flag_ignored;                    /* the lever flag stayed 1 although power-off did not happen: ignore until 0 */
@@ -87,6 +87,7 @@ void power_hook(u32 kind, u32 arg)
         return;
     hook_ticks[kind] = drv_ticks();
     hook_arg[kind] = arg;
+    hook_count[kind]++;
     st = drv_lock();
     s = state;
     n = seq;
@@ -247,6 +248,11 @@ int power_service(u32 now)
         }
     }
     return power_running();
+}
+
+u32 power_hook_count(u32 kind)
+{
+    return kind < POWER_HOOKS ? hook_count[kind] : 0;
 }
 
 u32 power_cancels(void)
