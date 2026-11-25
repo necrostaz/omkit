@@ -50,4 +50,11 @@ extern int host_find;                   /* 1 - drv_findfirst lists the host fold
 extern int host_restarts;               /* drv_restart_request calls */
 extern u32 host_fopen_us;               /* each drv_fopen moves the clock on by this (0: no time passes) */
 
+/* The test scenario without hands */
+extern u32 host_stuck_since, host_k3;
+extern int host_usb_install_rc, host_hfw_rc;
+extern u32 host_usb_mode, host_usb_hits, host_usb_choice, host_usb_factor, host_usb_link, host_usb_installs;
+extern u32 host_ok_presses, host_hfw_posts, host_resets, host_reset_cause;
+void host_usb_take(u32 choice);           /* the firmware applies a USB choice (the hook's place) */
+
 #endif

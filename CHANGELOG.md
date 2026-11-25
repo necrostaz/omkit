@@ -23,6 +23,13 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   scenario, restart, the pictures and the logs ([docs/debug.md](docs/debug.md#6-a-test-session)). A scenario waits until
   the camera shoots (`[shoot] arm_wait`), and `OMKIT\SHOOT.RUN` starts one at the next power-on only, removed before it
   runs ([docs/config.md](docs/config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)).
+- **A test session without hands.** `hands_free = on` in `OMKIT\SHOOT.RUN` keeps the USB cable as charge only for that
+  one start, whatever the camera's USB choice (the camera shoots and stays off the computer; its settings are not
+  changed), and at the scenario's end `core` writes the result to `OMKIT\SHOOT.END` and restarts the camera, which comes
+  back in the MTP mode; a stuck camera application ends it too
+  ([docs/config.md](docs/config.md#102-without-hands-hands_free--on-in-shootrun)). `omkdebug.py session --hands-free`
+  runs such a session and `--pull-log` also takes the RAM log of the power-on before
+  ([docs/debug.md](docs/debug.md#6-a-test-session)).
 - The log names the build at each power-on: `OMKit core <version> (branch@commit)`.
 
 ### Changed

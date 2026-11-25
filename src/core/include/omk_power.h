@@ -28,5 +28,6 @@ void power_hook(u32 kind, u32 arg);         /* driver, firmware task on CPU 0; t
 int power_service(u32 now);                 /* core task loop; 1 - running: card writes allowed */
 int power_running(void);                    /* card and screen are ours to use */
 u32 power_cancels(void);                    /* how many power-offs and sleeps did not happen (core task) */
+u32 power_hook_count(u32 kind);             /* how many times that hook (POWER_HOOK_*) ran since the start */
 
 #endif

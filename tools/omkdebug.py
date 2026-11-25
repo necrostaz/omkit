@@ -27,7 +27,8 @@ run anywhere (tests/test_omkdebug.py, tests/test_omkdebug_session.py).
                                                       firmware's own 0x970A; by hand where neither) and wait for it
                                                       to come back with a new run
     python tools/omkdebug.py session [options]        a whole test session: files, scenario, restart, the
-                                                      scenario's pictures and logs (session --help)
+                                                      scenario's pictures and logs; --hands-free: with the
+                                                      cable in throughout (session --help)
 
 Exit status: 0 done, 1 the camera refused or failed, 2 bad use, 3 no camera.
 """
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import secrets
 import struct
 import sys
 import time
@@ -47,14 +49,14 @@ HELLO, STATUS, LEVEL, MARK, SNAP, READ, LIST, WBEGIN, WCOMMIT, WABORT, RESTART, 
 SHOOT_STATUS, SHOOT_START, SHOOT_STOP = 0, 1, 2
 BANKS, BANK, MEM, HIST, XFER, INFO = 1, 2, 3, 4, 5, 6
 PATH, TEXT, WDATA = 1, 2, 0x21
-F_RESTART, F_SHOOT, F_INFO = 64, 128, 256
+F_RESTART, F_SHOOT, F_INFO, F_HANDS_FREE = 64, 128, 256, 512
 SHOOT_STATES = ["idle", "running", "done", "failed", "stopped"]
 MAGIC = 0x444B4D4F
 RESTART_KEY = 0x21544252
 STAGE, XFER_SIZE = 16384, 65536
 J_DONE, J_FAILED = 3, 4
 FLAGS = {1: "ring", 2: "run-before", 4: "write", 8: "no-card-writes", 16: "usb-ops", 32: "buffers", 64: "restart",
-         128: "shoot", 256: "info"}
+         128: "shoot", 256: "info", 512: "hands-free"}
 RESULTS = ["ok", "bad path", "cannot open", "card i/o", "size differs", "CRC differs", "rename failed", "wrong state",
            "timeout", "card", "restart not available", "a step not understood", "a scenario runs already"]
 RESPONSES = {0x2001: "OK", 0x2002: "GeneralError", 0x2005: "OperationNotSupported", 0x200F: "AccessDenied (no write key)",
@@ -452,6 +454,9 @@ def main(argv=None) -> int:
     se.add_argument("--restart", action="store_true", help="restart the camera after the files (new CORE.BIN, modules "
                     "and OMKIT.INI run); the scenario then runs once from OMKIT\\SHOOT.RUN")
     se.add_argument("--wait", action="store_true", help="wait for the scenario to end (the cable must go out meanwhile)")
+    se.add_argument("--hands-free", action="store_true", help="the scenario runs with the cable in, as charge only: the "
+                    "camera restarts into it, restarts again at its end and comes back in the MTP mode (its USB mode set "
+                    "to MTP); implies --restart and --wait")
     se.add_argument("--pull-log", action="store_true", help="the RAM log and OMKIT\\LOG\\CORE.LOG into the output folder")
     se.add_argument("--pull-pictures", type=int, default=0, metavar="N", help="the last N pictures into the output folder")
     se.add_argument("-o", "--out", default="session", help="the output folder (default: session)")
@@ -782,18 +787,29 @@ SESSION_HELP = """A whole test session, step by step, each with its checks and t
      with a new run; when a CORE.BIN was put, its build must be the one that runs now;
   5. --wait: the scenario runs once the cable is out (by hand, or --usb-off / --usb-on with a hub that switches its
      ports' power); the tool waits for the camera to come back and for the scenario's end;
-  6. --pull-log, --pull-pictures N: the RAM log, CORE.LOG and the last N pictures into the output folder.
+  6. --pull-log, --pull-pictures N: the RAM logs of this power-on and of the one before, CORE.LOG and the last N
+     pictures into the output folder.
+
+With --hands-free, steps 3 to 5 need no hands: the scenario goes to SHOOT.RUN with hands_free = on; the camera restarts,
+keeps the cable as charge only (no data link, so it shoots), runs the scenario, writes its result to OMKIT\\SHOOT.END,
+restarts once more and comes back in the MTP mode. The tool waits up to --restart-timeout + --scenario-timeout for it,
+then tells the result and why. Set the camera's USB mode to MTP for it (no dialog to answer).
 
 The camera comes back in the MTP mode by itself only when its USB mode is set to MTP; otherwise choose MTP in its USB
 dialog each time it asks. Exit status: 0 done, 1 a step failed, 2 bad use, 3 no camera.
 
   python tools/omkdebug.py session --put build/CORE.BIN --put OMKIT.INI --scenario "look:Kodak Portra 400, stock"
       --restart --wait --pull-log --pull-pictures 2 -o run1
+  python tools/omkdebug.py session --scenario keep --shots 3 --hands-free --pull-log --pull-pictures 3 -o run2
 """
 
 
 class StepFailed(Exception):
     pass
+
+
+RESULT_FILE = "OMKIT\\SHOOT.END"          # core's result of a scenario without hands (docs/config.md, 10.2)
+HANDS_FREE_ARM_WAIT = 120000                # ms: as charge only the camera shoots within seconds of its start
 
 
 def default_target(spec: str) -> tuple[Path, str]:
@@ -806,15 +822,28 @@ def default_target(spec: str) -> tuple[Path, str]:
     return f, ("OMKIT\\MODULES\\" if name.endswith(".OMM") else "OMKIT\\") + name
 
 
-def shoot_run_text(steps: str, shots: int | None, start_delay: int | None) -> bytes:
-    """OMKIT\\SHOOT.RUN: [shoot] keys over those of OMKIT.INI, for one start"""
+def shoot_run_text(steps: str, shots: int | None, start_delay: int | None, session_id: str | None = None) -> bytes:
+    """OMKIT\\SHOOT.RUN: [shoot] keys over those of OMKIT.INI, for one start; with session_id - a run without hands
+    (the cable in as charge only, a restart at the end, the result in OMKIT\\SHOOT.END under that name)"""
     lines = ["; one test scenario, written by omkdebug.py session; core removes this file before it runs", "[shoot]",
              f"steps = {steps}"]
     if shots is not None:
         lines.append(f"shots = {shots}")
     if start_delay is not None:
         lines.append(f"start_delay = {start_delay}")
+    if session_id is not None:
+        lines += ["hands_free = on", f"session = {session_id}", f"arm_wait = {HANDS_FREE_ARM_WAIT}"]
     return ("\r\n".join(lines) + "\r\n").encode("ascii")
+
+
+def parse_result(data: bytes) -> dict:
+    """OMKIT\\SHOOT.END: key=value lines, padded with spaces to a fixed length"""
+    return {k.strip(): v.strip() for k, v in parse_info(data.decode("ascii", "replace")).items()}
+
+
+def result_text(r: dict) -> str:
+    return (f"{r.get('result', '?')}: {r.get('taken', '?')} of {r.get('total', '?')} pictures made, "
+            f"{r.get('failed', '?')} not seen made" + (f" ({r['why']})" if r.get("why") else ""))
 
 
 def scenario_seconds(steps: str, shots: int | None) -> float:
@@ -826,11 +855,12 @@ def scenario_seconds(steps: str, shots: int | None) -> float:
 class Session:
     """The steps of a session against camera objects made by connect() (Camera, or a test's fake)"""
 
-    def __init__(self, connect, say, clock=time.monotonic, sleep=time.sleep, shell=None):
+    def __init__(self, connect, say, clock=time.monotonic, sleep=time.sleep, shell=None, session_id=None):
         self.connect, self.say, self.clock, self.sleep = connect, say, clock, sleep
         self.shell = shell or (lambda cmd: __import__("subprocess").run(cmd, shell=True).returncode)
         self.cam = None
         self.after: dict = {}
+        self.session_id = session_id or secrets.token_hex(4).upper()
 
     def drop(self):
         if self.cam is not None:
@@ -918,6 +948,44 @@ class Session:
         self.after = d
         return True
 
+    def hands_free(self, a, before: dict) -> dict:
+        """core's RESTART; the camera leaves USB, starts again and runs the scenario of SHOOT.RUN with the cable in as
+        charge only (off the computer), restarts at its end and comes back in the MTP mode (its USB mode set to MTP).
+        Its result: OMKIT\\SHOOT.END of this session"""
+        run_a = before["run"]
+        st = job(self.cam, RESTART, RESTART_KEY, timeout=30.0)
+        self.say(f"hands-free: restart accepted by core, the request follows in {st[4]} ms")
+        if not self.wait_gone(30.0):
+            raise StepFailed("hands-free: the camera stayed on USB - the restart request was not taken (see the RAM "
+                             "log: tail)")
+        limit = a.restart_timeout + a.scenario_timeout
+        self.say(f"hands-free: the camera starts again and runs the scenario with the cable in, charging only, off the "
+                 f"computer; at its end it restarts once more and comes back in the MTP mode; waiting up to {limit:.0f} s")
+        try:
+            d = self.wait_camera(limit, "hands-free", other_than=run_a)
+        except StepFailed:
+            raise StepFailed(f"hands-free: no camera in {limit:.0f} s - it hangs, stays off or stays in charge only: take "
+                             "the battery out and put it back, switch the camera on (choose MTP if it asks), then pull the "
+                             "log - the run of the scenario is the one before (postmortem, CORE.LOG)") from None
+        self.after = d
+        self.say(f"hands-free: back, run {d['run']} (was {run_a}), core {d['core']} ({d['build']})")
+        try:
+            res = parse_result(read_file(self.cam, RESULT_FILE))
+        except Refused:
+            res = {}
+        if res.get("session") == self.session_id:
+            return res
+        s = shoot_status(self.cam)
+        if s["state"] == "running":
+            try:
+                job(self.cam, SHOOT, SHOOT_STOP)
+            except Refused:
+                pass
+            raise StepFailed("hands-free: the camera came up connected to the computer with the scenario waiting - USB "
+                             "was not held as charge only (see the RAM log); the scenario is stopped")
+        raise StepFailed(f"hands-free: no result of this session in {RESULT_FILE} (the scenario here: {s['state']}; a "
+                         "core without hands-free?)")
+
     def wait_scenario(self, a, run: str) -> dict:
         s = shoot_status(self.cam)
         self.say("scenario: " + shoot_text(s))
@@ -957,15 +1025,26 @@ class Session:
             self.sleep(2.0)
 
     def pull_log(self, out: Path):
+        """The RAM logs of this power-on (ramlog.txt) and of the one before (ramlog_prev.txt), and CORE.LOG"""
         code, _, raw = self.cam.get(BANKS)
         ok(code, "BANKS")
-        data, start, _ = read_bank(self.cam, 0, parse_banks(raw))
-        names: dict = {}
-        lines = [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in parse_records(data, start)]
-        (out / "ramlog.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        banks = parse_banks(raw)
+        counts = []
+        for which, name in ((0, "ramlog"), (1, "ramlog_prev")):
+            if which and banks["prev"] == 0xFF:
+                counts.append("no RAM log of a power-on before")
+                continue
+            h = banks["banks"][banks["cur"] if which == 0 else banks["prev"]]
+            data, start, _ = read_bank(self.cam, which, banks)
+            names: dict = {}
+            lines = [f"# power-on {h['boot']} run {h['run']}, "
+                     f"{'ended with a power-off' if h['ended'] else 'did NOT end with a power-off'}"]
+            lines += [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in parse_records(data, start)]
+            (out / f"{name}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            counts.append(f"{name}.txt {len(lines) - 1} records (run {h['run']})")
         log = read_file(self.cam, "OMKIT\\LOG\\CORE.LOG")
         (out / "CORE.LOG").write_bytes(log)
-        self.say(f"log: {len(lines)} records of the RAM log, CORE.LOG {len(log)} bytes")
+        self.say(f"log: {', '.join(counts)}, CORE.LOG {len(log)} bytes")
 
     def run(self, a) -> int:
         out = Path(a.out)
@@ -975,6 +1054,8 @@ class Session:
             done.append(name)
             self.say(f"--- {name}")
 
+        hands = getattr(a, "hands_free", False)
+        failed = None                       # hands-free: the scenario's failure, told after the logs are pulled
         try:
             step("connect")
             before = self.wait_camera(a.connect_timeout, "connect", "connect: no camera yet - connect it and choose "
@@ -984,6 +1065,11 @@ class Session:
                 raise StepFailed("connect: [debug] write = on is needed to write files")
             if a.scenario is not None and not a.restart and not before["flags"] & F_SHOOT:
                 raise StepFailed("connect: this core has no test scenario over USB")
+            if hands and not before["flags"] & F_RESTART:
+                raise StepFailed("connect: this core cannot restart the camera over USB")
+            if hands and not before["flags"] & F_HANDS_FREE and not any(default_target(x)[1] == "OMKIT\\CORE.BIN"
+                                                                       for x in a.put):
+                raise StepFailed("connect: this core cannot run a scenario without hands (put a CORE.BIN that can)")
             expect = None
             for spec in a.put:
                 f, target = default_target(spec)
@@ -999,21 +1085,33 @@ class Session:
             if a.scenario is not None:
                 step("scenario")
                 if a.restart:
-                    put_file(self.cam, shoot_run_text(a.scenario, a.shots, a.start_delay), "OMKIT\\SHOOT.RUN")
-                    self.say("scenario: OMKIT\\SHOOT.RUN written, it runs once at the next start")
+                    put_file(self.cam, shoot_run_text(a.scenario, a.shots, a.start_delay,
+                                                      self.session_id if hands else None), "OMKIT\\SHOOT.RUN")
+                    self.say("scenario: OMKIT\\SHOOT.RUN written, it runs once at the next start" +
+                             (f" without hands (session {self.session_id})" if hands else ""))
                 else:
                     if a.shots is not None or a.start_delay is not None:
                         self.say("scenario: --shots and --start-delay need --restart (SHOOT.RUN); OMKIT.INI's are used")
                     shoot_start(self.cam, a.scenario)
                     self.say("scenario: started")
-            if a.restart:
+            if hands:
+                step("hands-free run")
+                res = self.hands_free(a, before)
+                self.say("scenario: " + result_text(res) + f", run {res.get('run', '?')}")
+                if res.get("run") == self.after["run"]:
+                    self.say("hands-free: the camera did not restart at the end (core kept it on: see its log)")
+                if expect and res.get("build") != expect:
+                    raise StepFailed(f"hands-free: the scenario ran on {res.get('build')}, the CORE.BIN put is {expect}")
+                if res.get("result") != "done":
+                    failed = "scenario: " + result_text(res)
+            elif a.restart:
                 step("restart")
                 if not self.restart(before, a.restart_timeout):
                     raise StepFailed("restart: the camera did not come back")
                 run = self.after["run"]
                 if expect and self.after["build"] != expect:
                     raise StepFailed(f"restart: the camera runs {self.after['build']}, the CORE.BIN put is {expect}")
-            if a.scenario is not None and a.wait:
+            if a.scenario is not None and a.wait and not hands:
                 step("wait for the scenario")
                 s = self.wait_scenario(a, run)
                 if s["state"] != "done":
@@ -1027,6 +1125,9 @@ class Session:
                 step("pull the pictures")
                 for path, n in pull_pictures(self.cam, a.pull_pictures, out):
                     self.say(f"pictures: {path}: {n} bytes")
+            if failed:
+                done.append("hands-free run")
+                raise StepFailed(failed)
             self.say("session: done (" + ", ".join(done) + ")")
             return 0
         except (StepFailed, Refused, OSError) as e:
@@ -1040,6 +1141,11 @@ def session(a, connect) -> int:
     if a.usb_off and not a.usb_on:
         print("session: --usb-off needs --usb-on", file=sys.stderr)
         return 2
+    if a.hands_free:
+        if a.scenario is None or a.usb_off:
+            print("session: --hands-free needs --scenario and goes without --usb-off", file=sys.stderr)
+            return 2
+        a.restart = a.wait = True
     if not (a.put or a.scenario is not None or a.restart or a.pull_log or a.pull_pictures):
         print("session: nothing to do (session --help)", file=sys.stderr)
         return 2

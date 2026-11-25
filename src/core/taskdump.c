@@ -32,7 +32,7 @@ static int cpu_run[OMK_CPUS];
 static u32 dumps, pending, reason, emitting, pos, last_auto, last_auto_ms, cancels_seen;
 static u32 every_ms, base_ms, stuck_ms, next_every;
 static int enabled, base_done;
-static u32 ui_app, ui_keys, ui_since, ui_changes, ui_fired, ui_seen;
+static u32 ui_app, ui_keys, ui_since, ui_changes, ui_fired, ui_seen, ui_fired_ms;
 
 /* ---- a line built piece by piece: log_printf has no field widths for strings ---- */
 typedef struct {
@@ -370,6 +370,7 @@ static void ui_check(u32 now)
         return;
     if (r == DRV_UI_TRANSIENT || ui_changes || dur >= TD_STUCK_SLOW * stuck_ms) {
         ui_fired = 1;
+        ui_fired_ms = now | 1;              /* 0 is "not stuck" */
         log_printf(OMK_LOG_WARN, "taskdump: application state %x for %u ms, keys changed %u times", app, dur, ui_changes);
         request(WHY_STUCK);
     }
@@ -406,6 +407,11 @@ void taskdump_setup(u32 now)
     cancels_seen = power_cancels();
     log_printf(OMK_LOG_DEBUG, "taskdump: on, every %u s, baseline at %u s, stuck after %u s, buffer %u bytes", every_ms / 1000,
                base_ms / 1000, stuck_ms / 1000, TD_TASKS * (u32)sizeof(drv_task));
+}
+
+u32 taskdump_stuck_since(void)
+{
+    return enabled && ui_seen && ui_fired ? ui_fired_ms : 0;
 }
 
 void taskdump_service(u32 now)

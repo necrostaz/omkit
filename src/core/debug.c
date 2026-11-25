@@ -17,6 +17,7 @@
 #include "omk_core.h"
 #include "omk_debug.h"
 #include "omk_dring.h"
+#include "omk_handsfree.h"
 #include "omk_log.h"
 #include "omk_power.h"
 #include "omk_shoot.h"
@@ -757,7 +758,7 @@ static u32 flags(void)
 {
     return (cur ? DBG_F_RING : 0) | (prev_valid ? DBG_F_PREV : 0) | (write_on ? DBG_F_WRITE : 0) |
            (card_on ? 0 : DBG_F_NO_CARD) | (ptp_on ? DBG_F_PTP : 0) | (stage && xfer ? DBG_F_BUFFERS : 0) | DBG_F_SHOOT |
-           DBG_F_INFO | (write_on ? DBG_F_RESTART : 0);
+           DBG_F_INFO | (write_on ? DBG_F_RESTART : 0) | (hf_supported() ? DBG_F_HANDS_FREE : 0);
 }
 
 /* GET INFO: key=value lines, plain text */

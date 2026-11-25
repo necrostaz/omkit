@@ -49,6 +49,12 @@ static const struct {
     {0x60051143, {0x5b, 0x38, 0x93, 0x96, 0x86, 0x42, 0x1c, 0x00}},   /* OlyEvWt */
     {0x60051078, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xba, 0x28, 0xc0}},   /* OlyEvSt */
     {0x6005123a, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xf8, 0x26, 0xc0}},   /* OlyEvCl */
+    {0x60023796, {0xfa, 0xc8, 0x80, 0x00, 0xc5, 0x05, 0x00, 0xca}},   /* scheap_alloc */
+    {0x6089e157, {0xfc, 0xa0, 0x18, 0x41, 0xe4, 0x61, 0xb0, 0x00}},   /* CameraCommon */
+    {0x608591a7, {0x92, 0xfc, 0xce, 0xf0, 0xad, 0xb4, 0x60, 0x6a}},   /* HFW job constructor */
+    {0x60858d8e, {0xfc, 0xa0, 0x6c, 0x20, 0xe4, 0x61, 0xb0, 0x00}},   /* HFW callback executor */
+    {0x60858e51, {0x82, 0x43, 0x04, 0x97, 0xbf, 0x00, 0xc9, 0x05}},   /* HFW job post */
+    {0x60058ae0, {0xfc, 0x81, 0xb0, 0x00, 0xf0, 0x8f, 0x80, 0x01}},   /* reset on request */
 };
 
 const char *drv_name(void)
@@ -320,7 +326,8 @@ static u32 vsc(u32 off)
 
 /* ------------------------------------------------------------------------------------------------------------------
  * Power hooks. The sites' bytes are checked against the
- * image; all of them run in the application task. The kinds in thunks.s are POWER_HOOK_* of omk_power.h */
+ * image; they run in the application task - or, for the restart past the application (drv_restart_hfw), in the HFW
+ * callback task HLS_CALLBACK; both are tasks of CPU 0. The kinds in thunks.s are POWER_HOOK_* of omk_power.h */
 void drv_tramp_off(void);
 void drv_tramp_card(void);
 void drv_tramp_sleep(void);
@@ -458,6 +465,136 @@ int drv_restart_request(void)
 {
     drv_app_event(EV_REBOOT_REQUEST, 0);
     return 0;
+}
+
+/* The restart past the application (the hands-free scenario's end: the camera shoots, where the request above is
+ * ignored). A job for the HFW callback executor (OlyHfwCallbackManager 0x62186cf0, task HLS_CALLBACK, CPU 0, priority 54,
+ * stack 14848) whose callback is CameraCommon::shutDown(1, 11, 0) itself - the way the factory reset posts its power-off
+ * job (0x6089ab75 -> startShutDown(1, 9, 0) in HLS_CALLBACK). The power-off is then the reboot of the PC mode's request:
+ * the settings saved, the card unmounted (message 53), an alarm of 1 s; the power hooks run in HLS_CALLBACK, so the core
+ * task stays free to acknowledge the card-off gate. Executor +820, u16: jobs refused - the HFW event channel sets it while
+ * it waits (0x60858f6d), and a job posted then is deleted unrun (0x60858e5c). The job's 28 bytes come from scheap
+ * (0x60023796), which its deletion frees (0x6085947b -> 0x600237c8). Static reading of E148 1.1. Core task (CPU 0, as
+ * HLS_CALLBACK and the heap), never under drv_lock: HLS_CALLBACK is to run at once */
+#define HFW_JOBS_REFUSED 820
+#define HFW_JOB_SIZE 28
+
+u32 drv_scheap_alloc(u32 size);             /* thunks.s */
+u32 drv_camera_common(void);
+u32 drv_hfw_job_off(u32 mem, u32 camera_common);
+u32 drv_hfw_executor(void);
+void drv_hfw_post(u32 executor, u32 job);
+void drv_fw_reset(u32 cause);
+
+int drv_restart_hfw(void)
+{
+    u32 exec = drv_hfw_executor(), cc, mem;
+
+    if (!ram_ptr(exec))
+        return -1;
+    if (*(const volatile u16 *)(exec + HFW_JOBS_REFUSED))
+        return -2;
+    cc = drv_camera_common();
+    if (!ram_ptr(cc))
+        return -1;
+    mem = drv_scheap_alloc(HFW_JOB_SIZE);
+    if (!mem)
+        return -3;
+    drv_hfw_post(exec, drv_hfw_job_off(mem, cc));
+    return 0;
+}
+
+/* The last resort: the firmware's reset on request 0x60058ae0 - the cause into (0x8ff000b0), which no start clears, and the inter-CPU interrupt of CPU 0, whose handler stops feeding the watchdog: a reset
+ * about 1 s later, a full start with the loader (camera: the reboot loops of core 0.53 and 0.62-0.63 end the same way).
+ * Nothing is saved, the card is not unmounted. Does not return */
+void drv_reset(u32 cause)
+{
+    drv_fw_reset(cause);
+    for (;;)
+        drv_sleep(1000);
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * The USB hold (core/handsfree.c). The application (its task, CPU 0) applies the USB choice in checkPcMode 0x60d1552f:
+ * the getter 0x60d079e2 reads (0x621bcb1c), the value picks the PC sub-application's next event (table 0x60f7ad80):
+ * 0 the dialog (USB_SELECT), 1 and 2 START_PC (Storage, MTP), 3 START_USB_PD - "charge only" 0x60d163fc:
+ * setUsbControlType(0, 1), then 0x60d1647c reads the value again and at 3 goes to the shooting application. Every way
+ * into the PC mode goes through it: the start with the cable in (MOUNT_END), the USB setting read (0x09000014), the end
+ * of the dialog, a display change. The hook sits right after the read (0x60d15549, displaced mov d0,d2; mov sp,a0;
+ * add 8,a0; mov d3,(a0)): with the hold on, d0 and the word become the mode held. The word is written through the cache:
+ * the hook runs in the application's task on CPU 0, whose cache its own setter 0x60d079d9 and getter use; it lies
+ * outside the range the memory guard watches. The hold and the counters are read by the hook and written by the core
+ * task: a line of their own, used only through the uncached alias. Static reading of E148 1.1 */
+#define USB_SITE 0x60d15549
+#define USB_CHOICE 0x621bcb1c
+#define USB_FACTOR 0x621bcbcc               /* the start's factor (getter 0x60d12988): 4 - the cable to a host at the mount */
+#define USB_TPC_ON 0xa23a0b04               /* u8, the USB device class on (TPC_CAMC 0x614ba240), read past the cache */
+#define KEY_OK 0x02000004                   /* the OK key's event: code 4 "Ok" (names 0x60258ec8), as Trg1 is 0x2000100 */
+
+enum { USB_MODE, USB_HITS, USB_LAST, USB_SLOTS = 16 };
+static u32 usb_slot[USB_SLOTS] __attribute__((aligned(64), section(".data.cpu_shared")));
+static int usb_installed;
+
+void drv_tramp_usb(void);
+
+static volatile u32 *usb(void)
+{
+    return (volatile u32 *)((u32)usb_slot + UNCACHED);
+}
+
+void drv_usb_filter(u32 *d0)
+{
+    volatile u32 *u = usb();
+    u32 mode = u[USB_MODE];
+
+    if (!mode || drv_cpu() != 0)
+        return;
+    u[USB_LAST] = *d0;
+    u[USB_HITS]++;
+    *d0 = mode;
+    *(volatile u32 *)USB_CHOICE = mode;
+}
+
+int drv_usb_hold_install(void)
+{
+    static const u8 before[JMP_LEN] = {0x82, 0x3c, 0x20, 0x08, 0x6c};
+    int rc;
+
+    if (usb_installed)
+        return 0;
+    rc = drv_code_jump(USB_SITE, before, (void *)drv_tramp_usb);
+    usb_installed = !rc;
+    return rc;
+}
+
+void drv_usb_hold(u32 mode)
+{
+    usb()[USB_MODE] = mode;
+}
+
+u32 drv_usb_hold_get(void)
+{
+    return usb()[USB_MODE];
+}
+
+u32 drv_usb_hold_hits(void)
+{
+    return usb()[USB_HITS];
+}
+
+void drv_usb_probe(drv_usb_info *u)
+{
+    u32 w[6];
+
+    u->choice = *(const volatile u32 *)USB_CHOICE;   /* the core task is on CPU 0, as the application: the same cache */
+    u->factor = *(const volatile u32 *)USB_FACTOR;
+    u->link = *(const volatile u8 *)USB_TPC_ON;
+    u->app = drv_power_probe(w, 6) == 6 ? w[5] : 0xffffffff;
+}
+
+int drv_ok_key(int down)
+{
+    return drv_key_api(KEY_OK, down ? 0 : 1) & 0xffff;
 }
 
 int drv_shutter(u32 key, int down, u32 path)

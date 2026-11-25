@@ -7,6 +7,8 @@
 	.global	_start, _drv_fopen, _drv_fread, _drv_fwrite, _drv_fclose, _drv_sleep, _drv_ticks, _drv_setting_read
 	.global	_drv_ev_create, _drv_ev_wait, _drv_ev_set, _drv_ev_clear
 	.global	_drv_key_api, _drv_app_event
+	.global	_drv_scheap_alloc, _drv_camera_common, _drv_hfw_job_off, _drv_hfw_executor, _drv_hfw_post, _drv_fw_reset
+	.global	_drv_tramp_usb
 	.global	_drv_date
 	.global	_drv_mkdir, _drv_exists, _drv_dcache_inv_fw, _drv_fflush, _drv_remove, _drv_fseek, _drv_ftell, _drv_cpu, _drv_lock, _drv_unlock, _drv_fwheap_alloc, _drv_fwheap_free
 	.global	_drv_tramp_pm, _drv_orig_pm, _drv_tramp_s1
@@ -258,6 +260,95 @@ _drv_app_event:
 	call	f_app_event,[d2],8
 	add	4,sp
 	rets
+
+# The hands-free restart (drv.c drv_restart_hfw). scheap_alloc 0x60023796: d0 size -> a0, the cached heap the job's
+# deletion frees (0x6085947b -> 0x600237c8)
+_drv_scheap_alloc:
+	add	-4,sp
+	call	f_scheap_alloc,[],4
+	add	4,sp
+	mov	a0,d0
+	rets
+
+# The CameraCommon object: 0x6089e157, no prologue, call ...,[],4 -> a0 (as 0x60d41224)
+_drv_camera_common:
+	add	-4,sp
+	call	f_camera_common,[],4
+	add	4,sp
+	mov	a0,d0
+	rets
+
+# A job of the HFW callback executor whose callback is CameraCommon::shutDown: the job's constructor 0x608591a7 (no
+# prologue, call ...,[d2,a2],20: a0 the memory, d0 -> +4, d1 -> +24, a1 -> +12 the callback, the caller's (4,sp) -> +8,
+# (8,sp) -> +20) - as the factory reset makes its power-off job (0x6089ab75). The executor runs it with calls (+12),
+# d0 = +4, d1 = +24, a0 = +8, a1 = +20: shutDown(mode 1, reason 11 reboot, CameraCommon, flag 0).
+# d0 the memory (28 bytes of scheap), d1 CameraCommon -> d0 the job
+_drv_hfw_job_off:
+	add	-12,sp
+	mov	d1,(4,sp)			# -> +8: the callback's a0, CameraCommon
+	clr	d1
+	mov	d1,(8,sp)			# -> +20: the callback's a1, flag 0
+	mov	d0,a0
+	mov	1,d0				# -> +4: the callback's d0, mode 1
+	mov	11,d1				# -> +24: the callback's d1, reason 11 (reboot)
+	mov	f_shutdown,a1			# -> +12: the callback
+	call	f_hfw_job_new,[d2,a2],20
+	add	12,sp
+	mov	a0,d0
+	rets
+
+# The executor (OlyHfwCallbackManager, task HLS_CALLBACK): 0x60858d8e, no prologue, call ...,[],4 -> a0
+_drv_hfw_executor:
+	add	-4,sp
+	call	f_hfw_executor,[],4
+	add	4,sp
+	mov	a0,d0
+	rets
+
+# Post a job: 0x60858e51, no prologue, call ...,[d2,d3,a2,a3],28; d0 0 (add, no replace), a0 the executor, a1 the job.
+# d0 the executor, d1 the job
+_drv_hfw_post:
+	mov	d0,a0
+	mov	d1,a1
+	clr	d0
+	add	-4,sp
+	call	f_hfw_post,[d2,d3,a2,a3],28
+	add	4,sp
+	rets
+
+# The firmware's reset on request 0x60058ae0 (retf [],0): d0 the cause into (0x8ff000b0), the inter-CPU interrupt of CPU 0;
+# its handler stops feeding the watchdog, which resets the camera about 1 s later
+_drv_fw_reset:
+	add	-4,sp
+	call	f_reset_request,[],0
+	add	4,sp
+	rets
+
+# checkPcMode 0x60d1552f at 0x60d15549, right after it read the USB choice (d0 = (0x621bcb1c), getter 0x60d079e2): C may
+# change the word d0 is kept in (drv_usb_filter(&d0)); every other register and psw are kept. Then the displaced
+# instructions, which write to (8,sp): sp is the original again there. The pattern of _drv_tramp_alloc
+_drv_tramp_usb:
+	add	-8,sp
+	mov	d0,(0,sp)
+	mov	a0,(4,sp)
+	mov	sp,a0
+	mov	a0,d0
+	mov	(4,a0),a0
+	movm	[d2,d3,a2,a3,other],(sp)
+	mov	psw,d1
+	add	-4,sp
+	mov	d1,(sp)
+	add	-32,sp
+	call	_drv_usb_filter,[],0
+	add	32,sp
+	mov	(sp),d1
+	add	4,sp
+	mov	d1,psw
+	movm	(sp),[d2,d3,a2,a3,other]
+	mov	(0,sp),d0
+	add	8,sp
+	.byte	0x82,0x3c,0x20,0x08,0x6c	# displaced: mov d0,d2; mov sp,a0; add 8,a0; mov d3,(a0)
+	jmp	usb_back
 
 _drv_lock:
 	clr	d0
