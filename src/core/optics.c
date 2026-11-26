@@ -621,13 +621,13 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
                "%u, at most %u; Halation toe %u, at most %u", name, (c->btoe * 100 + OPT_Q12 / 2) / OPT_Q12,
                (c->bmax * 100 + OPT_Q12 / 2) / OPT_Q12, (c->htoe * 100 + OPT_Q12 / 2) / OPT_Q12,
                (c->hmax * 100 + OPT_Q12 / 2) / OPT_Q12);
-    log_printf(OMK_LOG_INFO, "optics: layer%s: the look's white %s; the halation's colour %s, its core %s; Bloom's "
-               "colour %u%% of its sources'", name, c->white == DRV_OPTICS_WHITE_OFF ? "off (the codes as they are)" :
-               c->white == DRV_OPTICS_WHITE_AUTO ? "auto (its tables', else the shelf of the layer's Y)" :
-               c->white == DRV_OPTICS_WHITE_TABLE ? "from its tables only" : c->white == DRV_OPTICS_WHITE_LAYER ?
-               "from the shelf of the layer's Y only" : "fixed (a test)", c->hcode ? "from its edge's to its strong one's"
-               : "one", c->hcore ? "white (its colour weighted by darkness once more)" : "as the rest",
-               (c->bcol * 100 + 128) / 256);
+    log_printf(OMK_LOG_INFO, "optics: layer%s: the look's white %s", name, c->white == DRV_OPTICS_WHITE_OFF ? "off (the "
+               "codes as they are)" : c->white == DRV_OPTICS_WHITE_AUTO ? "auto (its tables', else the shelf of the layer's "
+               "Y)" : c->white == DRV_OPTICS_WHITE_TABLE ? "from its tables only" : c->white == DRV_OPTICS_WHITE_LAYER ?
+               "from the shelf of the layer's Y only" : "fixed (a test)");
+    log_printf(OMK_LOG_INFO, "optics: layer%s: the halation's colour %s, its core %s; Bloom's colour %u%% of its "
+               "sources'", name, c->hcode ? "from its edge's to its strong one's" : "one", c->hcore ? "white (weighted by "
+               "darkness twice)" : "as the rest", (c->bcol * 100 + 128) / 256);
     if (c->white >= 160)
         log_printf(OMK_LOG_INFO, "optics: layer%s: the look's white fixed at code %u", name, c->white);
     if (c->hcode)
