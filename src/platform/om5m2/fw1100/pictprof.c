@@ -287,6 +287,11 @@ typedef struct {
     u32 row_item;                           /* the cursor's row memory 2148 while it is on an optics row: the row's item
                                                (the UI reads it back), the strip 111 stored in its place; 0 - none */
     u32 rows_ok;                            /* the optics rows were installed whole (written by the core task) */
+    /* The optics rows' strengths of every entry as the module gave them last (look_optics, any entry) or a row's step
+     * made them, + 1; 0 - not given (the list is given once, at the module's start). A dial's step onto an entry shows
+     * its strengths at once: the GUI draws the column in that step, and nothing draws it again when the module's values
+     * come (no redraw can be asked from the core task) */
+    u8 o_ent[OMK_LOOK_MAX][OMK_OPTICS_ROWS];
 } shared_t;
 
 #define UNCACHED DRV_UNCACHED
@@ -491,6 +496,15 @@ static int row_ready(void);
 #define ROW_SET 0x7e00                      /* the rows' virtual settings ROW_SET + row (OMK_OPTICS_*): their slider children's
                                                ids; no setting of the firmware (thunks.s answers count and values for them) */
 
+#ifdef OMK_EMU
+/* Emulator build: every answer of an optics row to the UI, for a trace of its entry (d0 the id, d1 the value) */
+void drv_emu_row_read(u32 id, u32 v);
+void __attribute__((noinline)) drv_emu_row_read(u32 id, u32 v)
+{
+    __asm__ volatile("" : : "r"(id), "r"(v) : "memory");
+}
+#endif
+
 /* After the UI read method: d0 id, d1 where, the caller's return address. While a profile is active and 111 is really
  * Natural, the UI sees the profile */
 void drv_ui_read_fix(u32 id, u32 *where, u32 ret)
@@ -504,6 +518,9 @@ void drv_ui_read_fix(u32 id, u32 *where, u32 ret)
     if ((r = row_of_id(sh, id)) != 0) {     /* an optics row's virtual setting, or its item on the screen (read as 111 by
                                                drv_ui_read_id): the row's strength */
         *where = sh->ed.o_val[r - 1];
+#ifdef OMK_EMU
+        drv_emu_row_read(id, *where);
+#endif
         return;
     }
     if (drv_cpu())
@@ -2205,6 +2222,20 @@ static int look_changed_ui(volatile shared_t *sh, u32 on)
     return 0;
 }
 
+/* Another entry shown (under drv_lock): the optics rows show its strengths kept from the module (o_ent) at once; they stay
+ * stale - no step taken - until the module gives them for this entry (drv_look_optics), as its events must reach the
+ * entry the module has chosen */
+static void row_entry(volatile shared_t *sh)
+{
+    volatile u8 *c = sh->o_ent[sh->look_index];
+    u32 r;
+
+    sh->ed.o_stale = 1;
+    for (r = 0; r < OMK_OPTICS_ROWS; r++)
+        if (c[r])
+            sh->ed.o_val[r] = c[r] - 1u;
+}
+
 /* A dial step on the look's item: the next or the previous entry, published for the drawing at once */
 static void look_step(volatile shared_t *sh, s32 d)
 {
@@ -2215,7 +2246,7 @@ static void look_step(volatile shared_t *sh, s32 d)
         sh->look_pick++;
         sh->ed.stale = 1;                   /* the editors' values are the entry's before until the module's next */
         sh->ed.g_stale = 1;
-        sh->ed.o_stale = 1;
+        row_entry(sh);
         drv_edp_look(sh->look_names, sh->look_index, n);
     }
     drv_unlock(st);
@@ -3534,6 +3565,7 @@ static void row_write(volatile shared_t *sh, u32 r, u32 kind, u32 value)
     v = clamp_s(v, 0, OMK_OPTICS_MAX);
     if ((u32)v != e->o_val[r]) {
         e->o_val[r] = (u32)v;
+        sh->o_ent[sh->look_index][r] = (u8)(v + 1);  /* the entry's, should a dial leave it and come back first */
         ev = (u32)ed_push(e, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, r, v));
     }
     e->o_hold = drv_ticks() | 1;
@@ -3560,16 +3592,17 @@ void drv_look_rows(int on)
     rows_wanted = on;
 }
 
-/* The module's strengths of entry (core task): taken unless another entry is shown, or a step is newer (its hold) */
+/* The module's strengths of entry (core task): kept for the entry (o_ent), shown unless another entry is shown, or a step
+ * is newer (its hold) */
 int drv_look_optics(u32 entry, const u8 *v)
 {
     volatile shared_t *sh = shared();
     volatile look_ed_t *e;
-    u32 st, i;
+    u32 st, i, k;
 
     if (!rows_wanted)
         return -3;                          /* no optics layer: the rows are not installed */
-    if (!sh || !look_installed)
+    if (!sh || !look_installed || entry >= OMK_LOOK_MAX)
         return -2;
     for (i = 0; i < OMK_OPTICS_ROWS; i++)
         if (v[i] > OMK_OPTICS_MAX)
@@ -3581,6 +3614,8 @@ int drv_look_optics(u32 entry, const u8 *v)
     if (((volatile u32 *)((u32)drv_emu_look_ui + UNCACHED))[0])
         i = ((volatile u32 *)((u32)drv_emu_look_ui + UNCACHED))[0] - 1;
 #endif
+    for (k = 0; k < OMK_OPTICS_ROWS; k++)
+        sh->o_ent[entry][k] = (u8)(v[k] + 1);
     if (entry != i) {
         drv_unlock(st);
         return 0;
@@ -3717,6 +3752,7 @@ int drv_look_choose(int on, u32 index)
             sh->ed.stale = 1;               /* the editors' values are the entry's before until the module's next */
             sh->ed.g_stale = 1;
         }
+        row_entry(sh);
         drv_edp_look(sh->look_names, index, sh->look_count);
     }
     drv_unlock(st);
