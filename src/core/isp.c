@@ -9,6 +9,7 @@
 static omk_mod *owner;
 static int failed;
 static int mono;                            /* the block in force is black and white (omk_ispb_mono) */
+static u32 white;                           /* the block in force's white, a code of Y (omk_ispb_white; 0 - not known) */
 static int stock_owed;                      /* isp_drop_module: the driver refused "back to stock" as too soon (-2);
                                                isp_service asks again until it takes it */
 
@@ -46,6 +47,7 @@ int isp_override(omk_mod *m, const void *block, u32 size)
     rc = drv_isp_set(block, size);
     if (rc >= 0) {
         mono = block ? omk_ispb_mono(block) : 0;
+        white = block ? omk_ispb_white(block) : 0;
         stock_owed = 0;                     /* the new owner's tables (or stock) are in force */
     }
     if (rc < 0)                             /* -2 (too soon) is the owner's retry, not a fault */
@@ -83,6 +85,11 @@ int isp_mono(void)
     return mono;
 }
 
+u32 isp_white(void)
+{
+    return white;
+}
+
 /* The owner failed module_init: its tables must not stay on the pictures (its memory is given back), and the service is
  * free for a module loaded later. The hooks stay in (drv_isp_install installs once) */
 void isp_drop_module(omk_mod *m)
@@ -93,6 +100,7 @@ void isp_drop_module(omk_mod *m)
         return;
     owner = 0;
     mono = 0;
+    white = 0;
     drv_isp_census(0);
     rc = drv_isp_set(0, 0);
     stock_owed = rc == -2;                  /* too soon after the module's own change: isp_service repeats it */

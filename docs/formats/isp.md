@@ -150,6 +150,18 @@ gains are not 0 makes it colour by this rule - and in the picture as well.
 Uses: core gives no colour grain to the stills of a black-and-white look (core 1.21); the look's editors choose between the
 black-and-white filter and the colour saturation by it.
 
+### 5.2. The block's white
+
+`omk_ispb_white()` in `omk_ispb.h` gives the code of Y (0..255) that a blown pixel gets under the block: where the look's
+white ends. The gamma curves at their last node (the input is clipped at the full scale, and the matrix keeps white,
+since its rows sum to 128), their Y (BT.601), the tone curve at that Y (its last segment continued above node 255), 10
+bits to 8. The sectors' luma addition is left out; on the reference presets it moves white by at most 3 codes. The
+result is 0 when the block does not set both the gamma and the tone: the picture mode's own curves are in force then.
+
+Film looks end below 255 more often than not (a print's white): among the reference presets from 205 (Eterna 500) to 255
+(Tri-X 400 SHC). The optics layer of core reads the picture's codes on this scale, so that one strength of Bloom and
+Halation looks alike on every look, and a sharpening's overshoot past the look's white is not taken for a lamp.
+
 ## 5a. CANI: the cassette picture
 
 A drawing the FILMLOOK module shows in the picture mode screen's editor for this preset (core >= 1.01, API `look_art`),

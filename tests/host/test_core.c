@@ -1178,6 +1178,7 @@ static void test_layer_rows(void)
 {
     long n;
     char *t;
+    u32 i;
 
     omk_dir(LOG_DIR);
     write_file("OMKIT.INI", "[optics]\nlayer = on\nbloom_steps = 10, 20, 30, 40, 250\nhalation_steps = 1, 2\n"
@@ -1226,10 +1227,31 @@ static void test_layer_rows(void)
     CHECK(isp_override(&mono_mod, 0, 0) == 0 && !isp_mono());
     optics_service(1700);
     CHECK(host_opt_str == (3u | 1u << 8) && host_opt_strs == 4);
+    /* card170: a look's tables with the gamma and the tone (isp_white): their white goes with the strengths - gamma 3200
+     * at its last node, a straight tone (node i 4 i): Y 3200, the tone at node 200, 800 of 1023 - code 199 */
+    memset(mono_block, 0, sizeof(mono_block));
+    mono_block[OMK_ISPB_PRESENT] = OMK_ISPB_P_GAMMA | OMK_ISPB_P_TONE;
+    for (i = 0; i < 3; i++) {
+        mono_block[OMK_ISPB_GAMMA + 512 * i + 510] = 3200 & 0xff;
+        mono_block[OMK_ISPB_GAMMA + 512 * i + 511] = 3200 >> 8;
+    }
+    for (i = 0; i < 256; i++) {
+        mono_block[OMK_ISPB_TONE + 2 * i] = (u8)(4 * i);
+        mono_block[OMK_ISPB_TONE + 2 * i + 1] = (u8)(4 * i >> 8);
+    }
+    CHECK(omk_ispb_white(mono_block) == 199);
+    CHECK(isp_override(&mono_mod, mono_block, OMK_ISPB_SIZE) == 0 && isp_white() == 199 && !isp_mono());
+    optics_service(1720);
+    CHECK(host_opt_str == (3u | 1u << 8 | 199u << 24) && host_opt_strs == 5);
+    mono_block[OMK_ISPB_PRESENT] = OMK_ISPB_P_GAMMA;    /* no tone: the picture mode's own - not known */
+    CHECK(omk_ispb_white(mono_block) == 0);
+    CHECK(isp_override(&mono_mod, 0, 0) == 0 && !isp_white());
+    optics_service(1740);
+    CHECK(host_opt_str == (3u | 1u << 8) && host_opt_strs == 6);
     host_look_str[0] = 0;
     host_look_str[1] = 0;
     optics_service(1750);
-    CHECK(host_opt_str == 0 && host_opt_strs == 5 && !optics_route());
+    CHECK(host_opt_str == 0 && host_opt_strs == 7 && !optics_route());
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
     CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 200"));
@@ -1238,6 +1260,8 @@ static void test_layer_rows(void)
     CHECK(t && strstr(t, "optics: layer: a day scene (mean Y 60..120 or 6..14% at code 200): Bloom 100%, "
                          "Halation 35% of the gains"));
     CHECK(t && strstr(t, "tail 90% of sigma 300, haze 25%)"));
+    CHECK(t && strstr(t, "optics: the look's white now: code 199 (its tables"));
+    CHECK(t && strstr(t, "optics: layer: the look's white auto (its tables', else the shelf of the layer's Y)"));
     CHECK(t && strstr(t, "optics: layer: Bloom's own source - the emission of a blown pixel as 4 whites"));
     CHECK(t && strstr(t, "optics: the look's strengths now: Bloom 3, Halation 1, black and white (the halation without "
                          "colour)"));

@@ -1131,6 +1131,198 @@ static void curve(void)
         printf("curve: none, toe, ceiling; in the words\n");
 }
 
+/* ---- card170: the look's white, the shelf, the halation's colour and core, Bloom's colour ---- */
+
+/* ol_white: W 255 - ol_luts's tables exactly (in place too); W 227 - white at W and past it, a pixel never past W, the
+ * same sources and the same add for the same picture on its own scale */
+static void white(void)
+{
+    static u16 l2[256];
+    static u8 e2[OL_ENC];
+    static u32 t0[256], y0[256];
+    ol_t o, q;
+    ol_par_t p;
+    u32 c, v, ok = 1, mono = 1, past = 1, same = 1, srcd = 0, addd = 0, WL = 227, cw, a, b, n = 0;
+
+    memcpy(l2, lin, sizeof(l2));
+    ol_white(l2, e2, l2, 255);
+    check(!memcmp(l2, lin, sizeof(l2)) && !memcmp(e2, enc, sizeof(e2)), "white: 255 - the curves as ol_luts made them");
+    ol_white(l2, e2, lin, 100);             /* below OL_WHITE_MIN: taken as 255 */
+    check(!memcmp(l2, lin, sizeof(l2)) && !memcmp(e2, enc, sizeof(e2)), "white: out of range - 255");
+    memcpy(l2, lin, sizeof(l2));
+    ol_white(l2, e2, l2, WL);                /* in place, as the worker does it */
+    for (c = 1; c < 256; c++) {
+        mono &= l2[c] >= l2[c - 1];
+        ok &= c < WL || l2[c] == OL_ONE;
+    }
+    for (v = 0; v < OL_ENC; v++)
+        past &= e2[v] <= WL && (v == 0 || e2[v] >= e2[v - 1]);
+    for (c = 0; c <= WL; c++)
+        same &= l2[c] == OL_ONE ? 1 : e2[l2[c]] == c || l2[c] == l2[c + 1];
+    check(mono && ok && past && same && e2[OL_ONE] == WL, "white: 227 - white from WL on, the codes back, never past WL");
+    /* the same scene on two looks: codes c on a look of white 255, round(c WL / 255) on the look of white WL - the sources
+     * and the added code (scaled back) match */
+    layout(&o, LW, LH);                     /* (one work buffer: the plain look's values kept first) */
+    params(&p);
+    p.tb = lin[180];                        /* the thresholds on the look's scale: from the curves before ol_white */
+    p.th = lin[235];
+    p.em = 16;
+    p.emb = 4;
+    p.hfirst = 1;
+    ol_read_table(&o, &p);
+    ol_word_tables(&o, &p);
+    for (c = 0; c < 256; c++) {
+        t0[c] = o.tab[c];
+        y0[c] = ol_word_of(&o, &p, 600, 0, c) & 0xff;
+    }
+    layout(&q, LW, LH);
+    ol_white((u16 *)q.lin, (u8 *)q.enc, q.lin, WL);
+    ol_read_table(&q, &p);
+    ol_word_tables(&q, &p);
+    for (c = 0; c < 256; c++) {
+        cw = (c * WL + 127) / 255;
+        a = t0[c];
+        b = q.tab[cw];
+        v = (a & 0xffff) > (b & 0xffff) ? (a & 0xffff) - (b & 0xffff) : (b & 0xffff) - (a & 0xffff);
+        srcd = v > srcd ? v : srcd;
+        if (c < 250) {                      /* the add of one light, scaled back */
+            a = y0[c];
+            b = ol_word_of(&q, &p, 600, 0, cw) & 0xff;
+            v = a * WL / 255 > b ? a * WL / 255 - b : b - a * WL / 255;
+            addd = v > addd ? v : addd;
+            n++;
+        }
+    }
+    check(srcd < OL_ONE / 20 && addd <= 3, "white: the same scene on its own scale - the same sources and add");
+    check((ol_word_of(&q, &p, 4000, 4000, WL) & 0xff) == 0 && (ol_word_of(&q, &p, 4000, 4000, 250) & 0xff) == 0,
+          "white: nothing added at the look's white or past it (a sharpening's overshoot)");
+    check(q.tab[250] == q.tab[WL], "white: an overshoot past WL is a source as white");
+    if (verbose)
+        printf("white: sources differ by at most %u (Q12), the add by %u of %u codes\n", srcd, addd, n);
+}
+
+/* ol_shelf: a blown part at the look's white is found; a smooth tail of the highlights or nothing blown - none */
+static void shelf(void)
+{
+    static u32 hist[256];
+    ol_t o;
+    u32 i, n = 324 * 243;
+
+    layout(&o, 324, 243);
+    for (i = 0; i < n; i++)                 /* a room: codes 20..200, 2 % at 227 (a window), overshoots up to 255 */
+        o.y[i] = (u8)(i % 50 == 0 ? 227 : i % 997 == 0 ? 240 + rnd(16) : 20 + rnd(181));
+    check(ol_shelf(&o, hist, OL_WHITE_MIN) == 227, "shelf: the blown part's code");
+    for (i = 0; i < n; i++)                 /* highlights falling off smoothly to 230: no shelf */
+        o.y[i] = (u8)(i % 3 ? 20 + rnd(150) : 170 + (u32)(60.0 * (1.0 - (double)rnd(1000) * rnd(1000) / 1e6)));
+    check(ol_shelf(&o, hist, OL_WHITE_MIN) == 0, "shelf: a smooth tail is none");
+    for (i = 0; i < n; i++)                 /* a plateau below lo: none */
+        o.y[i] = (u8)(i % 20 == 0 ? 150 : 20 + rnd(100));
+    check(ol_shelf(&o, hist, OL_WHITE_MIN) == 0, "shelf: none below the lowest white");
+    if (verbose)
+        printf("shelf: found, a smooth tail none, below lo none\n");
+}
+
+/* The halation's colour from its edge's to its strong one's, and its white core */
+static void halation_colour(void)
+{
+    ol_t o;
+    ol_par_t p;
+    s32 cb, cr;
+    u32 w, a, b;
+
+    layout(&o, LW, LH);
+    params(&p);
+    p.hcb = -75 * 256 / 100;                /* strong: orange */
+    p.hcr = 120 * 256 / 100;
+    p.hcb2 = -40 * 256 / 100;               /* edge: red */
+    p.hcr2 = 120 * 256 / 100;
+    p.hcode = 40;
+    ol_word_tables(&o, &p);
+    w = o.cw[10];
+    cb = (s32)(w >> 8 & 0xff) - 128;
+    cr = (s32)(w >> 16 & 0xff) - 128;
+    check(cr >= 11 && cr <= 12 && cb >= -5 && cb <= -4, "halation colour: near the edge's at a weak code");
+    w = o.cw[80];
+    cb = (s32)(w >> 8 & 0xff) - 128;
+    cr = (s32)(w >> 16 & 0xff) - 128;
+    check(cr >= 95 && cr <= 96 && cb == -60, "halation colour: the strong one past its code");
+    p.hcode = 0;
+    ol_word_tables(&o, &p);
+    check((o.cw[80] >> 8 & 0xff) == 128 - 60, "halation colour: one colour without a code");
+    /* the core: a bright place gets less colour with hcore */
+    p.dark = 256;
+    p.hfirst = 1;
+    ol_word_tables(&o, &p);
+    a = ol_word_of(&o, &p, 0, 3000, 220) >> 16 & 0xff;
+    p.hcore = 1;
+    ol_word_tables(&o, &p);
+    b = ol_word_of(&o, &p, 0, 3000, 220) >> 16 & 0xff;
+    check(b < a && b >= 128 && (ol_word_of(&o, &p, 0, 3000, 220) & 0xff) == (ol_word_of(&o, &p, 0, 3000, 220) & 0xff),
+          "halation core: less colour on a bright place, the same light");
+    check((ol_word_of(&o, &p, 0, 3000, 20) >> 16 & 0xff) > 128 + 20, "halation core: the colour on the dark");
+    if (verbose)
+        printf("halation colour: edge cw[10] %08x, strong cw[80] %08x; core Cr %u -> %u\n", o.cw[10], o.cw[80], a, b);
+}
+
+/* Bloom's colour: a warm source's chromaticity on its glow, in proportion to Bloom's code; none without a source; the
+ * enlargement smooth */
+static void bloom_colour(void)
+{
+    ol_t o;
+    ol_par_t p;
+    u32 i, x, y, lw = 324, lh = 243, n = lw * lh, ok = 1, step = 0, w, d;
+    s32 cb, cr, cb2, f0;
+
+    layout(&o, lw, lh);
+    params(&p);
+    p.bcol = 256;                           /* 100 % */
+    p.hfirst = 1;
+    ol_word_tables(&o, &p);
+    check(o.bq, "bloom colour: on");
+    for (i = 0; i < n; i++) {
+        x = i % lw;
+        y = i / lw;
+        o.y[i] = 30;
+        o.pc[i] = 128 | 128 << 8;
+        o.pb[i] = 0;
+        if (x >= 100 && x < 120 && y >= 100 && y < 120) {   /* a warm lamp: Y 200, Cb 100, Cr 160 */
+            o.y[i] = 200;
+            o.pc[i] = 100 | 160 << 8;
+            o.pb[i] = 2000;
+        }
+    }
+    ol_colour_down(&o);
+    check(!ol_colour_blur(&o, 3 * 256), "bloom colour: blurred");
+    ol_colour_ratio(&o, p.bcol);
+    ol_colour_up(&o);
+    i = 110 * lw + 110;                     /* at the lamp: (Cb - 128) / Y = -0.14, Cr +0.16 in Q7 */
+    f0 = (s32)(o.pc[i] & 0xff) - 128;
+    check(f0 >= -19 && f0 <= -15 && (s32)(o.pc[i] >> 8) - 128 >= 17 && (s32)(o.pc[i] >> 8) - 128 <= 21,
+          "bloom colour: the lamp's chromaticity");
+    for (y = 60; y < 180; y++)              /* smooth: neighbours differ by a few Q7 steps at most (the fade where the
+                                               sources' light ends is a tail pixel or two: little glow there) */
+        for (x = 61; x < 180; x++) {
+            d = (o.pc[y * lw + x] & 0xff) > (o.pc[y * lw + x - 1] & 0xff) ? (o.pc[y * lw + x] & 0xff) - (o.pc[y * lw + x - 1] & 0xff) :
+                (o.pc[y * lw + x - 1] & 0xff) - (o.pc[y * lw + x] & 0xff);
+            step = d > step ? d : step;
+        }
+    check(step <= 4, "bloom colour: the enlargement smooth");
+    check(o.pc[5 * lw + 300] == (128 | 128 << 8), "bloom colour: neutral far from any source");
+    w = ol_word_q(&o, &p, 1500, 0, 30, o.pc[i]);
+    cb = (s32)(w >> 8 & 0xff) - 128;
+    cr = (s32)(w >> 16 & 0xff) - 128;
+    cb2 = (s32)(w & 0xff) * f0 / 128;
+    ok = cb <= cb2 + 1 && cb >= cb2 - 1 && cr > 0 && (w & 0xff) > 20;
+    check(ok, "bloom colour: chroma a unit of Bloom's code at the source's chromaticity");
+    check((ol_word_q(&o, &p, 0, 1500, 30, o.pc[i]) >> 8 & 0xff) == (ol_word_of(&o, &p, 0, 1500, 30) >> 8 & 0xff),
+          "bloom colour: none without Bloom's light");
+    p.bcol = 0;
+    ol_word_tables(&o, &p);
+    check(!o.bq && ol_word(&o, &p, i) == ol_word_of(&o, &p, o.pb[i], o.ph[i], o.y[i]), "bloom colour: off - neutral");
+    if (verbose)
+        printf("bloom colour: Q7 %d at the lamp, largest step %u, word %08x\n", f0, step, w);
+}
+
 int main(int argc, char **argv)
 {
     (void)argv;
@@ -1154,6 +1346,10 @@ int main(int argc, char **argv)
     cover();
     cover_vs_full();
     curve();
+    white();
+    shelf();
+    halation_colour();
+    bloom_colour();
     if (!failed)
         printf("ok\n");
     return failed;

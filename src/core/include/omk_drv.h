@@ -325,7 +325,19 @@ typedef struct {
     /* The jobs of a RAW+JPEG press that get the layer (card169): DRV_OPTICS_JOBS_FIRST - the first only (FileType 1,
      * whose picture is the JPEG; the second, FileType 3, makes the ORF's preview: camera's pictures compared), BOTH */
     u32 jobs;
+    /* card170. The look's white (optlayer.h's ol_white): DRV_OPTICS_WHITE_OFF - the codes as they are (255), _AUTO - the
+     * look's tables' (drv_optics_strength), else the shelf of the layer's Y, _TABLE - the tables' only, _LAYER - the
+     * shelf only, or a code 160..255 (a test) */
+    u32 white;
+    s32 hcb2, hcr2;                         /* the halation's colour at its weak edge, Q8 (hcb, hcr: its strong one) */
+    u32 hcode;                              /* the halation's code from which it has the strong colour (0 - one colour) */
+    u32 hcore;                              /* 1 - its colour weighted by darkness once more (a white core) */
+    u32 bcol;                               /* Bloom's colour: the share of its sources' chromaticity, Q8 (0 - neutral) */
 } drv_optics_layer_cfg;
+#define DRV_OPTICS_WHITE_OFF 0
+#define DRV_OPTICS_WHITE_AUTO 1
+#define DRV_OPTICS_WHITE_TABLE 2
+#define DRV_OPTICS_WHITE_LAYER 3
 #define DRV_OPTICS_JOBS_FIRST 0
 #define DRV_OPTICS_JOBS_BOTH 1
 #define DRV_OPTICS_ROWS 0xff
@@ -340,9 +352,9 @@ int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c);
 void drv_optics_set(u32 k);                 /* 0 - the first set ([optics]), 1..DRV_OPTICS_SETS - the further ones */
 /* The look's optics rows' strengths of the chosen entry (core task, when they change): Bloom, Halation 0..5, and mono 1
  * when the colour tables in force are black and white (isp_mono: the halation's colour then 0 - a light halo on a black-
- * and-white film; its light kept). A job takes those in force when it is listed (with its set, as drv_optics_set); mono
- * holds for a test's strengths too */
-void drv_optics_strength(u32 bloom, u32 halation, u32 mono);
+ * and-white film; its light kept), white - the tables' white (isp_white: a code of Y, 0 - not known). A job takes those in
+ * force when it is listed (with its set, as drv_optics_set); mono and white hold for a test's strengths too */
+void drv_optics_strength(u32 bloom, u32 halation, u32 mono, u32 white);
 /* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize
  * the worker's buffer, *wbuf its address (the cached one) */
 u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf);

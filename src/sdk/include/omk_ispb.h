@@ -56,4 +56,29 @@ static inline int omk_ispb_mono(const u8 *b)
     return most <= OMK_ISPB_MONO_ROWS;
 }
 
+/* The block's white: the code of Y (0..255) a blown pixel gets - the tone curve's output for the gamma's largest input,
+ * where the look's white ends (a film's print white: 204..255 among the reference presets). The gamma curves at their
+ * last node (the input clipped at the full scale, so white is node 255 on R, G and B; the matrix keeps white, its rows
+ * sum to 128), their Y (BT.601), the tone curve at it (node i at Y = i / 256 of the full scale; above node 255 its last
+ * segment continued), 10 bits to 8. The sectors' luma addition is left out (at white within 3 codes on the presets).
+ * 0 - not known: the block does not set both the gamma and the tone (the picture mode's own curves are in force, and
+ * the camera's contrast and gradation with them) */
+static inline u32 omk_ispb_white(const u8 *b)
+{
+    u32 present = omk_ispb_u16(b, OMK_ISPB_PRESENT), y, q, j, t0, t1;
+    s32 t;
+
+    if ((present & (OMK_ISPB_P_GAMMA | OMK_ISPB_P_TONE)) != (OMK_ISPB_P_GAMMA | OMK_ISPB_P_TONE))
+        return 0;
+    y = (299 * omk_ispb_u16(b, OMK_ISPB_GAMMA + 2 * 255) + 587 * omk_ispb_u16(b, OMK_ISPB_GAMMA + 512 + 2 * 255) +
+         114 * omk_ispb_u16(b, OMK_ISPB_GAMMA + 1024 + 2 * 255) + 500) / 1000;   /* 0..4095 */
+    q = y * 4096 / 4095;                    /* the tone's position, x16 (node i at 16 i) */
+    j = q >> 4 < 254 ? q >> 4 : 254;
+    t0 = omk_ispb_u16(b, OMK_ISPB_TONE + 2 * j);
+    t1 = omk_ispb_u16(b, OMK_ISPB_TONE + 2 * j + 2);
+    t = ((s32)t0 * 16 + ((s32)t1 - (s32)t0) * (s32)(q - 16 * j) + 8) / 16;
+    t = t < 0 ? 0 : t > 1023 ? 1023 : t;
+    return t ? ((u32)t * 255 + 511) / 1023 : 1;
+}
+
 #endif

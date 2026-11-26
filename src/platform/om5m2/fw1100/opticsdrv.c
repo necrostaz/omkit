@@ -122,7 +122,13 @@
  * read), and Bloom's by the near part's share when there is a tail (ol_tail_add adds the tail at w / (256 - w)). With
  * the strengths comes whether the colour tables in force are black and white (OP_MONO, core's isp_mono): the job's
  * halation then has no colour (Cb, Cr 0 a unit of its Y; its Y as in colour) - a black-and-white film's halo is light,
- * and the layer's chroma is added after the tables made the picture grey.
+ * and the layer's chroma is added after the tables made the picture grey. And the white of those tables (core's
+ * isp_white, card170): the worker reads the codes on the look's scale (optlayer.h's ol_white; [optics] white), from the
+ * tables' white, else from the shelf of the layer's Y (ol_shelf).
+ *
+ * Bloom's colour (card170, [optics] bloom_colour): the layer's Cb and Cr are read with its Y (into the second Gaussian's
+ * plane, free until Bloom's blur), the sources' colour made on the tail's plane (ol_colour_*), enlarged into that plane
+ * after the Gaussians, and the words take it.
  *
  * The jobs of a RAW+JPEG press (card169, [optics] jobs): the first (FileType 1) makes the JPEG, the second (FileType 3)
  * the ORF's preview (3200x2400, the whole 4:3 frame) - the camera's pictures of card168 show it. With jobs = first (the
@@ -191,6 +197,8 @@
 #define LAYER_GAIN 1024                     /* the layer's gain in the blend: the strength is in the layer */
 #define OP_TEST (1u << 16)                  /* a job's strengths (str): a test's, from the INI's set */
 #define OP_MONO (1u << 17)                  /* ... the colour tables in force black and white: the halation without colour */
+#define OP_WHITE_SHIFT 24                   /* ... and their white (isp_white) in the high byte, 0 - not known */
+enum { OW_OFF, OW_TABLE, OW_LAYER, OW_FIXED, OW_NONE };   /* where a job's white came from (op_rec_t's white >> 8) */
 #define GUARD_LO 0x60000200u
 #define GUARD_HI 0x60cbe800u
 #define FMT_YC 0x302                        /* the picture's format on the mask route: 2 bytes a pixel */
@@ -278,6 +286,8 @@ typedef struct {
     u32 sc_mean, sc_share, sc_day;          /* L4: the layer's mean Y, its share at DRV_OPTICS_DAY_CODE (permille), the
                                                day's weight (Q8) */
     u32 gbe, ghe;                           /* L4: the gains used (Q8, the strength, the day and the tail in them) */
+    u32 white;                              /* L4: the look's white used | where from (OW_*) << 8 */
+    u32 t_col;                              /* L4: Bloom's colour, us (its sums, Gaussians, ratio and enlargement) */
     u32 psw, sp, sp_min;                    /* at the step's entry (C); the lowest sp of the step's C code */
     u32 task, stk, stksz;                   /* the running task (its TCB): id, stack base and size; 0 - not read */
     u32 lock[2];                            /* the cross-CPU lock bytes at the entry */
@@ -1225,7 +1235,8 @@ static void op_bench(volatile op_rec_t *r, ol_t *L)
     u32 t, a = r->job | 0x10003, b;
 
     if (L->lw * L->lh >= OP_BENCH_N + OP_BENCH_TMP)
-        r->bx_wbuf = op_bench_box(L->pc, L->pc + OP_BENCH_N);   /* the second Gaussian's plane: not in use yet */
+        r->bx_wbuf = op_bench_box(L->pq, L->pq + OP_BENCH_N);   /* Bloom's colour's planes: not in use yet (pc holds the
+                                                                   layer's chroma) */
     t = drv_ticks();
     sink = op_loop_plain(OP_TURNS, a);
     r->lp_plain = drv_ticks_since(t);
@@ -1249,7 +1260,7 @@ static void op_bench(volatile op_rec_t *r, ol_t *L)
 static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
 {
     u32 base, win, t, n = r->width / 2, sum;
-    u16 *db = L->pc, *dh = db + L->lw;
+    u16 *db = L->pq, *dh = db + L->lw;     /* scratch: Bloom's colour's planes, made after the read */
 
     base = op_map(r, r->bus, 2 * r->width, &win);
     if (!base) {
@@ -1379,6 +1390,18 @@ static OL_KERNEL void op_layer_y(u8 *y, const volatile u8 *p, u32 n)
     } while (y != e);
 }
 
+/* The Y bytes of n layer words into y and their Cb | Cr << 8 into q (Bloom's colour): p the word's first byte */
+static OL_KERNEL void op_layer_yc(u8 *y, u16 *q, const volatile u8 *p, u32 n, u32 py, u32 pcb, u32 pcr)
+{
+    u8 *e = y + n;
+
+    do {
+        *y++ = p[py];
+        *q++ = (u16)(p[pcb] | p[pcr] << 8);
+        p += 4;
+    } while (y != e);
+}
+
 /* The Gaussians' pace (ol_t's callback, after each pass): the pass's time without the ticks given away into us[part],
  * then op_pace - the CPU given away when due, the stop and abandon words looked at */
 typedef struct {
@@ -1407,7 +1430,7 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     ol_lanes_t ln;
     op_gpace_t gp;
     u32 lw = r->l_wh & 0xffff, lh = r->l_wh >> 16, lp = r->l_pitch * 4, sub = r->sub, x, yy, i, w, base, win, t, fl;
-    u32 k, t1, s0, s1, stop = 0, lc, sb, sh;
+    u32 k, t1, s0, s1, stop = 0, lc, sb, sh, wt, wh, col = 0;
     volatile u32 *row;
     const volatile drv_optics_layer_cfg *cf = op_cfg(o, r->set);
 
@@ -1457,8 +1480,12 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     if (sub == DRV_OPTICS_L4) {
         for (i = 0; i < 16; i++)
             r->head[i] = ((const volatile u32 *)base)[i];
+        col = cf->bcol && (r->str & 0xff) && !(r->str & OP_MONO);  /* Bloom's colour: the layer's chroma too */
         for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++, i += lw)
-            op_layer_y(L.y + i, (const volatile u8 *)(base + OL_MUL(yy, lp)) + P.py, lw);
+            if (col)
+                op_layer_yc(L.y + i, L.pc + i, (const volatile u8 *)(base + OL_MUL(yy, lp)), lw, P.py, P.pcb, P.pcr);
+            else
+                op_layer_y(L.y + i, (const volatile u8 *)(base + OL_MUL(yy, lp)) + P.py, lw);
     } else {
         for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++) {
             row = (volatile u32 *)(base + yy * lp);
@@ -1492,8 +1519,23 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     }
     /* L4: the effect */
     fl = ol_floor_sigma(r->width, lw);
-    P.tb = L.lin[cf->tb > 255 ? 255 : cf->tb];
+    P.tb = L.lin[cf->tb > 255 ? 255 : cf->tb];   /* the thresholds on the look's scale: before ol_white */
     P.th = L.lin[cf->th > 255 ? 255 : cf->th];
+    /* The look's white (card170): the tables' (core), else the shelf of the layer's Y (L.tab as its histogram: the
+     * read's table is made after it), else 255 - the codes as they are */
+    wt = r->str >> OP_WHITE_SHIFT;
+    if (cf->white == DRV_OPTICS_WHITE_OFF) {
+        r->white = 255 | OW_OFF << 8;
+    } else if (cf->white >= OL_WHITE_MIN) {
+        r->white = (cf->white > 255 ? 255 : cf->white) | OW_FIXED << 8;
+    } else if (wt && cf->white != DRV_OPTICS_WHITE_LAYER) {
+        r->white = (wt < OL_WHITE_MIN ? OL_WHITE_MIN : wt) | OW_TABLE << 8;
+    } else if (cf->white != DRV_OPTICS_WHITE_TABLE && (wh = ol_shelf(&L, L.tab, OL_WHITE_MIN)) != 0) {
+        r->white = wh | OW_LAYER << 8;
+    } else {
+        r->white = 255 | OW_NONE << 8;
+    }
+    ol_white((u16 *)L.lin, (u8 *)L.enc, L.lin, r->white & 0xff);   /* in place: lin0 read at or past what is written */
     P.sb1 = r->sig[0] = ol_cpu_sigma(cf->sb & 0xffff, fl, r->width, lw);
     P.sb2 = r->sig[1] = ol_cpu_sigma(cf->sb >> 16, fl, r->width, lw);
     P.mixb = cf->mixb;
@@ -1513,6 +1555,10 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.hfirst = cf->hfirst;
     P.tmix = P.gb ? (cf->tmix > DRV_OPTICS_TAIL_MAX ? DRV_OPTICS_TAIL_MAX : cf->tmix) : 0;
     P.haze = cf->haze;                      /* in the tail's sources: none without a tail (ol_word_tables) */
+    P.hcb2 = r->str & OP_MONO ? 0 : cf->hcb2;   /* the halation's edge colour, a white core (card170) */
+    P.hcr2 = r->str & OP_MONO ? 0 : cf->hcr2;
+    P.hcode = cf->hcode;
+    P.hcore = cf->hcore;
     P.btoe = cf->btoe;                      /* the strength's curves after the blur (0: none) */
     P.bmax = cf->bmax;
     P.htoe = cf->htoe;
@@ -1520,6 +1566,10 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     P.st = r->sig[4] = P.tmix ? ol_cpu_sigma(cf->st, fl, r->width, lw) / OL_TAIL : 0;   /* in the tail's pixels */
     if (P.st < 64)
         P.tmix = 0;                         /* a tail below 0.25 of its pixel: none (ol_gauss would do nothing) */
+    P.bcol = P.gb && col ? cf->bcol : 0;    /* Bloom's colour: with Bloom, not on black and white */
+    P.sc = P.tmix ? P.st : P.sb1 / OL_TAIL; /* blurred as the tail (or as Bloom), at least a pixel of its plane */
+    if (P.sc < 256)
+        P.sc = 256;
     ol_scene(&L, DRV_OPTICS_DAY_CODE, &s0, &s1);   /* the day's weight from the layer's Y */
     r->sc_mean = s0;
     r->sc_share = s1;
@@ -1554,6 +1604,14 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
         ol_tail_down(&L);                   /* the tail's sources, before Bloom's Gaussian blurs pb: in the tail's time */
         r->t_gt = drv_ticks_since(t1);
     }
+    if (P.bcol) {                           /* Bloom's colour: the sources' sums before Bloom's Gaussian (pc: the layer's
+                                               chroma until then), blurred on their plane */
+        s1 = p->slept;
+        gp.t = t1 = drv_ticks();
+        ol_colour_down(&L);
+        stop = ol_colour_blur(&L, P.sc);
+        r->t_col = drv_ticks_since(t1) - (p->slept - s1);
+    }
     for (k = 0; k < 2 && !stop; k++) {      /* Bloom, Halation; after each pass the CPU given away when it is due */
         if (!(k ? P.gh : P.gb))
             continue;
@@ -1576,6 +1634,12 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
                 ol_tail_add(&L, ol_tail_factor(P.tmix));
             r->t_gt += drv_ticks_since(t1) - (p->slept - s1);
         }
+    }
+    if (P.bcol && !stop) {                  /* into pc after the Gaussians (the second Gaussian's copy is done with) */
+        t1 = drv_ticks();
+        ol_colour_ratio(&L, P.bcol);
+        ol_colour_up(&L);
+        r->t_col += drv_ticks_since(t1);
     }
     r->g_done = L.done;
     r->g_all = L.all;
@@ -1796,7 +1860,8 @@ u32 drv_optics_list(u8 *h, u32 room, u32 *out)
               (cf->shv != DRV_OPTICS_ROWS ? cf->shv : o->str >> 8 & 0xff) << 8;
         if (cf->sbv != DRV_OPTICS_ROWS || cf->shv != DRV_OPTICS_ROWS)
             str |= OP_TEST;
-        str |= o->str & OP_MONO;            /* black and white: the tables in force, whoever gave the strengths */
+        str |= o->str & (OP_MONO | 0xffu << OP_WHITE_SHIFT);   /* black and white and the white: the tables in force,
+                                                                  whoever gave the strengths */
         if (!(str & 0xffff))
             sub = DRV_OPTICS_N;             /* Bloom and Halation 0: no step at all (the job as without the layer) */
         else if (cf->jobs == DRV_OPTICS_JOBS_FIRST && op_second(h)) {
@@ -2095,12 +2160,13 @@ void drv_optics_set(u32 k)
         o->set = k <= o->nsets ? k : 0;
 }
 
-void drv_optics_strength(u32 bloom, u32 halation, u32 mono)
+void drv_optics_strength(u32 bloom, u32 halation, u32 mono, u32 white)
 {
     volatile op_t *o = op();
 
     if (o)
-        o->str = (bloom > 5 ? 5 : bloom) | (halation > 5 ? 5 : halation) << 8 | (mono ? OP_MONO : 0);
+        o->str = (bloom > 5 ? 5 : bloom) | (halation > 5 ? 5 : halation) << 8 | (mono ? OP_MONO : 0) |
+                 (white > 255 ? 255 : white) << OP_WHITE_SHIFT;
 }
 
 /* The settings of a job's set (the worker; the arena block, uncached) */
@@ -2344,6 +2410,13 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                    r->str & OP_TEST ? "a test's" : "the look's rows", r->str & OP_MONO ? "; black and white: the "
                    "halation without colour" : "", r->sc_mean, r->sc_share / 10, r->sc_share % 10,
                    r->sc_day * 100 / 256, r->gbe * 100 / 256, r->ghe * 100 / 256);
+        log_printf(OMK_LOG_INFO, "optics: job %u: the look's white %u (%s)", n, r->white & 0xff, (r->white >> 8) == OW_OFF ?
+                   "off: the codes as they are" : (r->white >> 8) == OW_TABLE ? "its tables" : (r->white >> 8) == OW_LAYER ?
+                   "the shelf of the layer's Y: its tables not known" : (r->white >> 8) == OW_FIXED ? "fixed, a test" :
+                   "not known, no shelf in the layer's Y: the codes as they are");
+        if (r->t_col)
+            log_printf(OMK_LOG_INFO, "optics: job %u: Bloom's colour %u us (its sums, Gaussians, colours and enlargement)",
+                       n, r->t_col);
         log_printf(OMK_LOG_INFO, "optics: job %u: calc: sources %u us, Bloom %u us (rows %u, columns %u), Halation %u us "
                    "(rows %u, columns %u), Bloom's tail %u us; the passes on %u of %u values (%u%%)", n, r->t_src, r->t_gb,
                    r->g_us[0][0], r->g_us[0][1], r->t_gh, r->g_us[1][0], r->g_us[1][1], r->t_gt, r->g_done, r->g_all,

@@ -96,6 +96,15 @@
  *   halation_toe, halation_max             default): the toe takes a weak glow away (a glint's), the ceiling holds a
  *                                          strong one under it (a lamp's halo without a flat disc) - optlayer.h's
  *                                          ol_curve
+ *   white                                  the look's white, the codes' scale (card170): auto (default) - the code
+ *                                          its tables give a blown pixel (isp_white: the tone curve's output for the
+ *                                          largest input), else the shelf of the layer's Y; table, layer - one of the
+ *                                          two only; off - the codes as they are (255, as before); 160..255 - fixed
+ *   halation_edge_cb, halation_edge_cr     the halation's colour at its weak edge (halation_cb, halation_cr: its strong
+ *   halation_edge_code                     colour then), from the edge's at 0 to the strong one at that code of the
+ *                                          halation (0 - one colour, the default)
+ *   halation_core                          1 - the halation's colour weighted by darkness once more: a lamp's core white
+ *   bloom_colour                           Bloom's colour: percent of its sources' chromaticity (0 - neutral, default)
  *   jobs                                   first (default) - only the first job of a RAW+JPEG press gets the layer
  *                                          (it makes the JPEG; the second makes the ORF's preview), both - both
  *   read, read_cached                      the picture's rows read for the sources (every row of cells, two rows of
@@ -185,7 +194,8 @@ static struct {
     u32 listed, ended;                      /* the driver's counts already told to the debug service */
     int layer;                              /* the layer is set up */
     int test_str;                           /* a set gives a test's strength above 0 (in place of the rows') */
-    u32 str;                                /* the look's strengths given to the driver: Bloom | Halation << 8, or ~0 */
+    u32 str;                                /* the look's strengths given to the driver: Bloom | Halation << 8 | mono << 16
+                                               | white << 24, or ~0 */
 } op = {.str = ~0u};
 
 static struct {
@@ -559,6 +569,22 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
     c->bmax = (u32)opt_sint(sec, "bloom_max", 0, 0, 200) * OPT_Q12 / 100;
     c->htoe = (u32)opt_sint(sec, "halation_toe", 0, 0, 50) * OPT_Q12 / 100;
     c->hmax = (u32)opt_sint(sec, "halation_max", 0, 0, 200) * OPT_Q12 / 100;
+    /* card170: the look's white, the halation's colour from its edge's to its strong one's and a white core, Bloom's
+     * colour */
+    t = cfg_str(cfg_str(sec, "white", 0) ? sec : "optics", "white", "auto");
+    if (str_ieq(t, "auto") || str_ieq(t, "table") || str_ieq(t, "layer") || str_ieq(t, "off")) {
+        c->white = str_ieq(t, "off") ? DRV_OPTICS_WHITE_OFF : str_ieq(t, "table") ? DRV_OPTICS_WHITE_TABLE :
+                   str_ieq(t, "layer") ? DRV_OPTICS_WHITE_LAYER : DRV_OPTICS_WHITE_AUTO;
+    } else {
+        c->white = (u32)opt_sint(sec, "white", 255, 160, 255);
+        if (!c->white)
+            c->white = 255;
+    }
+    c->hcb2 = opt_sint(sec, "halation_edge_cb", (c->hcb * 100 + (c->hcb < 0 ? -128 : 128)) / 256, -200, 200) * 256 / 100;
+    c->hcr2 = opt_sint(sec, "halation_edge_cr", (c->hcr * 100 + (c->hcr < 0 ? -128 : 128)) / 256, -200, 200) * 256 / 100;
+    c->hcode = (u32)opt_sint(sec, "halation_edge_code", 0, 0, 255);
+    c->hcore = (u32)opt_sint(sec, "halation_core", 0, 0, 1);
+    c->bcol = (u32)opt_sint(sec, "bloom_colour", 0, 0, 400) * 256 / 100;
     t = cfg_str(cfg_str(sec, "jobs", 0) ? sec : "optics", "jobs", "first");
     c->jobs = str_ieq(t, "both") ? DRV_OPTICS_JOBS_BOTH : DRV_OPTICS_JOBS_FIRST;
     if (!str_ieq(t, "both") && !str_ieq(t, "first"))
@@ -595,6 +621,19 @@ static void layer_keys(drv_optics_layer_cfg *c, const char *sec, const char *nam
                "%u, at most %u; Halation toe %u, at most %u", name, (c->btoe * 100 + OPT_Q12 / 2) / OPT_Q12,
                (c->bmax * 100 + OPT_Q12 / 2) / OPT_Q12, (c->htoe * 100 + OPT_Q12 / 2) / OPT_Q12,
                (c->hmax * 100 + OPT_Q12 / 2) / OPT_Q12);
+    log_printf(OMK_LOG_INFO, "optics: layer%s: the look's white %s; the halation's colour %s, its core %s; Bloom's "
+               "colour %u%% of its sources'", name, c->white == DRV_OPTICS_WHITE_OFF ? "off (the codes as they are)" :
+               c->white == DRV_OPTICS_WHITE_AUTO ? "auto (its tables', else the shelf of the layer's Y)" :
+               c->white == DRV_OPTICS_WHITE_TABLE ? "from its tables only" : c->white == DRV_OPTICS_WHITE_LAYER ?
+               "from the shelf of the layer's Y only" : "fixed (a test)", c->hcode ? "from its edge's to its strong one's"
+               : "one", c->hcore ? "white (its colour weighted by darkness once more)" : "as the rest",
+               (c->bcol * 100 + 128) / 256);
+    if (c->white >= 160)
+        log_printf(OMK_LOG_INFO, "optics: layer%s: the look's white fixed at code %u", name, c->white);
+    if (c->hcode)
+        log_printf(OMK_LOG_INFO, "optics: layer%s: the halation's edge Cb %d%% Cr %d%%, its strong colour from code %u", name,
+                   (c->hcb2 * 100 + (c->hcb2 < 0 ? -128 : 128)) / 256, (c->hcr2 * 100 + (c->hcr2 < 0 ? -128 : 128)) / 256,
+                   c->hcode);
     log_printf(OMK_LOG_INFO, "optics: layer%s: jobs = %s", name, c->jobs == DRV_OPTICS_JOBS_BOTH ? "both - both jobs of a "
                "RAW+JPEG press get the layer (the ORF's preview too)" : "first - the second job of a RAW+JPEG press (the "
                "ORF's preview) without the layer");
@@ -934,14 +973,23 @@ static void opt_arm(const drv_optics_info *st, u32 now, int busy)
 static void opt_strength(void)
 {
     u8 v[OMK_OPTICS_ROWS];
-    u32 s, mono = isp_mono() ? 1 : 0;
+    u32 s, mono = isp_mono() ? 1 : 0, white = isp_white() & 0xff;
 
     look_optics_now(v);
-    s = v[OMK_OPTICS_BLOOM] | (u32)v[OMK_OPTICS_HALATION] << 8 | mono << 16;
+    s = v[OMK_OPTICS_BLOOM] | (u32)v[OMK_OPTICS_HALATION] << 8 | mono << 16 | white << 24;
     if (s == op.str)
         return;
+    if ((s ^ op.str) >> 24)                 /* card170: the look's white (its tone tables), the layer's scale */
+    {
+        if (white)
+            log_printf(OMK_LOG_INFO, "optics: the look's white now: code %u (its tables: the tone curve's output for the "
+                       "largest input)", white);
+        else
+            log_printf(OMK_LOG_INFO, "optics: the look's white now: not known (no gamma and tone in the tables in force): "
+                       "the jobs take the shelf of the layer's Y ([optics] white auto)");
+    }
     op.str = s;
-    drv_optics_strength(v[OMK_OPTICS_BLOOM], v[OMK_OPTICS_HALATION], mono);
+    drv_optics_strength(v[OMK_OPTICS_BLOOM], v[OMK_OPTICS_HALATION], mono, white);
     log_printf(OMK_LOG_INFO, "optics: the look's strengths now: Bloom %u, Halation %u%s%s%s", v[OMK_OPTICS_BLOOM],
                v[OMK_OPTICS_HALATION], mono ? ", black and white (the halation without colour)" : "",
                s & 0xffff ? "" : " (no step in its stills)", op.test_str ? "; NOT taken where the INI gives a test's "

@@ -921,9 +921,9 @@ int look_optics_now(u8 *out)
     return host_look_str_on;
 }
 
-void drv_optics_strength(u32 bloom, u32 halation, u32 mono)
+void drv_optics_strength(u32 bloom, u32 halation, u32 mono, u32 white)
 {
-    host_opt_str = bloom | halation << 8 | mono << 16;
+    host_opt_str = bloom | halation << 8 | mono << 16 | white << 24;
     host_opt_strs++;
 }
 
