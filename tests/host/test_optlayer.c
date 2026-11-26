@@ -1264,63 +1264,138 @@ static void halation_colour(void)
         printf("halation colour: edge cw[10] %08x, strong cw[80] %08x; core Cr %u -> %u\n", o.cw[10], o.cw[80], a, b);
 }
 
-/* Bloom's colour: a warm source's chromaticity on its glow, in proportion to Bloom's code; none without a source; the
- * enlargement smooth */
+/* Bloom's colour (card173: cells of 8 x 8, one Gaussian of the four, looked up at the words' pixels). A warm and a cool
+ * light on a dark layer: the lamp's chromaticity in its cell, none far away, none without Bloom's light, off - neutral;
+ * the words against card170's colour (optlayer_ref.h's ref_colour: cells of 4 x 4, four Gaussians, the layer's plane)
+ * within 3 codes at the lamps' hard edges, all but 0.1 % of the values within 1 (on the field's pictures: at most 2, a few
+ * dozen values over 1); the parts against their arithmetic a value at a time (exact): ol_gauss4 against
+ * ol_gauss on each plane, ol_bloom_chroma against card170's, the words' skip of a colour that cannot change them
+ * (o->cym) against looking it up at every pixel */
+static u16 refq[4 * 82 * 61], refpc[324 * 243], keep[4 * 42 * 31];
+
 static void bloom_colour(void)
 {
     ol_t o;
     ol_par_t p;
-    u32 i, x, y, lw = 324, lh = 243, n = lw * lh, ok = 1, step = 0, w, d;
-    s32 cb, cr, cb2, f0;
+    u32 i, x, y, lw = 324, lh = 243, n = lw * lh, hy, yb, w, wr, d, dmax = 0, over1 = 0, nc = 0, qc, at;
+    u32 row[324], same = 1, k, q, cb, cr, cases = 0, ok = 1, sc = 6 * 256;
+    s32 f0, f1;
 
     layout(&o, lw, lh);
     params(&p);
-    p.bcol = 256;                           /* 100 % */
+    p.bcol = 768;                           /* 300 %, the field's of card170 */
     p.hfirst = 1;
+    p.gb = 160;                             /* Bloom's code at most ~100, as the field's at step 5 */
+    p.gh = 300;
     ol_word_tables(&o, &p);
     check(o.bq, "bloom colour: on");
     for (i = 0; i < n; i++) {
         x = i % lw;
         y = i / lw;
-        o.y[i] = 30;
-        o.pc[i] = 128 | 128 << 8;
+        o.y[i] = (u8)(30 + (x * 7 + y * 3) % 11);
+        o.pc[i] = (u16)((126 + (x + y) % 5) | (127 + (x * 3) % 4) << 8);
         o.pb[i] = 0;
+        o.ph[i] = 0;
         if (x >= 100 && x < 120 && y >= 100 && y < 120) {   /* a warm lamp: Y 200, Cb 100, Cr 160 */
             o.y[i] = 200;
             o.pc[i] = 100 | 160 << 8;
             o.pb[i] = 2000;
+            o.ph[i] = 1000;
+        } else if (x >= 244 && x < 256 && y >= 36 && y < 48) {  /* a smaller cool one */
+            o.y[i] = 240;
+            o.pc[i] = 150 | 118 << 8;
+            o.pb[i] = 3000;
+        } else if (x < 200 && y > 150 && (x * 13 + y * 7) % 97 == 0) {  /* glints */
+            o.y[i] = 190;
+            o.pb[i] = (u16)(200 + x % 300);
         }
     }
+    memcpy(refpc, o.pc, sizeof(refpc));
+    ref_colour(&o, refq, refpc, p.bcol, sc);    /* card170's (its ratio and enlargement need only its planes) */
     ol_colour_down(&o);
-    check(!ol_colour_blur(&o, 3 * 256), "bloom colour: blurred");
+    check(!ol_colour_blur(&o, sc), "bloom colour: blurred");
+    check(!ol_gauss(&o, o.pb, 3 * 256) && !ol_gauss(&o, o.ph, 2 * 256), "bloom colour: Bloom and Halation blurred");
     ol_colour_ratio(&o, p.bcol);
-    ol_colour_up(&o);
-    i = 110 * lw + 110;                     /* at the lamp: (Cb - 128) / Y = -0.14, Cr +0.16 in Q7 */
-    f0 = (s32)(o.pc[i] & 0xff) - 128;
-    check(f0 >= -19 && f0 <= -15 && (s32)(o.pc[i] >> 8) - 128 >= 17 && (s32)(o.pc[i] >> 8) - 128 <= 21,
-          "bloom colour: the lamp's chromaticity");
-    for (y = 60; y < 180; y++)              /* smooth: neighbours differ by a few Q7 steps at most (the fade where the
-                                               sources' light ends is a tail pixel or two: little glow there) */
-        for (x = 61; x < 180; x++) {
-            d = (o.pc[y * lw + x] & 0xff) > (o.pc[y * lw + x - 1] & 0xff) ? (o.pc[y * lw + x] & 0xff) - (o.pc[y * lw + x - 1] & 0xff) :
-                (o.pc[y * lw + x - 1] & 0xff) - (o.pc[y * lw + x] & 0xff);
-            step = d > step ? d : step;
+    qc = ((const u32 *)(o.pq + 4 * o.qw * o.qh))[(110 / OL_CQ) * o.qw + 110 / OL_CQ];   /* the lamp's cell */
+    f0 = (s32)(qc & 0xff) - 128;
+    f1 = (s32)(qc >> 16 & 0xff) - 128;
+    check(f0 >= -58 && f0 <= -38 && f1 >= 44 && f1 <= 66, "bloom colour: the lamp's chromaticity in its cell (300 %: Cb, Cr "
+          "3 x 128 (C - 128) / 2 Y)");
+    for (y = 0; y < lh; y++) {
+        ol_colour_row(&o, y);
+        nc += ol_words(&o, &p, y * lw, row, lw);
+        for (x = 0; x < lw; x++) {
+            i = y * lw + x;
+            if (o.pb[i] | o.ph[i]) {        /* the colour looked up at every lit pixel: the same words */
+                w = ol_word_parts(&o, &p, o.pb[i], o.ph[i], o.y[i], &hy, &yb);
+                at = o.cymin < 256 ? ol_colour_at(&o, x) : OL_QN;
+                same &= row[x] == (w | (yb && at != OL_QN ? ol_bloom_chroma(&o, hy, yb, at) : o.cw[hy]));
+                wr = w | (yb ? ref_bloom_chroma(&p, o.cw[hy], yb, refpc[i]) : o.cw[hy]);   /* card170's */
+            } else {
+                same &= row[x] == o.neutral;
+                wr = o.neutral;
+            }
+            for (k = 8; k <= 16; k += 8) {
+                d = (row[x] >> k & 0xff) > (wr >> k & 0xff) ? (row[x] >> k & 0xff) - (wr >> k & 0xff) :
+                    (wr >> k & 0xff) - (row[x] >> k & 0xff);
+                dmax = d > dmax ? d : dmax;
+                over1 += d > 1;
+            }
+            same &= (row[x] & 0xff) == (wr & 0xff);
         }
-    check(step <= 4, "bloom colour: the enlargement smooth");
-    check(o.pc[5 * lw + 300] == (128 | 128 << 8), "bloom colour: neutral far from any source");
-    w = ol_word_q(&o, &p, 1500, 0, 30, o.pc[i]);
-    cb = (s32)(w >> 8 & 0xff) - 128;
-    cr = (s32)(w >> 16 & 0xff) - 128;
-    cb2 = (s32)(w & 0xff) * f0 / 128;
-    ok = cb <= cb2 + 1 && cb >= cb2 - 1 && cr > 0 && (w & 0xff) > 20;
-    check(ok, "bloom colour: chroma a unit of Bloom's code at the source's chromaticity");
-    check((ol_word_q(&o, &p, 0, 1500, 30, o.pc[i]) >> 8 & 0xff) == (ol_word_of(&o, &p, 0, 1500, 30) >> 8 & 0xff),
+        if (y == 110) {
+            check((row[110] >> 8 & 0xff) < 120 && (row[110] >> 16 & 0xff) > 136, "bloom colour: the lamp's glow warm");
+            if (verbose)
+                printf("bloom colour: row 110 at 110: new q %08x, card170's %04x; words %08x\n", ol_colour_at(&o, 110),
+                       refpc[110 * lw + 110], row[110]);
+        }
+        if (y == 5)
+            check(o.cymin == 256 || ((row[300] >> 8) & 0xffff) == 0x8080, "bloom colour: neutral far from any source");
+    }
+    check(same, "bloom colour: the words' skip of a colour that cannot change them, and their Y, as looked up everywhere");
+    check(dmax <= 3 && over1 * 1000 <= n, "bloom colour: within 3 codes of card170's (the lamps' hard edges: cells of 8 and 4 "
+          "sample them apart), all but 0.1 %% of the values within 1");
+    check(nc > 0, "bloom colour: pixels looked it up");
+    /* ol_bloom_chroma against card170's: every Bloom's code, colours and chroma bytes over their range */
+    for (yb = 1; yb < 256; yb++)
+        for (q = 0; q < 256; q += 5)
+            for (k = 0; k < 256; k += 51) {
+                cb = (q * 7 + k) & 0xff;
+                cr = (q + k * 3 + yb) & 0xff;
+                o.cq[0] = (k | (255 - k) << 16) + 0x01000100u;
+                o.cw[0] = k << 8 | (255 - k) << 16;
+                ok &= ol_bloom_chroma(&o, 0, yb, cb | cr << 16) == ref_bloom_chroma(&p, o.cw[0], yb, cb | cr << 8);
+                cases++;
+            }
+    check(ok, "bloom colour: the packed chroma as card170's, value for value");
+    ol_word_tables(&o, &p);                 /* cw, cq again */
+    check((ol_word_q(&o, &p, 0, 1500, 30, qc) >> 8 & 0xffff) == (ol_word_of(&o, &p, 0, 1500, 30) >> 8 & 0xffff),
           "bloom colour: none without Bloom's light");
+    /* ol_gauss4 against ol_gauss on each of its planes: sizes, sigmas (r 0 .. 7), sparse and dense */
+    for (k = 0, ok = 1; k < 12; k++) {
+        u32 gw = 6 + k * 3, gh = 4 + k * 2, s2 = 70 + k * 170, j;
+
+        if (gw * gh * 4 > sizeof(keep) / 2)
+            break;
+        for (i = 0; i < 4 * gw * gh; i++)
+            o.pq[i] = keep[i] = (u16)(k & 1 ? (i * 2654435761u >> 20) & 4095 : (i * 2654435761u >> 27) ? 0 : (i * 40503u) & 4095);
+        ol_gauss4(&o, o.pq, gw, gh, s2);
+        for (j = 0; j < 4; j++) {
+            for (i = 0; i < gw * gh; i++)
+                o.ph[i] = keep[4 * i + j];
+            ol_plane_blur_wh(&o, o.ph, gw, gh, s2);
+            for (i = 0; i < gw * gh; i++)
+                ok &= o.ph[i] == o.pq[4 * i + j];
+        }
+    }
+    check(ok, "bloom colour: one Gaussian of the four as four Gaussians, value for value");
     p.bcol = 0;
     ol_word_tables(&o, &p);
-    check(!o.bq && ol_word(&o, &p, i) == ol_word_of(&o, &p, o.pb[i], o.ph[i], o.y[i]), "bloom colour: off - neutral");
+    check(!o.bq && ol_word(&o, &p, 110 * lw + 110) == ol_word_of(&o, &p, o.pb[110 * lw + 110], o.ph[110 * lw + 110],
+                                                                 o.y[110 * lw + 110]), "bloom colour: off - neutral");
     if (verbose)
-        printf("bloom colour: Q7 %d at the lamp, largest step %u, word %08x\n", f0, step, w);
+        printf("bloom colour: Q7 %d %d at the lamp's cell; against card170's: largest %u codes, %u values over 1 of %u; "
+               "%u pixels looked it up; %u chroma cases\n", f0, f1, dmax, over1, 2 * n, nc, cases);
 }
 
 int main(int argc, char **argv)

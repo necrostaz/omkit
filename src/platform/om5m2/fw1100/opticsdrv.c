@@ -127,8 +127,11 @@
  * tables' white, else from the shelf of the layer's Y (ol_shelf).
  *
  * Bloom's colour (card170, [optics] bloom_colour): the layer's Cb and Cr are read with its Y (into the second Gaussian's
- * plane, free until Bloom's blur), the sources' colour made on the tail's plane (ol_colour_*), enlarged into that plane
- * after the Gaussians, and the words take it.
+ * plane, free until Bloom's blur), the sources' colour made on a plane of cells of 8 x 8 (optlayer.h's ol_colour_*: the
+ * sums before Bloom's Gaussian, their Gaussian, the ratio after the Gaussians), and the words take it at the pixels
+ * where Bloom adds a code (each row's colours along it first, ol_colour_row). card171 made it on the tail's plane and
+ * enlarged it into a plane of the layer: 107..177 ms a job; card173 - ~10..20 ms on the scene of card171's S1 (by the
+ * instructions counted in the emulator's CPU).
  *
  * The jobs of a RAW+JPEG press (card169, [optics] jobs): the first (FileType 1) makes the JPEG, the second (FileType 3)
  * the ORF's preview (3200x2400, the whole 4:3 frame) - the camera's pictures of card168 show it. With jobs = first (the
@@ -287,7 +290,10 @@ typedef struct {
                                                day's weight (Q8) */
     u32 gbe, ghe;                           /* L4: the gains used (Q8, the strength, the day and the tail in them) */
     u32 white;                              /* L4: the look's white used | where from (OW_*) << 8 */
-    u32 t_col;                              /* L4: Bloom's colour, us (its sums, Gaussians, ratio and enlargement) */
+    u32 t_col;                              /* L4: Bloom's colour, us: its sums, Gaussian, ratio and rows (the parts below) */
+    u32 t_csum, t_cgauss, t_cratio, t_crow; /* ... the sums, the Gaussian of the four, the ratio, the rows' colours (in the
+                                               layer's write) */
+    u32 c_px;                               /* ... the words' pixels that looked their colour up */
     u32 psw, sp, sp_min;                    /* at the step's entry (C); the lowest sp of the step's C code */
     u32 task, stk, stksz;                   /* the running task (its TCB): id, stack base and size; 0 - not read */
     u32 lock[2];                            /* the cross-CPU lock bytes at the entry */
@@ -1606,11 +1612,13 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     }
     if (P.bcol) {                           /* Bloom's colour: the sources' sums before Bloom's Gaussian (pc: the layer's
                                                chroma until then), blurred on their plane */
+        t1 = drv_ticks();
+        ol_colour_down(&L);
+        r->t_csum = drv_ticks_since(t1);
         s1 = p->slept;
         gp.t = t1 = drv_ticks();
-        ol_colour_down(&L);
         stop = ol_colour_blur(&L, P.sc);
-        r->t_col = drv_ticks_since(t1) - (p->slept - s1);
+        r->t_cgauss = drv_ticks_since(t1) - (p->slept - s1);
     }
     for (k = 0; k < 2 && !stop; k++) {      /* Bloom, Halation; after each pass the CPU given away when it is due */
         if (!(k ? P.gh : P.gb))
@@ -1635,11 +1643,10 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
             r->t_gt += drv_ticks_since(t1) - (p->slept - s1);
         }
     }
-    if (P.bcol && !stop) {                  /* into pc after the Gaussians (the second Gaussian's copy is done with) */
+    if (P.bcol && !stop) {                  /* the cells' colours after the Gaussians */
         t1 = drv_ticks();
         ol_colour_ratio(&L, P.bcol);
-        ol_colour_up(&L);
-        r->t_col += drv_ticks_since(t1);
+        r->t_cratio = drv_ticks_since(t1);
     }
     r->g_done = L.done;
     r->g_all = L.all;
@@ -1658,8 +1665,16 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
         drv_fw_cache_flush();               /* no line left of an earlier map of the window's addresses */
         base -= OP_UNCACHED;
     }
-    for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++, i += lw)
-        ol_words(&L, &P, i, (volatile u32 *)(base + OL_MUL(yy, lp)), lw);
+    for (yy = 0, i = 0; yy < lh && !op_pace(p); yy++, i += lw) {
+        if (L.bq) {                         /* Bloom's colour: the row's colours along it, then the words look them up */
+            t1 = drv_ticks();
+            ol_colour_row(&L, yy);
+            r->t_crow += drv_ticks_since(t1);
+        }
+        r->c_px += ol_words(&L, &P, i, (volatile u32 *)(base + OL_MUL(yy, lp)), lw);
+    }
+    if (L.bq)
+        r->t_col = r->t_csum + r->t_cgauss + r->t_cratio + r->t_crow;
     drv_fw_cache_flush();                   /* through the cache: every line written back to memory, and before the
                                                window is released (a line written back later would go to whatever the
                                                window shows then); past it: the bus's write buffers. Both before the
@@ -1997,12 +2012,16 @@ static void op_box_ref(u16 *v, u32 n, u32 step, u32 r, u32 alpha, u16 *tmp)
  * b (uncached, KCHECK_BYTES and a small layer after it; any CPU): OL_MUL against the compiler's mul, ol_mulhi against
  * op_mulhi_ref (64 pairs each), ol_read_pack loading bytes and loading words against ol_read_run (8 cells of a
  * pseudo-random row), and ol_gauss (its row and column kernels with the unit's multiplies: two columns a step and one)
- * against op_box_ref's passes on small sparse planes. In the emulator this runs at every start, on the camera too - a
- * kernel the CPU computes otherwise keeps the layer off. 0, or a bit set: 1 OL_MUL, 2 ol_mulhi, 4 the read by bytes, 8 by
- * words, 16 the Gaussian, 32 the cover read by bytes, 64 by words */
+ * against op_box_ref's passes on small sparse planes; Bloom's colour (card173): ol_gauss4 (its packed rows) against
+ * ol_gauss on each of its four planes, ol_colour_at and ol_bloom_chroma (packed halves) against the arithmetic a value
+ * at a time. In the emulator this runs at every start, on the camera too - a kernel the CPU computes otherwise keeps the
+ * layer off. 0, or a bit set: 1 OL_MUL, 2 ol_mulhi, 4 the read by bytes, 8 by words, 16 the Gaussian, 32 the cover read
+ * by bytes, 64 by words, 128 the Gaussian of four, 256 the colour's interpolation and chroma */
 #define KCHECK_CELLS 8
+static u32 op_kcheck_colour(u8 *b, u32 x);
 #define KCHECK_BYTES (1024 + 4 * OL_READ_RUN * KCHECK_CELLS + 4 * KCHECK_CELLS)
-#define KCHECK_LAYER 49152                  /* bytes for ol_layout of the small planes (20 or 21 x 10) and its tables */
+#define KCHECK_LAYER 49152                  /* bytes for ol_layout of the small planes (20 or 21 x 10, 80 x 10) and its
+                                               tables */
 static u32 op_kcheck(u8 *b)
 {
     u32 *tab = (u32 *)b, *row = tab + 256, *out = row + OL_READ_RUN * KCHECK_CELLS, i, k, j, x = 0x12345678, y, e = 0;
@@ -2063,6 +2082,63 @@ static u32 op_kcheck(u8 *b)
         for (i = 0; i < w * h; i++)
             if (L.pb[i] != L.pc[i])
                 e |= 16;
+    }
+    e |= op_kcheck_colour(b, x);
+    return e;
+}
+
+/* op_kcheck's part for Bloom's colour (bits 128 and 256): a plane of 20 x 10 cells of four values (sparse, a few lights)
+ * by ol_gauss4 against each of its planes alone by ol_gauss; ol_colour_at against the halves' interpolation one by one,
+ * ol_bloom_chroma against ((yb (q - 128) + 64) >> 7) a half at a time, clamped (64 random cases each) */
+static u32 op_kcheck_colour(u8 *b, u32 x)
+{
+    u32 w = 20, h = 10, sg = 768, i, k, e = 0, x0 = x, c0, c1, w0, q, yb, cb, cr, v;
+    s32 ab, ar;
+    ol_t L;
+
+    mem_set(&L, 0, sizeof(L));
+    ol_layout(&L, (uptr)b + KCHECK_BYTES, 4 * w, h);
+    for (i = 0; i < 4 * w * h; i++) {
+        x = x * 1103515245u + 12345;
+        L.pq[i] = x >> 28 ? 0 : (u16)(x >> 8 & 4095);
+    }
+    ol_gauss4(&L, L.pq, w, h, sg);
+    for (k = 0; k < 4; k++) {
+        for (i = 0, x = x0; i < 4 * w * h; i++) {
+            x = x * 1103515245u + 12345;
+            if ((i & 3) == k)
+                L.ph[i / 4] = x >> 28 ? 0 : (u16)(x >> 8 & 4095);
+        }
+        ol_plane_blur_wh(&L, L.ph, w, h, sg);
+        for (i = 0; i < w * h; i++)
+            if (L.ph[i] != L.pq[4 * i + k])
+                e |= 128;
+    }
+    L.scb = 8;
+    L.scr = 16;
+    for (i = 0; i < 64; i++) {
+        for (k = 0; k < 3; k++) {           /* a row's colours (x16, halves at most 255 x 16) */
+            x = x * 1103515245u + 12345;
+            L.acc[k] = (x >> 8 & 0xff) * 16 | (x >> 20 & 0xff) * 16 << 16;
+        }
+        k = i & 7;                          /* pixel k: cells 0, 1 (acc[0], acc[1]) or 1, 2 */
+        c0 = L.acc[k >= 4];
+        c1 = L.acc[(k >= 4) + 1];
+        w0 = k < 4 ? 7 - 2 * k : 23 - 2 * k;
+        v = ((c0 & 0xffff) * w0 + (c1 & 0xffff) * (16 - w0) + 128) >> 8 |
+            ((c0 >> 16) * w0 + (c1 >> 16) * (16 - w0) + 128) >> 8 << 16;
+        if (ol_colour_at(&L, k) != v)
+            e |= 256;
+        x = x * 1103515245u + 12345;
+        yb = 1 + (x >> 8 & 0xff) % 255;
+        q = (1 + (x >> 16 & 0xff) % 255) | (1 + (x >> 24) % 255) << 16;
+        cb = x & 0xff;
+        cr = x >> 3 & 0xff;
+        L.cq[0] = (cb | cr << 16) + 0x01000100u;
+        ab = (s32)cb + (((s32)yb * ((s32)(q & 0xff) - 128) + 64) >> 7);
+        ar = (s32)cr + (((s32)yb * ((s32)(q >> 16) - 128) + 64) >> 7);
+        if (ol_bloom_chroma(&L, 0, yb, q) != (ol_clamp8(ab) << 8 | ol_clamp8(ar) << 16))
+            e |= 256;
     }
     return e;
 }
@@ -2415,8 +2491,9 @@ static void op_report_layer(volatile op_rec_t *r, u32 n)
                    "the shelf of the layer's Y: its tables not known" : (r->white >> 8) == OW_FIXED ? "fixed, a test" :
                    "not known, no shelf in the layer's Y: the codes as they are");
         if (r->t_col)
-            log_printf(OMK_LOG_INFO, "optics: job %u: Bloom's colour %u us (its sums, Gaussians, colours and enlargement)",
-                       n, r->t_col);
+            log_printf(OMK_LOG_INFO, "optics: job %u: Bloom's colour %u us: sums %u, Gaussian %u, colours %u, rows %u us; "
+                       "%u pixels of the words looked it up (their share in the layer's write)", n, r->t_col, r->t_csum,
+                       r->t_cgauss, r->t_cratio, r->t_crow, r->c_px);
         log_printf(OMK_LOG_INFO, "optics: job %u: calc: sources %u us, Bloom %u us (rows %u, columns %u), Halation %u us "
                    "(rows %u, columns %u), Bloom's tail %u us; the passes on %u of %u values (%u%%)", n, r->t_src, r->t_gb,
                    r->g_us[0][0], r->g_us[0][1], r->t_gh, r->g_us[1][0], r->g_us[1][1], r->t_gt, r->g_done, r->g_all,

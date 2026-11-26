@@ -39,8 +39,8 @@
  *   without colour (hcore: the colour's code weighted by the darkness of the place once more);
  * - Bloom's colour (card170, bcol; ol_colour_*): a diffusion filter's glow has the colour of the light it scatters, so
  *   Bloom adds chroma at its sources' chromaticity - the layer's own Cb, Cr (the ISP's reduction of the picture) weighted
- *   by Bloom's sources, on the tail's plane and blurred there, a share of it a unit of Bloom's code (0 - neutral, as
- *   before).
+ *   by Bloom's sources, on a plane of cells of 8 x 8 (card173; card170 - the tail's plane) and blurred there, a share of
+ *   it a unit of Bloom's code (0 - neutral, as before).
  *
  * The layer's word (format 0x305, 4 bytes a pixel): the byte of Y, Cb and Cr by ol_par_t's positions (the camera's
  * dump decides them, ol_lane_order); the fourth byte 0.
@@ -81,6 +81,7 @@
 #define OL_SIGMA_MAX (32 * 256)             /* sigma in layer pixels, Q8: the plan's arithmetic stays in 32 bits */
 #define OL_R_MAX 31                         /* the largest box radius of a plan (OL_SIGMA_MAX gives 30) */
 #define OL_KERNEL __attribute__((noinline))  /* a loop of its own: the compiler keeps its few values in registers */
+#define OL_INLINE inline __attribute__((always_inline))   /* a part of a loop (-Os would call it a pixel) */
 
 /* The low word of a x b. On the camera the extension unit's multiply udf01 Dm,Dn (Dn = the low word of Dn x Dm, MULQU of
  * the unit; MDR and the CPU's flags kept, the flags left undefined - hence "cc"): the firmware's own way to multiply.
@@ -149,6 +150,7 @@ typedef struct {
 
 #define OL_EM_MAX 64                        /* whites a blown pixel stands for, at most: em OL_ONE stays below 2^18 */
 #define OL_TAIL 4                           /* the tail's plane: cells of OL_TAIL x OL_TAIL layer pixels */
+#define OL_CQ 8                             /* Bloom's colour's plane: cells of OL_CQ x OL_CQ layer pixels */
 #define OL_COVER 2                          /* the cover read: rows of the picture a row of cells, at 1/4 and 3/4 of it */
 #define OL_MEANS 0x80                       /* nrow: the row of cells has its means already (ol_cover_cells) */
 #define OL_CURVE 4096                       /* the strength's curve: entries, the added light 0..2 whites in steps of 2 */
@@ -172,6 +174,8 @@ typedef struct {
     const u8 *enc;                          /* OL_ENC */
     u32 *tab;                               /* 256: the read's excess of Bloom | of Halation << 16 */
     u32 *cw;                                /* 256: a word's chroma bytes by the halation's Y code */
+    u32 *cq;                                /* 256: the same Cb | Cr << 16, each + 256 (Bloom's colour adds to it:
+                                               ol_bloom_chroma) */
     u16 *wd;                                /* 256: Halation's weight by the darkness of the place, Q8, by its code */
     u16 *wb;                                /* 256: the same of Bloom */
     u16 *hz;                                /* 256: Bloom's haze of a code, haze lin >> 12 (ol_word_tables) */
@@ -192,9 +196,18 @@ typedef struct {
     u32 bc, hc;                             /* 1 - the curve in use (ol_word_tables), 0 - the light as it was */
     u32 hk;                                 /* 1 - the colour's code weighted by wd[] (p->hcore) */
     u16 *wq;                                /* 256: the weight of a source's colour by its code, Q8 (ol_word_tables) */
-    u16 *pq;                                /* 4 planes tw x th (at least 2 lw + 768 values: scratch before the read's
-                                               end): Bloom's colour - the sources' sums of S Cb, S Cr, S Y, S (ol_colour_*) */
-    u32 bq;                                 /* 1 - Bloom's colour in the words: pc holds its Cb | Cr << 8 a pixel */
+    u16 *pq;                                /* Bloom's colour (ol_colour_*): 4 planes qw x qh of the sources' sums of S Cb,
+                                               S Cr, S Y, S, then qc[] (qw x qh u32); at least 2 lw + 768 values (scratch
+                                               before the read's end) */
+    u32 qw, qh;                             /* Bloom's colour's plane: the layer's size / OL_CQ rounded up, qw then one
+                                               more and even (its last columns copies of the last cell) */
+    u32 bq;                                 /* 1 - Bloom's colour in the words (qc[] made; ol_colour_row before a row) */
+    u32 crow;                               /* the first pixel of the row ol_colour_row made (o->acc its colours) */
+    u32 cymin;                              /* ... the least Bloom's code that its colour can change somewhere (256 - none) */
+    u8 *cym;                                /* ... the same at each column of cells (qw: after its colours in acc) */
+    u32 cpair;                              /* ... its two rows of cells a | b << 16 (cym[] theirs; ~0 - none yet) */
+    u32 cqk;                                /* Bloom's colour's sums: their means x 2^cqk (ol_colour_down) */
+    u32 scb, scr;                           /* the shifts of Cb and Cr in a word (8 pcb, 8 pcr) */
 } ol_t;
 
 /* The work buffer's parts for a layer lw x lh from address b (4-aligned): the pointers set in o (lin and enc too: the
@@ -207,6 +220,8 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
     o->lh = lh;
     o->tw = ((lw + OL_TAIL - 1) / OL_TAIL + 1) & ~1u;   /* even: the tail's column passes go two columns a step */
     o->th = (lh + OL_TAIL - 1) / OL_TAIL;
+    o->qw = ((lw + OL_CQ - 1) / OL_CQ + 2) & ~1u;     /* even (paired column passes), past the last cell one more */
+    o->qh = (lh + OL_CQ - 1) / OL_CQ;
     o->tabd = 0;
     o->lin = (const u16 *)b;
     b += 512;
@@ -215,6 +230,8 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
     o->tab = (u32 *)b;
     b += 1024;
     o->cw = (u32 *)b;
+    b += 1024;
+    o->cq = (u32 *)b;
     b += 1024;
     o->wd = (u16 *)b;
     b += 512;
@@ -229,10 +246,12 @@ static inline uptr ol_layout(ol_t *o, uptr b, u32 lw, u32 lh)
     o->wq = (u16 *)b;
     b += 512;
     o->pq = (u16 *)b;
-    b += 2 * (4 * o->tw * o->th > 2 * lw + 768 ? 4 * o->tw * o->th : 2 * lw + 768);
+    b += 2 * (7 * o->qw * o->qh + 2 * o->qh > 2 * lw + 768 ? 7 * o->qw * o->qh + 2 * o->qh : 2 * lw + 768);   /* the four
+                                               sums, qc[], the largest colours (ol_colour_ratio) */
     o->pt = (u16 *)b;
     b += (2 * o->tw * o->th + 3) & ~3u;
     o->acc = (u32 *)b;
+    o->cym = (u8 *)(o->acc + o->qw + 1);    /* (qw + 1) 4 + qw bytes: within lw words */
     b += 4 * lw;
     o->pb = (u16 *)b;
     b += 2 * n;
@@ -934,7 +953,7 @@ static OL_KERNEL void ol_acc_pairs(u32 *ac, u32 *end, const u32 *lo1, const u32 
  * (outside it every value the row needs is 0, so is acc and so is the output). With a box of r <= OL_PAIRS_R and an even
  * width the columns go two a step: a sum of 2r + 1 values (each at most OL_ONE + 1, the rounding) stays in 16 bits */
 #define OL_PAIRS_R 7
-static inline void ol_box_cols(ol_t *o, u16 *plane, u32 r, u32 ia, u32 ib)
+static OL_KERNEL void ol_box_cols(ol_t *o, u16 *plane, u32 r, u32 ia, u32 ib)
 {
     u32 lw = o->lw, lh = o->lh, nr = r + 2, pairs = r <= OL_PAIRS_R && !(lw & 1), y, j, jl, jh, s, e, a, b, rl, k;
     u16 *rin = o->rng, *rout = o->rng + 2 * lh, *cur, *slot, *n1, *n2, *ring = o->ring, *rend, *last;
@@ -1119,15 +1138,16 @@ static OL_KERNEL void ol_tail_down(ol_t *o)
     }
 }
 
-/* The tail's Gaussian (sigma: tail pixels, Q8) on the plane pt, with the layer's work rows (acc, ring, tmp, the rows'
- * ranges: all free between the layer's Gaussians, and large enough for the smaller plane) */
-static inline u32 ol_plane_blur(ol_t *o, u16 *plane, u32 sigma)
+/* A Gaussian (sigma: the plane's pixels, Q8) on a small plane w x h (the tail's, Bloom's colour's), with the layer's work
+ * rows (acc, ring, tmp, the rows' ranges: all free between the layer's Gaussians, and large enough for the smaller
+ * plane) */
+static inline u32 ol_plane_blur_wh(ol_t *o, u16 *plane, u32 w, u32 h, u32 sigma)
 {
     ol_t t;                                 /* what ol_gauss uses (a structure's copy would call memcpy) */
     u32 r;
 
-    t.lw = o->tw;
-    t.lh = o->th;
+    t.lw = w;
+    t.lh = h;
     t.rng = o->rng;
     t.acc = o->acc;
     t.ring = o->ring;
@@ -1141,155 +1161,315 @@ static inline u32 ol_plane_blur(ol_t *o, u16 *plane, u32 sigma)
     return r;
 }
 
+/* The tail's Gaussian on its plane */
+static inline u32 ol_plane_blur(ol_t *o, u16 *plane, u32 sigma)
+{
+    return ol_plane_blur_wh(o, plane, o->tw, o->th, sigma);
+}
+
 static inline u32 ol_tail_blur(ol_t *o, u32 sigma)
 {
     return ol_plane_blur(o, o->pt, sigma);
 }
 
-/* Bloom's colour (card170). A diffusion filter scatters the light it passes: the glow round a warm lamp is warm. The
- * colour of a source is the layer's own chroma there (its words' Cb and Cr: the ISP's reduction of the picture, 16 x 16
- * pixels a cell), weighted by Bloom's source S of the pixel and by wq[] of its code (a blown core is white in the
- * picture whatever the lamp's colour: its colour counts 1/8). Made on the tail's plane (OL_TAIL x OL_TAIL layer pixels a
- * cell, as ol_tail_*): four sums a cell - S' Cb / 256, S' Cr / 256, S' Y / 256, S' (S' = S wq / 256; Cb, Cr the bytes,
- * 128 neutral) - their means (at most OL_ONE: the Gaussian's paired columns), blurred alike (ol_colour_blur), then the
- * chromaticity a cell (ol_colour_ratio): (sum S' (Cb - 128)) / (sum S' Y) - the chroma a unit of Y of the light that
- * glows there - times the share; enlarged bilinearly to the layer into pc (ol_colour_up); the word adds Bloom's code times
- * it to its chroma (ol_bloom_chroma). Before the read pc holds the layer's Cb | Cr << 8 (the caller's). */
+/* Bloom's colour (card170; on its own plane since card173). A diffusion filter scatters the light it passes: the glow
+ * round a warm lamp is warm. The colour of a source is the layer's own chroma there (its words' Cb and Cr: the ISP's
+ * reduction of the picture, 16 x 16 pixels a cell; pc holds them, Cb | Cr << 8, from the layer's read until Bloom's
+ * Gaussian), weighted by Bloom's source S of the pixel and by wq[] of its code (a blown core is white in the picture
+ * whatever the lamp's colour: its colour counts 1/8). Made on a plane of cells of OL_CQ x OL_CQ layer pixels (qw x qh),
+ * four values a cell side by side (A, B, Y, D: ol_gauss4 blurs the four at once) - the sums S' Cb / 256, S' Cr / 256,
+ * S' Y / 256, S' (S' = S wq / 256; Cb, Cr the bytes, 128 neutral; each term truncated a pixel), their means (at most
+ * OL_ONE: the Gaussian's paired columns), blurred alike (ol_colour_blur), then the chromaticity a cell
+ * (ol_colour_ratio): (sum S' (Cb - 128)) / (sum S' Y) - the chroma a unit of Y of the light that glows there - times the
+ * share, into qc[] (Cb | Cr << 16, 128 + Q7). The words take it where Bloom adds a code (ol_words_lit): the cells'
+ * colours interpolated bilinearly at the pixel (ol_colour_row along the row's column once a row, ol_colour_at along the
+ * row), Bloom's code times it added to the chroma (ol_bloom_chroma).
+ * card170 made it on the tail's plane (cells of 4 x 4), four Gaussians one by one, and enlarged it into a plane of the
+ * layer: ~10 million instructions a job with the words' share (~0.1-0.18 s on the camera, card171). The colour is a
+ * smooth field (blurred by the tail's sigma, ~25 layer pixels), so: cells of 8 x 8 (a quarter of the values), one
+ * Gaussian for the four, and the colour only where a word takes it */
 #define OL_COL_SOFT 16                      /* added to a cell's sum S' Y in the ratio: where little light glows the colour
                                                fades to neutral smoothly (no edge where the sums end) */
+#define OL_QN 0x00800080u                   /* a neutral colour in qc[] and ol_colour_at: Cb 128 | Cr 128 << 16 */
+#define OL_CQ_SMAX (8 * 256)                /* the colour's sigma at most (its plane's pixels, Q8; ~1000 px of the
+                                               picture): a box of radius 7 at most - ol_gauss4's paired sums */
+
+/* The lit pixels (pb not 0) of n pixels into the sums s[0..3]: S' Cb / 256, S' Cr / 256, S' Y / 256, S' */
+static OL_KERNEL void ol_colour_px(u32 *s, const u16 *pb, const u8 *y, const u16 *pc, const u16 *wq, u32 n)
+{
+    do {
+        u32 b = *pb++;
+
+        if (b) {
+            u32 c = *y, q = *pc, v = OL_MUL(b, wq[c]) >> 8;
+
+            s[3] += v;
+            s[2] += OL_MUL(v, c) >> 8;
+            s[0] += OL_MUL(v, q & 0xff) >> 8;
+            s[1] += OL_MUL(v, q >> 8) >> 8;
+        }
+        y++;
+        pc++;
+    } while (--n);
+}
+
+/* 1 - the cell of OL_CQ x h pixels from pixel k has a source (pb not 0), its four sums into s; 0 - none. Its words
+ * looked at first (the layer's width even: its rows 4-aligned; most of a layer has no source), then the rows with one */
+static OL_KERNEL u32 ol_colour_cell(const ol_t *o, u32 *s, u32 k, u32 h)
+{
+    const u32 *w = (const u32 *)(o->pb + k), *e = w;
+    u32 m = 0, lw = o->lw, lw2 = lw / 2, j;
+
+    for (j = h; j; j--, e += lw2)
+        m |= e[0] | e[1] | e[2] | e[3];
+    if (!m)
+        return 0;
+    s[0] = s[1] = s[2] = s[3] = 0;
+    for (j = h; j; j--, w += lw2, k += lw)
+        if (w[0] | w[1] | w[2] | w[3])
+            ol_colour_px(s, o->pb + k, o->y + k, o->pc + k, o->wq, OL_CQ);
+    return 1;
+}
+
+/* The plane of the sums' means (qw x qh cells of four values at o->pq) x 2^cqk; before Bloom's Gaussian (pc: the
+ * layer's chroma). The scale: the most the largest stays within OL_ONE (the Gaussian's paired columns), 1..16 - the
+ * Gaussian rounds each pass to a unit, and the colour of a faint glow (a small lamp's, far from its source: a few units
+ * of Y and less of 2 A - D) is the ratio of such small numbers; with 1 (the largest at OL_ONE or above) the means
+ * clamped as card170's. First the means x 16 (at most 65535), then the scale */
+#define OL_CQ_K 4
 static OL_KERNEL void ol_colour_down(ol_t *o)
 {
-    u32 lw = o->lw, tw = o->tw, th = o->th, n4 = tw * th, ty, tx, y, y0, y1, x, x1, i, s, q, n, k;
-    u32 sa, sb, sy, sd;
-    u16 *qa = o->pq, *qb = qa + n4, *qy = qb + n4, *qd = qy + n4;
+    u32 lw = o->lw, lh = o->lh, x, y0, h, w, j, n, s[4], k, xe = OL_CQ * o->qw, m = 0, sh;
+    u16 *q = o->pq, *e;
 
-    for (ty = 0; ty < th; ty++) {
-        y0 = ty * OL_TAIL;
-        y1 = y0 + OL_TAIL < o->lh ? y0 + OL_TAIL : o->lh;
-        for (tx = 0, x = 0; tx < tw; tx++, x += OL_TAIL) {
-            i = ty * tw + tx;
-            if (x >= lw) {                  /* the column that makes the width even: a copy of the last */
-                qa[i] = qa[i - 1];
-                qb[i] = qb[i - 1];
-                qy[i] = qy[i - 1];
-                qd[i] = qd[i - 1];
+    for (y0 = 0; y0 < lh; y0 += OL_CQ) {
+        h = lh - y0 < OL_CQ ? lh - y0 : OL_CQ;
+        k = OL_MUL(y0, lw);
+        for (x = 0; x < xe; x += OL_CQ, q += 4) {
+            if (x >= lw) {                  /* the columns that make the width even and one more: copies of the last */
+                ((u32 *)q)[0] = ((const u32 *)q)[-2];
+                ((u32 *)q)[1] = ((const u32 *)q)[-1];
                 continue;
             }
-            x1 = x + OL_TAIL < lw ? x + OL_TAIL : lw;
-            sa = sb = sy = sd = 0;
-            for (y = y0; y < y1; y++)
-                for (k = OL_MUL(y, lw) + x; k < OL_MUL(y, lw) + x1; k++) {
-                    if (!o->pb[k])
-                        continue;
-                    s = OL_MUL(o->pb[k], o->wq[o->y[k]]) >> 8;
-                    q = o->pc[k];
-                    sd += s;
-                    sy += OL_MUL(s, o->y[k]) >> 8;
-                    sa += OL_MUL(s, q & 0xff) >> 8;
-                    sb += OL_MUL(s, q >> 8) >> 8;
+            w = lw - x < OL_CQ ? lw - x : OL_CQ;
+            if (w == OL_CQ && !(lw & 1)) {
+                if (!ol_colour_cell(o, s, k + x, h)) {
+                    ((u32 *)q)[0] = ((u32 *)q)[1] = 0;
+                    continue;
                 }
-            n = OL_MUL(x1 - x, y1 - y0);
-            if (n == OL_TAIL * OL_TAIL) {
-                sa = (sa + 8) >> 4;
-                sb = (sb + 8) >> 4;
-                sy = (sy + 8) >> 4;
-                sd = (sd + 8) >> 4;
             } else {
-                sa = (sa + n / 2) / n;
-                sb = (sb + n / 2) / n;
-                sy = (sy + n / 2) / n;
-                sd = (sd + n / 2) / n;
+                s[0] = s[1] = s[2] = s[3] = 0;
+                for (j = 0, n = k + x; j < h; j++, n += lw)
+                    ol_colour_px(s, o->pb + n, o->y + n, o->pc + n, o->wq, w);
             }
-            qa[i] = (u16)(sa > OL_ONE ? OL_ONE : sa);
-            qb[i] = (u16)(sb > OL_ONE ? OL_ONE : sb);
-            qy[i] = (u16)(sy > OL_ONE ? OL_ONE : sy);
-            qd[i] = (u16)(sd > OL_ONE ? OL_ONE : sd);
+            n = w * h;
+            for (j = 0; j < 4; j++) {
+                if (n == OL_CQ * OL_CQ)
+                    s[j] = (s[j] + 2) >> 2;     /* the mean x 16 */
+                else
+                    s[j] = (s[j] * 16 + n / 2) / n;
+                s[j] = s[j] > 65535 ? 65535 : s[j];
+                m = s[j] > m ? s[j] : m;
+                q[j] = (u16)s[j];
+            }
         }
+    }
+    for (sh = 0; sh < OL_CQ_K && (m + (1u << sh >> 1)) >> sh > OL_ONE; sh++)
+        ;
+    o->cqk = OL_CQ_K - sh;
+    for (q = o->pq, e = q + 4 * o->qw * o->qh; q != e; q++) {
+        k = sh ? (*q + (1u << (sh - 1))) >> sh : *q;
+        *q = (u16)(k > OL_ONE ? OL_ONE : k);
     }
 }
 
-/* The four sums blurred by the sigma sc (the tail's pixels, Q8). 0, or 1 - stopped */
+/* One extended box along a row of n cells of packed words (two values a word, the halves; a word every other one: two
+ * words a cell) from v, the cells [s, e) of it made: ol_box_row's arithmetic in each half (its sums at most 15 x 4096:
+ * no carry) */
+static OL_KERNEL void ol_box_rowp(u32 *v, u32 n, u32 s, u32 e, u32 r, u32 ia, u32 ib, u32 *P)
+{
+    u32 i, sum, lp = s ? 0 : v[0], rp = e < n ? 0 : v[2 * (n - 1)], *out = v + 2 * s, *end = v + 2 * e;
+    const u32 *lo, *hi;
+
+    for (i = 0; i <= r; i++) {
+        P[i] = lp;
+        P[r + 1 + e - s + i] = rp;
+    }
+    for (i = s, lo = out; i < e; i++, lo += 2)
+        P[r + 1 + i - s] = *lo;
+    for (sum = 0, i = 1; i <= 2 * r + 1; i++)
+        sum += P[i];
+    lo = P;                                 /* P[i]: the value r + 1 before; P[i + 2r + 2]: r + 1 after */
+    hi = P + 2 * r + 2;
+    do {
+        u32 l = *lo++, h = *hi++, t = l + h;
+
+        *out = (OL_MUL(sum & 0xffff, ia) + OL_MUL(t & 0xffff, ib) + 32768) >> 16 |
+               (OL_MUL(sum >> 16, ia) + OL_MUL(t >> 16, ib) + 32768) >> 16 << 16;
+        out += 2;
+        sum += h - *lo;
+    } while (out != end);
+}
+
+/* The Gaussian of sigma (the plane's pixels, Q8; at most OL_CQ_SMAX) over a plane of w x h cells of four values (a u16
+ * plane 4 w wide): each value as ol_gauss would give it on its own plane, all four in one pass - the rows by packed words
+ * (ol_box_rowp), the columns as ol_box_cols's paired columns (a column pass does not mix columns). 0, or 1 - stopped */
+static inline u32 ol_gauss4(ol_t *o, u16 *plane, u32 w, u32 h, u32 sigma)
+{
+    ol_t t;                                 /* what the passes use (a structure's copy would call memcpy) */
+    u32 r, a, ia, ib, k, y, s, e, stop = 0;
+    u16 *rg, *row;
+
+    if (sigma < 64)
+        return 0;
+    if (sigma > OL_CQ_SMAX)
+        sigma = OL_CQ_SMAX;
+    t.lw = 4 * w;
+    t.lh = h;
+    t.rng = o->rng;
+    t.acc = o->acc;
+    t.ring = o->ring;
+    t.done = 0;
+    ol_box_plan(sigma, &r, &a);
+    ol_box_weights(r, a, &ia, &ib);
+    ol_ranges(&t, plane);
+    o->all += 2 * OL_BOX_PASSES * 4 * w * h;
+    for (k = 0; k < OL_BOX_PASSES && !stop; k++) {
+        for (y = 0, rg = o->rng, row = plane; y < h; y++, rg += 2, row += 4 * w) {
+            if (rg[0] >= rg[1])
+                continue;                   /* a row of 0 stays 0 */
+            s = rg[0] / 4;                  /* the range in cells, widened by r + 1 */
+            e = (rg[1] + 3) / 4;
+            s = s > r + 1 ? s - r - 1 : 0;
+            e = e + r + 1 < w ? e + r + 1 : w;
+            ol_box_rowp((u32 *)row, w, s, e, r, ia, ib, (u32 *)o->tmp);
+            ol_box_rowp((u32 *)row + 1, w, s, e, r, ia, ib, (u32 *)o->tmp);
+            rg[0] = (u16)(4 * s);
+            rg[1] = (u16)(4 * e);
+            t.done += 4 * (e - s);
+        }
+        stop = o->pace && o->pace(o->ctx, OL_ROWS);
+        if (!stop) {
+            ol_box_cols(&t, plane, r, ia, ib);
+            stop = o->pace && o->pace(o->ctx, OL_COLS);
+        }
+    }
+    o->done += t.done;
+    return stop;
+}
+
+/* The sums blurred by the sigma sc (the tail's pixels - OL_TAIL layer pixels - Q8; OL_CQ / OL_TAIL times fewer in the
+ * colour's plane). 0, or 1 - stopped */
 static inline u32 ol_colour_blur(ol_t *o, u32 sc)
 {
-    u32 k, n4 = o->tw * o->th;
-
-    for (k = 0; k < 4; k++)
-        if (ol_plane_blur(o, o->pq + k * n4, sc))
-            return 1;
-    return 0;
+    return ol_gauss4(o, o->pq, o->qw, o->qh, (sc * OL_TAIL + OL_CQ / 2) / OL_CQ);
 }
 
-/* A cell's chromaticity times the share s (Q8): (2 A - D) s / (4 (Y + OL_COL_SOFT)) - about (sum S'(Cb - 128) / sum S' Y)
- * s 128 / 256 in Q7 (A = sum S' Cb / 256, D = sum S', Y = sum S' Y / 256), clamped to +-127; into the first two planes as
- * 128 + it */
+/* A cell's chromaticity times the share s (Q8): (2 A - D) s / (4 (Y + OL_COL_SOFT 2^cqk)) - about (sum S'(Cb - 128) / sum S' Y)
+ * s 128 / 256 in Q7 (A = sum S' Cb / 256, D = sum S', Y = sum S' Y / 256), clamped to +-127; into qc[] (after the
+ * plane) as 128 + it, Cb | Cr << 16. After qc[] the largest |Cb - 128|, |Cr - 128| of each row of cells (u16) and of
+ * each cell (u8): ol_colour_row's bounds. The products by OL_MUL: their low word is the signed product's */
 static OL_KERNEL void ol_colour_ratio(ol_t *o, u32 s)
 {
-    u32 i, n4 = o->tw * o->th;
-    u16 *qa = o->pq, *qb = qa + n4, *qy = qb + n4, *qd = qy + n4;
+    u32 n = o->qw * o->qh, x, m, v;
+    const u16 *q = o->pq;
+    u32 *qc = (u32 *)(o->pq + 4 * n), *e = qc + n;
+    u16 *rd = (u16 *)e;
+    u8 *cd = (u8 *)(rd + o->qh);
     s32 a, b, d, y;
 
-    for (i = 0; i < n4; i++) {
-        d = qd[i];
-        y = qy[i];
-        y += OL_COL_SOFT;
-        a = (2 * (s32)qa[i] - d) * (s32)s / (4 * y);
-        b = (2 * (s32)qb[i] - d) * (s32)s / (4 * y);
-        qa[i] = (u16)(128 + (a < -127 ? -127 : a > 127 ? 127 : a));
-        qb[i] = (u16)(128 + (b < -127 ? -127 : b > 127 ? 127 : b));
-    }
+    o->cpair = ~0u;                         /* ol_colour_row's bounds made again */
+    do {
+        for (x = o->qw, m = 0; x; x--) {
+            d = q[3];
+            y = 4 * (q[2] + (OL_COL_SOFT << o->cqk));
+            a = (s32)OL_MUL(2 * (s32)q[0] - d, s) / y;
+            b = (s32)OL_MUL(2 * (s32)q[1] - d, s) / y;
+            a = a < -127 ? -127 : a > 127 ? 127 : a;
+            b = b < -127 ? -127 : b > 127 ? 127 : b;
+            *qc++ = (u32)(128 + a) | (u32)(128 + b) << 16;
+            a = a < 0 ? -a : a;
+            b = b < 0 ? -b : b;
+            v = (u32)(a > b ? a : b);
+            *cd++ = (u8)v;
+            m = v > m ? v : m;
+            q += 4;
+        }
+        *rd++ = (u16)m;
+    } while (qc != e);
 }
 
-/* The cells' colours enlarged to the layer, bilinearly (as ol_tail_add: weights 3:5, 1:7, 7:1, 5:3, edges held), into
- * pc (Cb | Cr << 8 a pixel). Cb and Cr go as the two halves of one word (each at most 255 x 64: no carry) */
-static OL_KERNEL void ol_colour_up(ol_t *o)
-{
-    u32 y, jy, qy, a, b, w0, w1, j, tw = o->tw, th = o->th, n4 = tw * th, tn = (o->lw + OL_TAIL - 1) / OL_TAIL;
-    u32 va, vb, vc, b5, b7, v, lw = o->lw;
-    const u16 *qa = o->pq, *qb = qa + n4;
-    u32 *col = o->acc;                      /* a row's cells, x8 (tn <= lw) */
-    u16 *out, *end;
+/* ceil(64 / d), d 1..127 (0: 255): the least Bloom's code yb that a colour d from 128 can change - with yb d < 64,
+ * (yb (q - 128) + 64) >> 7 is 0 */
+static const u8 ol_cym64[128] = {
+    255, 64, 32, 22, 16, 13, 11, 10, 8, 8, 7, 6, 6, 5, 5, 5, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
 
-    for (y = 0, jy = 0, qy = 0; y < o->lh; y++) {
-        if (qy < 2) {
-            a = jy ? jy - 1 : 0;
-            b = jy;
-            w0 = qy ? 1 : 3;
-        } else {
-            a = jy;
-            b = jy + 1 < th ? jy + 1 : jy;
-            w0 = qy == 2 ? 7 : 5;
-        }
-        w1 = 8 - w0;
-        for (j = 0; j < tn; j++)
-            col[j] = OL_MUL((u32)qa[a * tw + j] | (u32)qb[a * tw + j] << 16, w0) +
-                     OL_MUL((u32)qa[b * tw + j] | (u32)qb[b * tw + j] << 16, w1);
-        out = o->pc + OL_MUL(y, lw);
-        end = out + lw;
-        for (j = 0, va = col[0]; j < tn && out != end; j++, va = vb) {
-            vb = col[j];
-            vc = j + 1 < tn ? col[j + 1] : vb;
-            b5 = (vb << 2) + vb;
-            b7 = b5 + vb + vb;
-            v = ((va << 1) + va + b5 + 0x00200020u) >> 6;   /* 3a + 5b */
-            *out++ = (u16)((v & 0xff) | (v >> 8 & 0xff00));
-            if (out == end)
-                break;
-            v = (va + b7 + 0x00200020u) >> 6;               /* a + 7b */
-            *out++ = (u16)((v & 0xff) | (v >> 8 & 0xff00));
-            if (out == end)
-                break;
-            v = (b7 + vc + 0x00200020u) >> 6;               /* 7b + c */
-            *out++ = (u16)((v & 0xff) | (v >> 8 & 0xff00));
-            if (out == end)
-                break;
-            v = (b5 + (vc << 1) + vc + 0x00200020u) >> 6;   /* 5b + 3c */
-            *out++ = (u16)((v & 0xff) | (v >> 8 & 0xff00));
-        }
-        if (++qy == OL_TAIL) {
-            qy = 0;
-            jy++;
+/* Bilinear between the cells' centres (pixel OL_CQ j + 3.5 of a row or column): pixel OL_CQ j + r lies between cells j - 1
+ * and j (r 0..3: weights 7:9, 5:11, 3:13, 1:15 in 16ths) or j and j + 1 (r 4..7: 15:1, 13:3, 11:5, 9:7); the edges held */
+static const u8 ol_cq_w0[OL_CQ] = {7, 5, 3, 1, 15, 13, 11, 9};
+
+/* Layer row y's colours at the cells' columns, interpolated along the column (x16), into o->acc[1..qw] with acc[0] =
+ * acc[1] (cell -1 held), and o->crow its first pixel: ol_colour_at's row (once a row, before the row's words). And the
+ * least Bloom's code its colour can change: a colour of the row's cell j is between those of the row's two rows of
+ * cells and of the columns j - 1 .. j + 1, at most d from 128 (ol_colour_ratio's largest), so a code yb with yb d < 64
+ * changes no word there - o->cym[j] = ceil(64 / d), o->cymin the row's least; a row without colour (d 0) is not
+ * interpolated (cymin 256) */
+static OL_KERNEL void ol_colour_row(ol_t *o, u32 y)
+{
+    u32 qw = o->qw, r = y & (OL_CQ - 1), j = y / OL_CQ, a, b, w0, d, prev, cur, next;
+    const u32 *ra, *rb, *qc = (const u32 *)(o->pq + 4 * qw * o->qh);
+    const u16 *rd = (const u16 *)(qc + qw * o->qh);
+    const u8 *da, *db;
+    u32 *c = o->acc + 1, *e = c + qw;
+    u8 *cm = o->cym;
+
+    w0 = ol_cq_w0[r];
+    if (r < OL_CQ / 2) {
+        a = j ? j - 1 : 0;
+        b = j;
+    } else {
+        a = j;
+        b = j + 1 < o->qh ? j + 1 : j;
+    }
+    d = rd[a] > rd[b] ? rd[a] : rd[b];
+    o->crow = OL_MUL(y, o->lw);
+    o->cymin = d ? ol_cym64[d] : 256;
+    if (!d)
+        return;
+    if (o->cpair != (a | b << 16)) {        /* the bounds of a pair of rows of cells: once for its 8 layer rows */
+        o->cpair = a | b << 16;
+        da = (const u8 *)(rd + o->qh) + OL_MUL(a, qw);
+        db = (const u8 *)(rd + o->qh) + OL_MUL(b, qw);
+        prev = cur = *da > *db ? *da : *db;
+        for (j = 1; j <= qw; j++, prev = cur, cur = next) {
+            next = j < qw ? (da[j] > db[j] ? da[j] : db[j]) : cur;
+            d = prev > cur ? prev : cur;
+            d = next > d ? next : d;
+            *cm++ = ol_cym64[d];
         }
     }
+    ra = qc + OL_MUL(a, qw);
+    rb = qc + OL_MUL(b, qw);
+    do {
+        *c++ = (*rb << 4) + OL_MUL(*ra - *rb, w0);  /* ra w0 + rb w1: each half at most 255 x 16 (ol_colour_at) */
+        ra++;
+        rb++;
+    } while (c != e);
+    o->acc[0] = o->acc[1];
+}
+
+/* The colour at pixel x of the row ol_colour_row made: Cb | Cr << 16, each 128 + Q7 (rounded; each half at most
+ * 255 x 256 + 128: no carry). The packed words' difference may borrow between the halves: the sum is the true one all
+ * the same (each true half in 0..65535) */
+static OL_INLINE u32 ol_colour_at(const ol_t *o, u32 x)
+{
+    u32 r = x & (OL_CQ - 1), w0 = ol_cq_w0[r];
+    const u32 *c = o->acc + x / OL_CQ + (r >= OL_CQ / 2);
+
+    return ((c[1] << 4) + OL_MUL(c[0] - c[1], w0) + 0x00800080u) >> 8 & 0x00ff00ffu;   /* c0 w0 + c1 (16 - w0) */
 }
 
 /* The bilinear weights (x8) of OL_TAIL = 4: layer pixel 4j + q lies at j + (q - 1.5) / 4 of the tail's cell centres,
@@ -1517,6 +1697,7 @@ static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
         else
             o->cw[hy] = ol_clamp8(128 + (hy * p->hcb >> 8)) << (8 * p->pcb) | ol_clamp8(128 + (hy * p->hcr >> 8)) <<
                         (8 * p->pcr);
+        o->cq[hy] = ((o->cw[hy] >> (8 * p->pcb) & 0xff) | (o->cw[hy] >> (8 * p->pcr) & 0xff) << 16) + 0x01000100u;
     }
     o->hk = p->hcore;
     o->bq = p->bcol != 0;
@@ -1531,34 +1712,20 @@ static inline void ol_word_tables(ol_t *o, const ol_par_t *p)
         ol_curve(o->kh, p->htoe, p->hmax);
     o->neutral = ol_neutral(p);
     o->ys = 8 * p->py;
+    o->scb = 8 * p->pcb;
+    o->scr = 8 * p->pcr;
 }
 
 /* The layer word of a pixel with the blurs b (Bloom) and h (Halation) and its own Y code c (ol_word_tables made): the
  * added light in Y, the halation's colour in Cb and Cr. Each added light through its strength's curve when it has one
  * (ol_curve), then weighted by the darkness of the place (Bloom's weight 256 - none - unless bdark: (v 256) >> 8 is v).
  * The halation's code is what it adds over the light before it: over Bloom's (the first version), or over the place's
- * own (hfirst: its colour does not fade under a strong Bloom) */
-static inline u32 ol_word_q(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c, u32 q);
-
-static inline u32 ol_word_of(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c)
+ * own (hfirst: its colour does not fade under a strong Bloom). ol_word_parts: the word's Y byte (returned), the index of
+ * its chroma in cw[] and cq[] (*hy: the halation's code, weighted for its colour) and Bloom's code (*yb: what Bloom
+ * adds to Y) */
+static OL_INLINE u32 ol_word_parts(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c, u32 *hy, u32 *yb)
 {
-    return ol_word_q(o, p, b, h, c, 0x8080);
-}
-
-/* Bloom's colour into a word's chroma bytes w (card170): Cb, Cr + Bloom's code yb times the colour q of the place (Cb |
- * Cr << 8, 128 + Q7 chroma a unit of Y: ol_colour_up), clamped */
-static inline u32 ol_bloom_chroma(const ol_par_t *p, u32 w, u32 yb, u32 q)
-{
-    s32 cb = (s32)(w >> (8 * p->pcb) & 0xff) + (((s32)yb * ((s32)(q & 0xff) - 128) + 64) >> 7);   /* rounded: no bias */
-    s32 cr = (s32)(w >> (8 * p->pcr) & 0xff) + (((s32)yb * ((s32)(q >> 8) - 128) + 64) >> 7);
-
-    return ol_clamp8(cb) << (8 * p->pcb) | ol_clamp8(cr) << (8 * p->pcr);
-}
-
-/* ol_word_of with Bloom's colour q of the place (o->bq; 0x8080 - none) */
-static inline u32 ol_word_q(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c, u32 q)
-{
-    u32 base = o->lin[c], t1, t2, e1, e2, ab, ah, w;
+    u32 base = o->lin[c], t1, t2, e0, e1, e2, ab, ah;
 
     ab = OL_MUL(b, p->gb) >> 8;
     ah = OL_MUL(h, p->gh) >> 8;
@@ -1579,21 +1746,47 @@ static inline u32 ol_word_q(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 
     t2 = t1 + ah;
     if (t2 > OL_ONE)
         t2 = OL_ONE;
+    e0 = o->enc[base];
     e1 = o->enc[t1];
     e2 = o->enc[t2];
-    t1 = p->hfirst ? e1 - o->enc[base] : e2 - e1;   /* the halation's code */
+    if (p->hfirst) {                        /* the halation's code; Bloom's: the second light's, or the first's */
+        t1 = e1 - e0;
+        *yb = e2 - e1;
+    } else {
+        t1 = e2 - e1;
+        *yb = e1 - e0;
+    }
     if (o->hk)                              /* its colour weighted by darkness once more: a lamp's core stays white */
         t1 = OL_MUL(t1, o->wd[c]) >> 8;
-    w = o->cw[t1];
-    if (o->bq)                              /* Bloom's code: the second light's, or the first's */
-        w = ol_bloom_chroma(p, w, p->hfirst ? e2 - e1 : e1 - o->enc[base], q);
-    return (e2 - o->enc[base]) << o->ys | w;
+    *hy = t1;
+    return (e2 - e0) << o->ys;
 }
 
-/* The word of pixel i; nothing added - the neutral word (what ol_word_of gives then) */
-static inline u32 ol_word(const ol_t *o, const ol_par_t *p, u32 i)
+/* The chroma bytes of a word with Bloom's colour (card170): the halation's chroma cq[hy] (Cb | Cr << 16), plus Bloom's
+ * code yb times the colour q of the place (Cb | Cr << 16, each 128 + Q7 chroma a unit of Y: ol_colour_at), rounded,
+ * clamped, at the bytes' positions. Cb + ((yb (q - 128) + 64) >> 7) is taken as ((yb q + 64) >> 7) - yb (the same: 128 yb
+ * is a multiple of 128) for both halves at once: one product (yb q + 64 below 65536: no carry), the halves biased by 256
+ * in cq[] (each 1..1019 then); a half outside 256..511 is clamped */
+static OL_INLINE u32 ol_bloom_chroma(const ol_t *o, u32 hy, u32 yb, u32 q)
 {
-    return o->pb[i] | o->ph[i] ? ol_word_q(o, p, o->pb[i], o->ph[i], o->y[i], o->bq ? o->pc[i] : 0x8080) : o->neutral;
+    u32 v = o->cq[hy] + ((OL_MUL(yb, q) + 0x00400040u) >> 7 & 0x01ff01ffu) - (yb | yb << 16);
+
+    if ((v & 0xff00ff00u) != 0x01000100u)
+        return ol_clamp8((s32)(v & 0xffff) - 256) << o->scb | ol_clamp8((s32)(v >> 16) - 256) << o->scr;
+    return (v & 0xff) << o->scb | (v >> 16 & 0xff) << o->scr;
+}
+
+/* The word with Bloom's colour q of the place (o->bq; OL_QN - none) */
+static inline u32 ol_word_q(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c, u32 q)
+{
+    u32 hy, yb, y = ol_word_parts(o, p, b, h, c, &hy, &yb);
+
+    return y | (o->bq && yb && q != OL_QN ? ol_bloom_chroma(o, hy, yb, q) : o->cw[hy]);
+}
+
+static inline u32 ol_word_of(const ol_t *o, const ol_par_t *p, u32 b, u32 h, u32 c)
+{
+    return ol_word_q(o, p, b, h, c, OL_QN);
 }
 
 /* The first pixel from k on, below n, that gets something (pb or ph not 0); n - none. Two pixels a step where the planes
@@ -1627,31 +1820,69 @@ static OL_KERNEL void ol_fill32(volatile u32 *d, volatile u32 *e, u32 v)
     } while (d != e);
 }
 
-/* The words of a run of lit pixels from k (pb or ph not 0 at k) into row, until a pixel with nothing or n: the next
- * pixel. One loop, the word's arithmetic inline (no call a pixel: with Bloom's tail most of a layer is lit) */
-static OL_KERNEL u32 ol_words_lit(const ol_t *o, const ol_par_t *p, u32 i, volatile u32 *row, u32 k, u32 n)
+/* The chroma bytes of a lit pixel at x of the row ol_colour_row made, where Bloom adds a code (hb: the halation's
+ * code hy | Bloom's code yb << 16, yb not 0): the halation's chroma with Bloom's colour there (ol_colour_at,
+ * ol_bloom_chroma; a neutral colour adds nothing). Out of the words' loop: their few registers stay with the word's
+ * arithmetic */
+static OL_KERNEL u32 ol_word_colour(const ol_t *o, u32 x, u32 hb)
 {
-    const u16 *pb = o->pb + i, *ph = o->ph + i, *pc = o->pc + i;
+    u32 q = ol_colour_at(o, x);
+
+    return q == OL_QN ? o->cw[hb & 0xffff] : ol_bloom_chroma(o, hb & 0xffff, hb >> 16, q);
+}
+
+/* The word of pixel i (as ol_words gives it); nothing added - the neutral word (what ol_word_of gives then). With
+ * Bloom's colour: a pixel of the row ol_colour_row made */
+static inline u32 ol_word(const ol_t *o, const ol_par_t *p, u32 i)
+{
+    u32 hy, yb, w;
+
+    if (!(o->pb[i] | o->ph[i]))
+        return o->neutral;
+    w = ol_word_parts(o, p, o->pb[i], o->ph[i], o->y[i], &hy, &yb);
+    return w | (o->bq && yb >= o->cymin && yb >= o->cym[(i - o->crow) / OL_CQ] ? ol_word_colour(o, i - o->crow, hy |
+                yb << 16) : o->cw[hy]);
+}
+
+/* The words of a run of lit pixels from k (pb or ph not 0 at k) into row, until a pixel with nothing or n: the next
+ * pixel. One loop, the word's arithmetic inline (no call a pixel: with Bloom's tail most of a layer is lit). With Bloom's
+ * colour (o->bq: the row's colours made, ol_colour_row) a pixel where Bloom adds a code its colour may change (from
+ * o->cymin and its column's o->cym on) takes the colour there (ol_word_colour), *nc counts those */
+static OL_KERNEL u32 ol_words_lit(const ol_t *o, const ol_par_t *p, u32 i, volatile u32 *row, u32 k, u32 n, u32 *nc)
+{
+    const u16 *pb = o->pb + i, *ph = o->ph + i;
     const u8 *y = o->y + i;
+    u32 hy, yb, w, x0, c = 0;
 
     if (o->bq) {
+        x0 = i - o->crow;
         do {
-            row[k] = ol_word_q(o, p, pb[k], ph[k], y[k], pc[k]);
+            w = ol_word_parts(o, p, pb[k], ph[k], y[k], &hy, &yb);
+            if (yb >= o->cymin && yb >= o->cym[(x0 + k) / OL_CQ]) {
+                w |= ol_word_colour(o, x0 + k, hy | yb << 16);
+                c++;
+            } else {
+                w |= o->cw[hy];
+            }
+            row[k] = w;
         } while (++k < n && (pb[k] | ph[k]));
+        *nc += c;
         return k;
     }
     do {
-        row[k] = ol_word_of(o, p, pb[k], ph[k], y[k]);
+        w = ol_word_parts(o, p, pb[k], ph[k], y[k], &hy, &yb);
+        row[k] = w | o->cw[hy];
     } while (++k < n && (pb[k] | ph[k]));
     return k;
 }
 
 /* n words of the layer from pixel i into row (each written once). Most of a layer gets nothing (no source near): those
- * words are the neutral one, in runs, without the word's arithmetic */
-static OL_KERNEL void ol_words(const ol_t *o, const ol_par_t *p, u32 i, volatile u32 *row, u32 n)
+ * words are the neutral one, in runs, without the word's arithmetic. With Bloom's colour the pixels are of the row
+ * ol_colour_row made. Returns the pixels that took Bloom's colour */
+static OL_KERNEL u32 ol_words(const ol_t *o, const ol_par_t *p, u32 i, volatile u32 *row, u32 n)
 {
     const u16 *pb = o->pb + i, *ph = o->ph + i;
-    u32 k = 0, j;
+    u32 k = 0, j, nc = 0;
 
     while (k < n) {
         j = ol_quiet(pb, ph, k, n);
@@ -1659,8 +1890,9 @@ static OL_KERNEL void ol_words(const ol_t *o, const ol_par_t *p, u32 i, volatile
             ol_fill32(row + k, row + j, o->neutral);
         if (j == n)
             break;
-        k = ol_words_lit(o, p, i, row, j, n);
+        k = ol_words_lit(o, p, i, row, j, n, &nc);
     }
+    return nc;
 }
 
 /* The test pattern (substage L3): eight bands across the layer; in band k < 4 byte k is 0x60 over the neutral word,
