@@ -303,8 +303,10 @@ typedef struct {
     /* API 20. The optics rows of the look's column (OMK_EDIT_OPTICS in look_edits' groups): the strengths 0..OMK_OPTICS_MAX
      * of entry `entry`, the one the UI shows, by row (OMK_OPTICS_BLOOM, OMK_OPTICS_HALATION; count OMK_OPTICS_ROWS). The rows
      * show them, a dial's change comes back as OMK_LOOK_EDIT (OMK_EDIT_OPTICS); core keeps the chosen entry's strengths for
-     * the look's stills. Only the owner of the look; copied. 0; -1 not the owner or bad; -2 the rows are not available on
-     * this firmware */
+     * the look's stills. The rows keep every entry's strengths given and show them at once when a dial chooses that entry
+     * (the column is drawn then, before the module answers): a module gives all entries' at its start, the chosen entry's
+     * last - core takes the last ones given as the chosen entry's. Only the owner of the look; copied. 0; -1 not the owner
+     * or bad; -2 the rows are not available on this firmware */
     int (*look_optics)(omk_mod *m, u32 entry, const u8 *strength, u32 count);
 } omk_api;
 
