@@ -76,8 +76,9 @@ done
 
 # The scenario without hands (core/handsfree.c), each case a start of its own: the hold, the USB dialog answered, the
 # result file and the restart (full); MTP asked for once at the start after it (next); connected to the computer before
-# the hold (missed); the application stuck, the power-off job not taken, the watchdog (stuck); not from OMKIT.INI (ini)
-for case in full next missed stuck ini; do
+# the hold (missed); the application stuck, the power-off job not taken, the watchdog (stuck); a step not understood: the
+# end at once (badstep); not from OMKIT.INI (ini)
+for case in full next missed stuck badstep ini; do
     mkdir "$tmp/hands_$case"
     out=$("$BIN/test_shoot" "$tmp/hands_$case" hands $case 2>&1)
     if [ "$out" = ok ]; then pass "core: hands-free ($case)"; else fail "core: hands-free ($case)"; echo "$out" | sed 's/^/        /'; fi

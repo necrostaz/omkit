@@ -272,6 +272,17 @@ class SessionSteps(unittest.TestCase):
         self.assertIn("FAILED at 'hands-free run'", w.said[-1])
         self.assertIn("the camera did not come to shooting in time", w.said[-1])
 
+    def test_scenario_checked_before_the_camera(self):
+        self.assertIsNone(omkdebug.scenario_problem("look:Kodak Ektachrome E100 Night, keep, " + "keep, " * 14))
+        self.assertIn("at most 16", omkdebug.scenario_problem("keep, " * 17))
+        w = World()
+        a = Args(scenario="keep, look:" + "x" * 32, hands_free=True, restart=True, wait=True)
+        rc = self.make(w, user=False).run(a)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAILED at 'scenario check'", w.said[-1])
+        self.assertIn("step 2 'look:xxx", w.said[-1])
+        self.assertNotIn("OMKIT\\SHOOT.RUN", w.files)
+
     def test_hands_free_camera_not_back(self):
         w = World()
         w.end_restart = False                               # hangs, or stays in charge only

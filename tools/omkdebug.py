@@ -948,6 +948,22 @@ def shoot_run_text(steps: str, shots: int | None, start_delay: int | None, sessi
     return ("\r\n".join(lines) + "\r\n").encode("ascii")
 
 
+SCENARIO_STEPS = 16                         # core/shoot.c: SHOOT_STEPS steps in one scenario
+LOOK_NAME_MAX = 31                          # ... and a look entry's name in look:<name> (as look_list takes it)
+
+
+def scenario_problem(steps: str) -> str | None:
+    """What core would refuse in a scenario's steps, told before the camera restarts for it (a scenario core does not
+    understand never starts: a session without hands would wait for it in vain); None - nothing seen"""
+    parts = [x.strip() for x in steps.split(",") if x.strip()]
+    if len(parts) > SCENARIO_STEPS:
+        return f"{len(parts)} steps, core takes at most {SCENARIO_STEPS}"
+    for i, x in enumerate(parts, 1):
+        if x[:5].lower() == "look:" and len(x[5:]) > LOOK_NAME_MAX:
+            return f"step {i} '{x}': a look's name is at most {LOOK_NAME_MAX} characters"
+    return None
+
+
 def parse_result(data: bytes) -> dict:
     """OMKIT\\SHOOT.END: key=value lines, padded with spaces to a fixed length"""
     return {k.strip(): v.strip() for k, v in parse_info(data.decode("ascii", "replace")).items()}
@@ -1201,6 +1217,9 @@ class Session:
         hands = getattr(a, "hands_free", False)
         failed = None                       # hands-free: the scenario's failure, told after the logs are pulled
         try:
+            if a.scenario is not None and scenario_problem(a.scenario):
+                step("scenario check")
+                raise StepFailed("scenario: " + scenario_problem(a.scenario))
             step("connect")
             before = self.wait_camera(a.connect_timeout, "connect", "connect: no camera yet - connect it and choose "
                                       "MTP in its USB dialog")
