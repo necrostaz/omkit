@@ -98,6 +98,8 @@ static u32 nblocks, now_ms = 1000;
 static u32 pace, last_ok_ms, refused, slept_ms;   /* pace: the ISP service refuses tables sooner than 40 ms after the last */
 static omk_look_edits last_edits;
 static u8 last_optics[OMK_OPTICS_ROWS];     /* the last strengths given to core (look_optics) */
+static u8 optics_of[OMK_LOOK_MAX][OMK_OPTICS_ROWS];    /* ... the last ones of each entry, and how often given */
+static u32 optics_n[OMK_LOOK_MAX];
 static void (*tick_fn)(void *);
 
 static void f_log(omk_mod *m, int level, const char *fmt, ...)
@@ -393,6 +395,22 @@ static int f_look_edits(omk_mod *m, const omk_look_edits *e)
     return 0;
 }
 
+/* The optics strengths at the module's start (FILMLOOK 1.13): every preset's given once - the rows show a preset's at
+ * once when a dial chooses it, before its apply - and the chosen one's last (core keeps the last as the chosen's) */
+static int optics_all_given(u32 chosen)
+{
+    int i, last = -1;
+    u32 k;
+
+    for (i = 0; i < (int)ntrace; i++)
+        if (trace[i].what == T_OPTICS)
+            last = i;
+    for (k = 0; k < count; k++)
+        if (optics_n[k] != 1)
+            return 0;
+    return count_of(T_OPTICS) == count && last >= 0 && trace[last].arg == chosen && first_of(T_OPTICS) > first_of(T_LIST);
+}
+
 static int f_look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 n)
 {
     (void)m;
@@ -400,6 +418,10 @@ static int f_look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 n)
         return -1;
     note(T_OPTICS, entry, 0);
     memcpy(last_optics, strength, OMK_OPTICS_ROWS);
+    if (entry < OMK_LOOK_MAX) {
+        memcpy(optics_of[entry], strength, OMK_OPTICS_ROWS);
+        optics_n[entry]++;
+    }
     return 0;
 }
 
@@ -500,6 +522,7 @@ static void run_first(void)
     CHECK(!count_of(T_OVERRIDE) && !count_of(T_LOOK_SET) && !count_of(T_STOCK));
     CHECK(count_of(T_LIST) == 1 && trace[first_of(T_LIST)].arg == (count << 8 | 0));
     CHECK(pending == NOTHING && tick_fn == tick);
+    CHECK(optics_all_given(0));             /* no store: the first preset chosen */
     CHECK(strstr(logtext, " presets in OMKIT\\FILMLOOK\\") && strstr(logtext, " cassette pictures, 0 presets without one"));
 
     /* the user chooses the look with preset CHOSEN + 1 and moves the shadows of its curve */
@@ -514,14 +537,14 @@ static void run_first(void)
     /* the optics rows: shown (their group with the editors), the chosen preset's strengths given to core at its apply;
      * Bloom 3 - kept with the preset's edits and given to core at once, the tables not touched; a strength past the top
      * or a row past the last is not taken */
-    CHECK(optics_on && last_edits.groups >> OMK_EDIT_OPTICS & 1 && count_of(T_OPTICS) == 3);   /* start, on, the edit */
-    CHECK(first_of(T_OPTICS) > first_of(T_LIST) && trace[first_of(T_OPTICS)].arg == 0 && !last_optics[0] && !last_optics[1]);
+    CHECK(optics_on && last_edits.groups >> OMK_EDIT_OPTICS & 1 && count_of(T_OPTICS) == count + 2);   /* start, on, edit */
+    CHECK(!last_optics[0] && !last_optics[1]);
     on_look(OMK_LOOK_EDIT, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, OMK_OPTICS_BLOOM, 3), 0);
     on_look(OMK_LOOK_EDIT, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, OMK_OPTICS_HALATION, 6), 0);
     on_look(OMK_LOOK_EDIT, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, 2, 1), 0);
     tick(0);
     CHECK(presets[CHOSEN].e.optics[OMK_OPTICS_BLOOM] == 3 && !presets[CHOSEN].e.optics[OMK_OPTICS_HALATION]);
-    CHECK(count_of(T_OPTICS) == 4 && last_optics[OMK_OPTICS_BLOOM] == 3 && !last_optics[OMK_OPTICS_HALATION]);
+    CHECK(count_of(T_OPTICS) == count + 3 && last_optics[OMK_OPTICS_BLOOM] == 3 && !last_optics[OMK_OPTICS_HALATION]);
     CHECK(count_of(T_OVERRIDE) == 2 && pending == NOTHING);
     CHECK(strstr(logtext, "preset 6: bloom 3") && !strstr(logtext, "halation 6"));
     store_write();
@@ -675,6 +698,9 @@ static void run_again(const char *what)
         CHECK(presets[current].e.tone[0] == 3);            /* the stored edit is back, by the file's name and CRC */
         CHECK(presets[current].e.optics[OMK_OPTICS_BLOOM] == (format2 ? 0 : 3) && !presets[current].e.optics[1]);
         CHECK(trace[first_of(T_LIST)].arg == (count << 8 | CHOSEN));
+        CHECK(optics_all_given(CHOSEN));    /* the stored strengths: the chosen preset's, the others 0 */
+        for (i = 0; i < count; i++)
+            CHECK(optics_of[i][OMK_OPTICS_BLOOM] == (i == CHOSEN && !format2 ? 3 : 0) && !optics_of[i][OMK_OPTICS_HALATION]);
         CHECK(active == 1 && pending == APPLY);
         CHECK(strstr(logtext, "its tables are on, before the presets are read"));
         CHECK(strstr(logtext, "edits of 1 presets restored") && strstr(logtext, "look restored, preset 6 '"));
@@ -684,7 +710,7 @@ static void run_again(const char *what)
         CHECK(pending == NOTHING && count_of(T_OPEN) == opens);    /* no file read for the first apply */
         CHECK(count_of(T_OVERRIDE) == 2 && !memcmp(blocks[0], blocks[1], ISPB_SIZE));   /* the same tables, edited */
         CHECK(count_of(T_EDITS) == 1 && last_edits.entry == CHOSEN && last_edits.tone[0] == 3);
-        CHECK(count_of(T_OPTICS) == 2 && trace[first_of(T_OPTICS)].arg == CHOSEN &&   /* at the start and the first tick */
+        CHECK(count_of(T_OPTICS) == count + 1 && optics_n[CHOSEN] == 2 &&   /* at the start and the first tick */
               last_optics[OMK_OPTICS_BLOOM] == (format2 ? 0 : 3) && !last_optics[OMK_OPTICS_HALATION]);
         CHECK(strstr(logtext, "preset 6 '") && strstr(logtext, ") on, edited"));
         return;

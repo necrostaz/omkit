@@ -125,13 +125,19 @@ static void grain_publish(void)
         api->log(self, OMK_LOG_WARN, "grain not given to core, code %d", rc);
 }
 
-/* The chosen preset's optics strengths to core: the rows show them, core keeps them for the look's stills */
-static void optics_publish(void)
+/* The chosen preset's optics strengths to core: the rows show them, core keeps them for the look's stills. all: every
+ * other preset's first - the rows keep each preset's and show them at once when a dial chooses it (the column is drawn
+ * in that step, before the preset's apply); core keeps the last ones given as the chosen preset's, so those go last */
+static void optics_publish(u32 all)
 {
+    u32 i;
     int rc;
 
     if (!optics_on || current >= count)
         return;
+    for (i = 0; all && i < count; i++)
+        if (i != current)
+            api->look_optics(self, i, presets[i].e.optics, OMK_OPTICS_ROWS);
     rc = api->look_optics(self, current, presets[current].e.optics, OMK_OPTICS_ROWS);
     if (rc)
         api->log(self, OMK_LOG_WARN, "optics strengths not given to core, code %d", rc);
@@ -491,7 +497,7 @@ static int apply(void)
         exif_text(work);
         show();
         grain_publish();
-        optics_publish();
+        optics_publish(0);
     }
     return rc;
 }
@@ -727,8 +733,10 @@ static void on_look(u32 event, u32 arg, void *ctx)
         break;
     case OMK_LOOK_ENTRY:
         if (arg < count) {
-            if (!edits_save && current < count && arg != current)
+            if (!edits_save && current < count && arg != current) {
                 edits_reset(&presets[current].e, OMK_EDIT_GROUPS);    /* an edit lasts while its preset stays chosen */
+                optics_publish(0);          /* the rows keep its strengths (now 0) for a dial's way back to it */
+            }
             current = arg;
             pending = APPLY;
             edit_only = 0;
@@ -764,7 +772,7 @@ static void on_look(u32 event, u32 arg, void *ctx)
             p->e.optics[i] = (u8)v;
             api->log(self, OMK_LOG_INFO, "preset %u: %s %d", current + 1, i == OMK_OPTICS_BLOOM ? "bloom" : "halation", v);
             save_edits(current);
-            optics_publish();
+            optics_publish(0);
             if (base_of == current)
                 exif_text(work);
             return;
@@ -937,7 +945,7 @@ int module_init(const omk_api *a, omk_mod *m)
     rc = api->look_list(self, names, count, current);
     if (rc)
         api->log(self, OMK_LOG_WARN, "presets not given to the editor, code %d", rc);
-    optics_publish();                       /* now, not at the first apply: the column the UI builds when the user steps
+    optics_publish(1);                      /* now, not at the first apply: the column the UI builds when the user steps
                                                onto the look has the optics rows only once core has had their values */
     if (active && count) {
         rc = look_tried ? look_rc : api->look_set(self, 1);
