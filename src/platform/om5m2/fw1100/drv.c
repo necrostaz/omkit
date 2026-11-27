@@ -427,7 +427,9 @@ u32 drv_power_probe(u32 *w, u32 max)
                 v[5] = *(const volatile u32 *)(p + 172);
         }
     }
-    v[6] = vsc(VSC_RSZ_OSD3) != 0;          /* 1 - the viewfinder: its plane is scaled, the screen's is not */
+    /* 1 - the viewfinder: its plane is scaled, the screen's is not. The only register here, read only when asked for (the
+     * log's probe line); the passing-state checks of every pass (drv_ui_probe) read RAM only */
+    v[6] = max > 6 ? vsc(VSC_RSZ_OSD3) != 0 : 0;
     for (n = 0; n < max && n < 7; n++)
         w[n] = v[n];
     return n;

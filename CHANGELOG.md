@@ -54,6 +54,17 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 - **core 1.45** adds test sessions over USB without hands: during a one-shot scenario the camera stays in charge only
   with the cable in, and it restarts itself into the MTP mode at the end.
 
+### Fixed
+
+- **A camera that does not switch off with the power lever** (issue #2: in the viewfinder the camera could stay on, live
+  view running, until the battery was taken out). The camera was already stuck before the lever: its half-press
+  exposure sequence waits for ever, so the firmware never begins its power-off. While the lever is off and the camera
+  still runs, `core` now writes nothing to the card (before, it wrote the log again 5 s after the lever, just when the
+  battery may be taken out). If the camera stays stuck in that state for 8 s with the shutter released, `core` saves
+  once and asks the firmware for a power-off with a restart, so the camera starts with the lever off and switches off;
+  the watchdog is the last resort (`[core] power_rescue`, on by default). `core` also keeps its card writes out of a
+  half-press, and reads no display register on its regular passes.
+
 ## [0.1.0] - 2026-11-20
 
 First public release, for the OM SYSTEM OM-5 Mark II on firmware 1.1.

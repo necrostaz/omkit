@@ -60,6 +60,7 @@ was:
 | `fw_heap` | switch | `off` | | `on` - when the module memory (the arena) is full, small module buffers may come from the camera's firmware heap, up to `fw_heap_limit` in total. The heap is shared with shooting and the menus: turn it on only if a module reports that it is out of memory. Needs `fw_heap_limit`, otherwise it stays off with a warning. Code and resources never go there, and `core` always leaves at least a quarter of each heap class to the camera |
 | `fw_heap_limit` | size | `256K` in the sample, none without it | | the most the modules may take from the firmware heap. Not a size: a warning, and `fw_heap` stays off |
 | `core_events` | switch | `on` | | how the `core` task waits between its passes: `on` - on an event flag that the power-off and sleep hooks set, so it reacts at once; `off` - a plain 250 ms sleep. A diagnostic switch |
+| `power_rescue` | switch | `on` | | not in the sample. When the power lever is off but the camera does not switch off because it is stuck in a half-press or a transition (the shutter released, nothing being written, 8 s), `core` saves the log and the stores once and asks the firmware for its own power-off with a restart; the camera then starts with the lever off and switches off. If that power-off does not begin, the watchdog resets the camera. `off` - the camera stays on until the battery is taken out. Whatever this key, `core` writes nothing to the card while the lever is off and the camera still runs |
 
 The `[core]` keys below are **diagnostics**, not in the sample:
 

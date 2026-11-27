@@ -464,6 +464,8 @@ int drv_obj_read(u32 kind, u32 id, drv_obj *o);
 int drv_mutex_read(u32 cpu, u32 i, drv_obj *o);
 enum { DRV_UI_HALF = 1, DRV_UI_TRANSIENT = 2 };
 #define DRV_APP_SHOOTING 0x5100
+#define DRV_KEYS_S1_UP 0x02                 /* drv_ui_probe's keys: bit 1 set while the shutter is not half-pressed (camera
+                                               logs: 0x14 with the half-press state 0x5101, 0x16 after it) */
 int drv_ui_probe(u32 *app, u32 *keys);
 
 /* The debug service (core/debug.c, core 1.40).
