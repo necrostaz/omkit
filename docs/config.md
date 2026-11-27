@@ -168,7 +168,7 @@ These are for developers and troubleshooting; the bundled modules need neither.
 [core]
 ; on | off - whether to write the log OMKIT\LOG\CORE.LOG on the card
 log = on
-; error | warn | info - how much detail
+; error | warn | info - how much detail (debug - in a debug build of core only)
 log_level = info
 ; on - if the arena runs out of space, take small module buffers (up to 16K) from the firmware heap.
 ; Requires fw_heap_limit. The heap is shared with shooting: enable only if the arena is too small for modules
@@ -191,7 +191,7 @@ enabled = on
 ; for example: CREATPRF = on
 ```
 
-(A debug build's sample differs in one comment: `; error | warn | info | debug - how much detail`.)
+(The sample is the same in both build kinds.)
 
 In the `OMKIT.INI` of a release and of the card bundle, the `[modules]` section goes on with the bundled modules, in
 the order of `RELEASE_MODULES` in `OMKit/Makefile` (the load order):
