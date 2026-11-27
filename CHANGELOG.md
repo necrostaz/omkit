@@ -10,37 +10,37 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Bloom and Halation are on by default.** Without an `[optics]` section `core` takes the field-tested values, and the
   sample `OMKIT.INI` spells them out; `layer = off` turns the layer off
-  ([docs/config.md](docs/config.md#52-optics)). A release build writes one line a still (`optics: job N: Bloom B,
+  ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#52-optics)). A release build writes one line a still (`optics: job N: Bloom B,
   Halation H, ...`); the layer's probe, bisection, schedule, test strengths and bench are in the debug build only.
 - **Release and debug builds.** `core` and the modules are built in two kinds, chosen by `make BUILD=release` (the
   default) or `BUILD=debug`. A release build has only what the user needs: the debug service over USB, the task dump,
   the test scenario, the probes of the camera's state, the log's `debug` level and the rescue of a stuck camera are
   compiled into the debug build alone, and their settings are read only there. The log's first line names the kind;
   `tools/buildcheck.py` checks that a release image has nothing of the debug build
-  ([docs/build.md](docs/build.md#35-release-and-debug-builds)). The items below marked "debug build" are in that kind
+  ([docs/build.md](https://github.com/necrostaz/omkit/blob/main/docs/build.md#35-release-and-debug-builds)). The items below marked "debug build" are in that kind
   only.
 - **Debug service (core 1.40; debug build), off by default.** With `[debug] enabled = on` in `OMKIT.INI`, the log and snapshots of
   the camera's tasks also go to RAM that survives a reset, and `tools/omkdebug.py` reads them over USB in the MTP mode,
   also after a crash; it reads files of the card, and with `write = on` updates files of the `OMKIT` folder, each
   checked by a CRC-32 read back from the card. `card_writes = off` keeps the log and the stores in RAM only.
-  See [docs/debug.md](docs/debug.md), including its security notes.
+  See [docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md), including its security notes.
 - **Test scenario (core 1.41; debug build), off by default.** `[shoot]` in `OMKIT.INI` takes a series of pictures without the user:
   `core` presses the shutter button by its own path in the camera and chooses a preset of the film look or a profile
   before each step, as the user would. For testing presets
-  ([docs/config.md](docs/config.md#10-shoot-the-test-scenario)).
+  ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#10-shoot-the-test-scenario-debug-build-only)).
 - **A test session over USB (debug build).** With `[debug] write = on`, the computer restarts the camera over USB by the firmware's own
   reboot request (a normal power-off that keeps the settings and unmounts the card, then a wake-up alarm), starts or
   stops the test scenario, and reads the build that runs (`INFO`); `omkdebug.py session` does a whole session: files,
-  scenario, restart, the pictures and the logs ([docs/debug.md](docs/debug.md#6-a-test-session)). A scenario waits until
+  scenario, restart, the pictures and the logs ([docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md#6-a-test-session)). A scenario waits until
   the camera shoots (`[shoot] arm_wait`), and `OMKIT\SHOOT.RUN` starts one at the next power-on only, removed before it
-  runs ([docs/config.md](docs/config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)).
+  runs ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)).
 - **A test session without hands (debug build).** `hands_free = on` in `OMKIT\SHOOT.RUN` keeps the USB cable as charge only for that
   one start, whatever the camera's USB choice (the camera shoots and stays off the computer; its settings are not
   changed), and at the scenario's end `core` writes the result to `OMKIT\SHOOT.END` and restarts the camera, which comes
   back in the MTP mode; a stuck camera application ends it too
-  ([docs/config.md](docs/config.md#102-without-hands-hands_free--on-in-shootrun)). `omkdebug.py session --hands-free`
+  ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#102-without-hands-hands_free--on-in-shootrun)). `omkdebug.py session --hands-free`
   runs such a session and `--pull-log` also takes the RAM log of the power-on before
-  ([docs/debug.md](docs/debug.md#6-a-test-session)).
+  ([docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md#6-a-test-session)).
 - The log names the build at each power-on: `OMKit core <version> <release|debug> (branch@commit)`.
 
 ### Changed
