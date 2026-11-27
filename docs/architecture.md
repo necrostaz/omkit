@@ -89,9 +89,11 @@ run `chkdsk X: /f` (or `fsck.exfat` / `fsck.vfat`) on it.
 
 | Section | Keys |
 |---|---|
-| `[core]` | `log` (on/off), `log_level` (error, warn, info, debug), `fw_heap`, `fw_heap_limit`, `core_events`, `fw_cache_inv`, `taskdump`, `taskdump_every`, `taskdump_base`, `taskdump_stuck`. Unknown keys are reported in the log |
+| `[core]` | `log` (on/off), `log_level` (error, warn, info; debug - debug build only), `fw_heap`, `fw_heap_limit`; debug build only: `core_events`, `fw_cache_inv`, `power_rescue`, `taskdump`, `taskdump_every`, `taskdump_base`, `taskdump_stuck`. Unknown keys are reported in the log |
 | `[modules]` | `enabled` (off: load nothing), then `NAME = on/off` per module; line order is load order |
-| `[grain]` | the grain of the film look's stills: `mask`, `chroma` and test keys (see the template `core` writes) |
+| `[grain]` | the grain of the film look's stills: `mask`, `chroma`; test keys in a debug build only |
+| `[optics]` | Bloom and Halation on the film look's stills: `layer` (on by default) and the settings of the two effects; test keys in a debug build only |
+| `[debug]`, `[shoot]` | debug build only: the debug service over USB, the test scenario (a release build does not read them and says so in one line) |
 | `[NAME]` | a module's own settings, plus two keys `core` reads for every module: `memory` (a size limit, e.g. `512K`) and `event_<event> = off | priority` |
 
 The file is read once at power-on (at most 8 KB and 128 entries); a change takes effect at the next power-on. On a
@@ -265,15 +267,15 @@ to the file. A line is formatted on the caller's stack; under the firmware lock 
 | Property | Value |
 |---|---|
 | Line | `  ms L who: text`, at most 192 bytes (longer lines are cut, `~` at the end) |
-| Levels | E, W, I, D; `log_level` in `[core]` (default info); `log = off` disables it. Info holds what changes state: start, modules, what the user chose, power, failures put right. Lines that repeat with use - one per picture, per dial step or per second in an editor - are debug (core 1.30) |
+| Levels | E, W, I, D (D in a debug build only); `log_level` in `[core]` (default info); `log = off` disables it. Info holds what changes state: start, modules, what the user chose, power, failures put right. Lines that repeat with use - one per picture, per dial step or per second in an editor - are debug (core 1.30) |
 | Ring | 32 KB; a line that does not fit is dropped whole and counted (`log: N lines lost`) |
 | Write | when the log has been quiet for 0.5 s, at least every 3 s; not while the camera writes the card, half-presses (up to 6 s, and 0.5 s after it) or changes state (both build kinds: the application's state is read from memory once a pass, no register), never during power-off or sleep, and not while the power lever is off but the camera did not switch off (the battery may be taken out at any moment; the lines wait in memory) |
 | No card or folder | the file does not open: the next try after 1 s, then 2, 4 ... up to 60 s apart, not at every pass; a write that works, or the camera running again after a sleep or a power-off that did not happen, ends the pauses (`log: the card takes the log again, after N tries without it`). The lines wait in the ring meanwhile |
-| File | `LOG\CORE.LOG`, one for all power-ons: each start appends to it, `core` never removes or cuts it (delete it on a computer when it gets too long). Each power-on begins with an empty line and a header: `======== OMKit core <version> (<branch>@<commit>), <platform>, run <run id>, started <date and time> ========` (the build's branch and commit; the camera clock's date), then, when the modules are loaded, `modules: NAME 1.5, ...` with their versions. Older versions removed the file at each power-on, and `run_logs = on` wrote a file per power-on; that key is gone (ignored), old `XXXXXXXX.LOG` files are left as they are |
+| File | `LOG\CORE.LOG`, one for all power-ons: each start appends to it, `core` never removes or cuts it (delete it on a computer when it gets too long). Each power-on begins with an empty line and a header: `======== OMKit core <version> <release|debug> (<branch>@<commit>), <platform>, run <run id>, started <date and time> ========` (the build's kind, branch and commit; the camera clock's date), then, when the modules are loaded, `modules: NAME 1.5, ...` with their versions. Older versions removed the file at each power-on, and `run_logs = on` wrote a file per power-on; that key is gone (ignored), old `XXXXXXXX.LOG` files are left as they are |
 | Open file | the file stays open between writes (each portion is written and flushed at once), because the first write after an open walks the file's cluster chain from its start - a cost that grows with the file; it is closed after 30 s without lines, at sleep and power-off, and before a file job of the debug service. When the camera mounts the card again (its PC mode over USB), it frees every open file without a write: `core` sees that by the file's identity and opens the log again (`log: ... opened again`), never closing a freed file - its slot may already be another file's. While the card is not mounted nothing is written |
 | After a crash | the run that went down is simply before the next one in the file; the `CORE` store tells whether it ended with a power-off |
 | Power-off | the last lines are written at the card-off point of the power-off |
-| Boot checkpoints | at `debug` level, a few lines (module loading, hook installation) are written to the card at once, so a crash leaves a trace |
+| Boot checkpoints | a debug build at `debug` level: a few lines (module loading, hook installation) are written to the card at once, so a crash leaves a trace |
 
 Modules log only through `api->log`; there are no other log files.
 

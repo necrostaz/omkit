@@ -144,7 +144,7 @@ their addresses are in [fw1100/system.md](fw1100/system.md#4-rtos-services).
 - Names: static tasks have 26-byte records `{char name[24]; u16 number}` in per-CPU tables; `acre_Task` tasks have 18-byte
   records `{char name[16]; u16 id}`, 64 per CPU, in uncached memory.
 
-## 6. The task dump
+## 6. The task dump (debug build only)
 
 When the UI stops responding, the useful evidence is which firmware tasks are waiting, and on what. The firmware has a
 task list command for its debug port, but it uses `ref_tsk`, which takes the kernel lock and sees only its own CPU. OMKit

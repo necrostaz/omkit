@@ -108,7 +108,7 @@ The alternative matrices are computed at power-on from the camera's own ones (ea
 have, so grey stays grey); no camera data is stored in the module. A filter whose matrices cannot be read keeps the
 camera's own (a warning in the log).
 
-`core` also reads `memory` and `event_<event>` in this section: [../../config.md](../../config.md#6-keys-core-reads-in-every-modules-section).
+`core` also reads `memory` and `event_<event>` in this section: [../../config.md](../../config.md#8-keys-core-reads-in-every-modules-section).
 
 ## 5. Log lines
 
@@ -122,7 +122,8 @@ camera's own (a warning in the log).
 | `CREATPRF: picture profiles not available, code N` | the profile service could not start (for example another module owns it): the module stops |
 | `CREATPRF: this camera has no picture profiles support, nothing to do` | the module stops |
 
-More detail (pictures set, the matrices) with `log_level = debug` in `[core]`.
+More detail (pictures set, the matrices) with `log_level = debug` in `[core]`, in a debug build of `core` and of the
+module only (`BUILD=debug`).
 
 ## 6. Technical details
 

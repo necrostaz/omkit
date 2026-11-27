@@ -2,7 +2,7 @@
 
 Everything a module can use: the headers in `src/sdk/include`, the small C library in `src/sdk/lib`, and the build tools.
 The code is the reference: `src/sdk/include/omk_api.h` (the table), `src/core/api.c` (what each slot is bound to) and the
-`core` sources behind them. This page describes API level **18** (`core` 1.24). Rules for modules: [modules.md](modules.md).
+`core` sources behind them. This page describes API level **20** (`core` 1.46). Rules for modules: [modules.md](modules.md).
 
 ## 1. Headers
 
@@ -62,8 +62,8 @@ keep working data that only the module touches in static variables).
 - The table **only grows**: new functions are added at the end, existing slots keep their place and meaning. A function
   that is removed keeps its slot and returns a failure (`overlay_removed`).
 - The build stores the SDK's `OMK_API_VERSION` in the `.OMM` header. `core` refuses to load a module whose level is
-  newer than its own (`needs a newer core API`). A module built with level 19 therefore runs only on a `core` with level
-  19 or later.
+  newer than its own (`needs a newer core API`). A module built with this SDK (level 20) therefore runs only on a `core`
+  with level 20 or later (`core` 1.46 and later); the bundled modules of a release are built so.
 - A module checks in `module_init` that the table is big enough for what it uses, and checks `api->version` before
   calling a function of a later level. The modules in this tree start with
   `if (a->version < OMK_API_VERSION || a->size < sizeof(*a)) return 1;`.

@@ -169,6 +169,16 @@ object of `core` in that `OUT`; a change of `EXTRA` does not, so run `make clean
 options. Module sources build with `-Wall -Wextra -Werror`; `core` with
 `-Wall -Wextra`.
 
+### 3.4. The loader patch description (maintainers only)
+
+Not part of a normal build: `make`, `make card`, `make test` and the release build neither need nor change it.
+`python -X utf8 -m OMKit.src.stub.platform.om5m2.fw1100.gen` (run from the folder that holds `OMKit/`) writes
+`src/stub/platform/om5m2/fw1100/spec.json`, the description of the loader patch
+([platform/om5m2/fw1100/patch.md](platform/om5m2/fw1100/patch.md)). `spec.json` and the loader source `stub.s` are
+the input of the maintainers' patch builder, which needs the official firmware and is not part of OMKit; it makes the
+release's `patch.json` ([release.md](release.md#2-patchjson)). The patched firmware itself is made by the release tool
+on the user's computer.
+
 ### 3.5. Release and debug builds
 
 `core` and the modules are built in two kinds. The kind is chosen at build time by `BUILD`, never by a setting in
@@ -201,16 +211,6 @@ options. Module sources build with `-Wall -Wextra -Werror`; `core` with
   function of the debug kind. `make card` and `make test` run it.
 - The default is `release`, so that a build made without thinking about the kind is never the one with the development
   code. The emulator option `OMK_EMU` needs `BUILD=debug`.
-
-### 3.4. The loader patch description (maintainers only)
-
-Not part of a normal build: `make`, `make card`, `make test` and the release build neither need nor change it.
-`python -X utf8 -m OMKit.src.stub.platform.om5m2.fw1100.gen` (run from the folder that holds `OMKit/`) writes
-`src/stub/platform/om5m2/fw1100/spec.json`, the description of the loader patch
-([platform/om5m2/fw1100/patch.md](platform/om5m2/fw1100/patch.md)). `spec.json` and the loader source `stub.s` are
-the input of the maintainers' patch builder, which needs the official firmware and is not part of OMKit; it makes the
-release's `patch.json` ([release.md](release.md#2-patchjson)). The patched firmware itself is made by the release tool
-on the user's computer.
 
 ## 4. Pictures and data sets
 

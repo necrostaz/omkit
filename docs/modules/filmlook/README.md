@@ -1,6 +1,6 @@
 # FILMLOOK: film looks in the picture mode screen
 
-FILMLOOK (version 1.13, needs core API 16; the grain needs API 17, Bloom and Halation API 20) puts a film look into the
+FILMLOOK (version 1.13, needs core API 20: it is built with that SDK level) puts a film look into the
 camera's picture mode screen. One stock picture mode of the strip - the **slot**, i-Enhance by default - is replaced by
 the look. In its place the user steps with the dials through **presets**: `.ISP` files on the card, each a set of colour
 tables for the camera's image processor, usually made to look like one film. Live view and the pictures take the chosen
@@ -201,7 +201,7 @@ case as below.
 | `optics` | `on` | switch | `off` - no Bloom and Halation rows. The rows also need `enable_edits = on`, core API 20 and `[optics] layer = on` ([optics.md](optics.md#1-turning-them-on)) |
 | `exif` | `off` | switch | `on` - write the preset, its edits and its matrix into the JPEG's UserComment (section 7). For checking a preset on the computer |
 
-Two more keys are read by `core` for every module (`memory`, `event_<event>`): [../../config.md](../../config.md#6-keys-core-reads-in-every-modules-section).
+Two more keys are read by `core` for every module (`memory`, `event_<event>`): [../../config.md](../../config.md#8-keys-core-reads-in-every-modules-section).
 
 The grain's tone mask and colour grain are `core` settings in `[grain]`: [grain.md](grain.md#4-the-tone-mask-and-colour-grain).
 
@@ -290,7 +290,8 @@ FILMLOOK writes its lines to `OMKIT\LOG\CORE.LOG` with the prefix `FILMLOOK:`. T
 
 `core`'s own lines about the look start with `look:` (for example `look: no slot 'x' here; slots: ...`, `look: entry N:
 cassette picture refused: <reason>`), its grain lines with `grain:`, its Bloom and Halation lines with `optics:`
-([optics.md](optics.md#5-log-lines)). More detail with `log_level = debug` in `[core]`.
+([optics.md](optics.md#5-log-lines)). More detail with `log_level = debug` in `[core]`, in a debug build of `core` and of
+the module only (`BUILD=debug`).
 
 ## 9. Limits
 

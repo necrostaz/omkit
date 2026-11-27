@@ -45,9 +45,9 @@ Prerequisites: Python 3.10+ for the builder; the MN10300 toolchain for `make car
 `bash OMKit/toolchain/build-toolchain.sh` once; [build.md](build.md)); `OMKit/LICENSE`, `OMKit/LICENSE-CC-BY-4.0` and `OMKit/NOTICE` for a real release; a clean git tree.
 
 ```sh
-python3 OMKit/release/build_release.py --version 0.1.0              # a release
-python3 OMKit/release/build_release.py --version 0.1.0 --test       # a TEST build (no LICENSE needed, tree may be modified)
-python3 OMKit/release/build_release.py --version 0.1.0 --card DIR   # reuse a built OMKIT folder
+python3 OMKit/release/build_release.py --version <version>          # a release
+python3 OMKit/release/build_release.py --version <version> --test   # a TEST build (no LICENSE needed, tree may be modified)
+python3 OMKit/release/build_release.py --version <version> --card DIR # reuse a built OMKIT folder
 ```
 
 Without `--card` the builder runs `make -C OMKit card BUILD=release` with its own `OUT` and `CARD` in the output folder

@@ -36,6 +36,7 @@ Section `[HELLO]` in `OMKIT.INI`:
 make -C OMKit/src/modules MOD=hello VERSION=1.0 OUT=<dir>     # -> <dir>/HELLO.OMM
 ```
 
-Copy `HELLO.OMM` to `OMKIT\MODULES\`, add `HELLO = on` to `[modules]` and switch the camera on; with
-`log_level = debug` in `[core]` the log shows every step. The build and the API: [../../modules.md](../../modules.md),
+Copy `HELLO.OMM` to `OMKIT\MODULES\`, add `HELLO = on` to `[modules]` and switch the camera on; the log shows
+its steps. Its lines of the debug level need a debug build of `core` and of the module (`BUILD=debug`) and
+`log_level = debug` in `[core]`. The build and the API: [../../modules.md](../../modules.md),
 [../../sdk.md](../../sdk.md).

@@ -1,8 +1,8 @@
 # OMKIT.INI: settings reference
 
 `OMKIT\OMKIT.INI` on the memory card holds the settings of `core` and of the modules. This page lists every key `core`
-reads (core 1.27), what it does, its default and its range, and the rules of the file itself. The settings of a module
-are on that module's page (section 7).
+reads (core 1.46), what it does, its default and its range, and the rules of the file itself. The settings of a module
+are on that module's page (section 9).
 
 **Build kinds.** `core` is built as a release or as a debug build ([build.md](build.md#35-release-and-debug-builds));
 releases and their cards are release builds. The keys, values and sections marked **debug build only** below exist only
@@ -14,11 +14,11 @@ first: [debug] enabled)`; `[optics.A]`..`[optics.F]` count as such sections. Not
 ## 1. Where the file comes from
 
 - `core` reads `OMKIT\OMKIT.INI` once, at power-on. A change takes effect at the next power-on.
-- **A release and the card bundle (`make -C OMKit card`) carry an `OMKIT.INI`**: the sample of section 8 with the
+- **A release and the card bundle (`make -C OMKit card`) carry an `OMKIT.INI`**: the sample of section 10 with the
   bundled modules on, so they run from the first start with their default settings. The file is made from the sample
   in `core`'s source by `tools/cardini.py`; its `[modules]` section ends with a comment and the lines
   `CREATPRF = on`, `FILMLOOK = on` (section 4). Every other line is the sample's.
-- If there is no such file, `core` writes the sample (section 8) and uses it. If the card cannot be written, the defaults
+- If there is no such file, `core` writes the sample (section 10) and uses it. If the card cannot be written, the defaults
   are used and the log says so.
 - **The sample `core` writes loads no modules.** Its `[modules]` section only says `enabled = on`; a module runs only
   after a line `NAME = on` is added for it (section 4). So deleting the file goes back to the defaults of `core` but
@@ -130,24 +130,16 @@ step` or `list`, with a warning, and does not read the others):
 A number out of range is replaced by the default with the warning `grain: KEY = N out of LO..HI, DEF taken`. How the mask
 and the colour grain work in the camera: [platform/om5m2/grain.md](platform/om5m2/grain.md).
 
-### 5.1. `[debug]` (debug build only)
-
-The debug service of `core` 1.40 for developers: a log in RAM that survives a reset, read over USB in the MTP mode,
-optionally no card writes by `core` and file updates over USB. **Off by default**, not in the sample and not in a
-release's `OMKIT.INI`. With `enabled = on`, anyone who connects the camera by USB can read its RAM and the files of the
-`OMKIT` and `DCIM` folders; with `write = on` also replace the files of `OMKIT`. The keys (`enabled`, `card_writes`,
-`write`, `ring_level`, `tasks`, `window_ms`, `window_every`, `stuck_ms`), the security notes and the computer's tool:
-[debug.md](debug.md). An unknown key in `[debug]` gets the warning `config: [debug] KEY unknown`.
-
-### 5.2. `[optics]`
+## 6. `[optics]`
 
 Bloom and Halation on the stills of the film look: a glow around bright places (a diffusion filter) and the red glow of
 film around lamps. `core` makes them; a look module (FILMLOOK) lets the user choose the strength of each per preset - the
 rows Bloom and Halation in the look's column, 0 (off) to 5 ([modules/filmlook/optics.md](modules/filmlook/optics.md)). A
-still whose preset has both at 0 is made as without the layer. The section is read at power-on. **On by default**:
-without an `[optics]` section the values below are taken - the field-tested set, the one the sample spells out (section
-8). What each key does to the picture and when to change it: [modules/filmlook/optics.md section
-6](modules/filmlook/optics.md#6-settings-optics).
+still whose preset has both at 0 is made as without the layer. The section is read at power-on. **The layer is on by
+default, and every preset's strengths start at 0**: the stills do not change until a preset's Bloom or Halation row is
+raised. Without an `[optics]` section the values below are taken - the field-tested set; the sample (section 10) spells
+them out, all but the second Gaussians (`*_sigma2`, `*_mix`), which are off. What each key does to the picture and when
+to change it: [modules/filmlook/optics.md section 6](modules/filmlook/optics.md#6-settings-optics).
 
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
@@ -165,7 +157,7 @@ without an `[optics]` section the values below are taken - the field-tested set,
 | `halation_cb`, `halation_cr` | number | `-24`, `42` | -200..200 | the halation's colour where it is strong (orange), percent |
 | `halation_edge_cb`, `halation_edge_cr`, `halation_edge_code` | number | `-40`, `75`, `70` | -200..200, 0..255 | its colour at the weak edge (red) and the code of the halation from which the strong colour holds (0 - one colour) |
 | `halation_core` | switch as 0/1 | `1` | 0..1 | 1 - a lamp's core stays white |
-| `emission`, `bloom_emission`, `halation_emission` | number | `16`, `4`, `32` | 0..64 | the source: a blown pixel stands for this many whites (0 - only the excess over the threshold). Bloom with few whites glows from bright surfaces too, the halation keeps to lamps. `emission`, when given, is the default of the two |
+| `emission`, `bloom_emission`, `halation_emission` | number | `16`, `4`, `32` | 0..64 | the source: a blown pixel stands for this many whites (0 - only the excess over the threshold). Bloom with few whites glows from bright surfaces too, the halation keeps to lamps. `emission`, when given, is the default of the two: the sample gives `emission = 16`, so a `bloom_emission` or `halation_emission` line taken out of it means 16, not 4 or 32 |
 | `halation_first` | 0/1 | `1` | 0..1 | 1 - the halation takes its colour from the place's own light, Bloom is added after it |
 | `day_mean`, `day_share` | two numbers each | `95, 125` and `6, 14` | 0..255, 0..100 | a day scene: the picture's mean code from..to, or the percent of it at code 200 and above from..to |
 | `day_bloom`, `day_halation` | number | `100`, `100` | 0..100 | percent of the gains on a day scene (100 - the same by day and by night) |
@@ -186,7 +178,16 @@ reports them once: `config: [optics]: N keys are not a release build's and are n
 | `schedule`, sections `[optics.A]`..`[optics.F]` | - | a list of test stages and sets of the keys above, one a press |
 | `probe`, `bisect`, `bisect_from`, `run`, `worker_test`, `bench` | - | the probe of the pipeline's step, its bisection over power-ons, a test of the worker task, a CPU bench in every job. With `probe` above 0 and no `layer` key the layer is off |
 
-## 6. Keys `core` reads in every module's section
+## 7. `[debug]` (debug build only)
+
+The debug service of `core` 1.40 for developers: a log in RAM that survives a reset, read over USB in the MTP mode,
+optionally no card writes by `core` and file updates over USB. **Off by default**, not in the sample and not in a
+release's `OMKIT.INI`. With `enabled = on`, anyone who connects the camera by USB can read its RAM and the files of the
+`OMKIT` and `DCIM` folders; with `write = on` also replace the files of `OMKIT`. The keys (`enabled`, `card_writes`,
+`write`, `ring_level`, `tasks`, `window_ms`, `window_every`, `stuck_ms`, `stuck_mem`), the security notes and the computer's tool:
+[debug.md](debug.md). An unknown key in `[debug]` gets the warning `config: [debug] KEY unknown`.
+
+## 8. Keys `core` reads in every module's section
 
 A module's section is named after the module: `[CREATPRF]`, `[FILMLOOK]`. Besides the module's own keys, `core` reads two
 kinds of keys there for every module:
@@ -198,7 +199,7 @@ kinds of keys there for every module:
 
 These are for developers and troubleshooting; the bundled modules need neither.
 
-## 7. Module settings
+## 9. Module settings
 
 | Section | Module | Keys |
 |---|---|---|
@@ -206,7 +207,7 @@ These are for developers and troubleshooting; the bundled modules need neither.
 | `[CREATPRF]` | colour and monochrome profiles | `mono_filters`: [modules/creatprf/README.md](modules/creatprf/README.md#4-settings) |
 | `[HELLO]` | the example module for developers | `greeting`, `hide`, `fail`: [modules/hello/README.md](modules/hello/README.md) |
 
-## 8. The sample `core` writes
+## 10. The sample `core` writes
 
 ```ini
 ; OMKit settings. Lines starting with ; or # are comments.
@@ -304,7 +305,7 @@ CREATPRF = on
 FILMLOOK = on
 ```
 
-## 9. A complete example
+## 11. A complete example
 
 Both bundled modules, the film look in the place of i-Enhance, a little colour grain, a log with warnings and errors
 only:
@@ -332,7 +333,7 @@ name = Film Look
 grain_tile = CLASS400
 ```
 
-## 10. `[shoot]`: the test scenario (debug build only)
+## 12. `[shoot]`: the test scenario (debug build only)
 
 A series of pictures without the user, for testing presets: `core` presses the shutter button itself - by the button's
 own path in the camera, half-press first, then the full press - and before each step chooses a preset the way the user
@@ -363,7 +364,7 @@ end the scenario: the camera begins a power-off also when the USB cable is taken
 because the power lever is on. The scenario releases the keys, waits until the camera shoots again and goes on; a
 picture that was under way is taken again.
 
-### 10.1. One scenario at the next power-on: `OMKIT\SHOOT.RUN`
+### 12.1. One scenario at the next power-on: `OMKIT\SHOOT.RUN`
 
 A file `SHOOT.RUN` in the `OMKIT` folder holds `[shoot]` keys for one start: at the next power-on `core` reads it after
 `OMKIT.INI` (its keys win over those of `[shoot]`), **removes it from the card** and then starts the scenario as `run =
@@ -378,7 +379,7 @@ steps = look:Kodak Portra 400, stock
 shots = 1
 ```
 
-### 10.2. Without hands: `hands_free = on` in `SHOOT.RUN`
+### 12.2. Without hands: `hands_free = on` in `SHOOT.RUN`
 
 Two keys are taken **only from `SHOOT.RUN`** (in `OMKIT.INI` they are ignored, with a warning in the log):
 

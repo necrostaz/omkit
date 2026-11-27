@@ -14,7 +14,7 @@ debug build it is **off** unless `OMKIT.INI` turns it on (`omkdebug.py info` sho
   the picture while a problem is looked for;
 - optionally, the computer writes files of the `OMKIT` folder (a new `CORE.BIN`, modules, presets, `OMKIT.INI`), each
   one checked by a CRC-32 read back from the card before it replaces the old file, restarts the camera so that they
-  run, and starts or stops the test scenario ([config.md](config.md#10-shoot-the-test-scenario-debug-build-only)): a whole test session
+  run, and starts or stops the test scenario ([config.md](config.md#12-shoot-the-test-scenario-debug-build-only)): a whole test session
   from the computer (section 6).
 
 ## 1. Turning it on
@@ -133,7 +133,7 @@ python tools/omkdebug.py session --put build/CORE.BIN --put OMKIT.INI --scenario
 |---|---|---|
 | connect | waits for the camera in the MTP mode | the debug service answers; `write = on` when files are to be written |
 | `--put` | each file into the `OMKIT` folder (a `.OMM` into `OMKIT\MODULES`; `FILE=OMKIT\PATH` for another place) | its CRC-32 read back from the card |
-| `--scenario` | with `--restart`: the file `OMKIT\SHOOT.RUN` ([config.md](config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)), which runs once at the next start (`--shots`, `--start-delay` go into it); without: the scenario starts now over USB | the steps are checked by the camera |
+| `--scenario` | with `--restart`: the file `OMKIT\SHOOT.RUN` ([config.md](config.md#121-one-scenario-at-the-next-power-on-omkitshootrun)), which runs once at the next start (`--shots`, `--start-delay` go into it); without: the scenario starts now over USB | the steps are checked by the camera |
 | `--restart` | the camera restarts and comes back | it left USB, then answers with a new run; the build that runs is the one of the `CORE.BIN` put |
 | `--wait` | the scenario runs once the camera shoots: the tool asks you to take the cable out and to put it back when the pictures are made (or `--usb-off CMD --usb-on CMD` switch a hub's port off and on, for `--offline` seconds) | the camera comes back in the same run; the scenario's result |
 | `--hands-free` | instead of `--restart` and `--wait`: the scenario runs with the cable in (below) | the result of this session in `OMKIT\SHOOT.END` |
@@ -166,7 +166,7 @@ python tools/omkdebug.py session --put build/CORE.BIN --scenario keep --shots 3 
     --pull-pictures 3 -o run2
 ```
 
-The tool writes `OMKIT\SHOOT.RUN` with `hands_free = on` and a session name ([config.md](config.md#102-without-hands-hands_free--on-in-shootrun)),
+The tool writes `OMKIT\SHOOT.RUN` with `hands_free = on` and a session name ([config.md](config.md#122-without-hands-hands_free--on-in-shootrun)),
 restarts the camera and waits. The camera starts again with the cable in but keeps it as charge only - it shoots and is
 not on the computer -, runs the scenario, writes its result, restarts once more and comes back in the MTP mode; the
 tool then reads the result, and `--pull-log` takes the RAM log of the scenario's run (`ramlog_prev.txt`, the power-on

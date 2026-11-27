@@ -87,7 +87,7 @@ and the firmware.
 | S4 | **Keep the camera's stored settings stock.** Keep the module's state in its store or its files; apply effects from memory | A profile or a look is shown over a stock picture mode and applied to shooting from memory: removing the card leaves a stock camera |
 | S5 | **No long blocking in event handlers.** No card, no `sleep`, no waiting, no loops over large data, no allocation in a loop. Count, copy a few words, and `defer` the rest | A handler runs inside a firmware task (UI, application, shooting) with the firmware's own locks and deadlines |
 | S6 | **Never delay a power-off or a sleep.** The power handler is short: stop timers, update the store in memory, return. No card (the API refuses it then), no `sleep` | The firmware waits for `core` at most 1 s and then goes on regardless; a slow handler loses the last log and store save. Handlers over 50 ms get a warning |
-| S7 | **The card may be busy with a picture.** Read and write files in `module_init` or in response to a user action, not periodically; keep state in the store, not in files | The camera writes pictures to the same card; `core` postpones its own writes while it does, but module file calls are not postponed: check `api->card_busy()` (API 19) before writing and try again later |
+| S7 | **The card may be busy with a picture.** Read and write files in `module_init` or in response to a user action, not periodically; keep state in the store, not in files | The camera writes pictures to the same card; `core` postpones its own writes while it does (and in a half-press), but module file calls are not postponed: check `api->card_busy()` (API 19; from `core` 1.46 it answers 1 in a half-press too) before writing and try again later |
 | S8 | **Survive the absence of anything.** No card, no folder, no file, an event or service not supported on this firmware, a service owned by another module, `alloc` returning 0 | Every one of these happens in normal use; the camera must keep working |
 | S9 | **Free only your own memory, and only once.** Never keep a pointer to memory after freeing it | `core` refuses to free a block that is not the module's (logged), but a stale pointer is a silent corruption |
 | S10 | **Your static variables are CPU 0's: never give their address to anything other CPUs read.** Hand data to the camera only through API calls (the services copy it); memory that must be visible to every CPU comes from `alloc` | The module's `data` and `bss` go through the data cache of CPU 0, and the caches of the three CPUs are not coherent ([sdk.md](sdk.md), section 2). `core` keeps the image in cache lines of its own, but cannot make another CPU see them |
@@ -96,7 +96,7 @@ and the firmware.
 
 | # | Rule | Details |
 |---|---|---|
-| C1 | **Log only through `api->log`, and log your steps.** No own log files. Start-up stages at `debug`, decisions at `info`, refusals and failures at `warn` / `error` | From the log alone it must be clear where the module stopped and why. The line carries the module name |
+| C1 | **Log only through `api->log`, and log your steps.** No own log files. Start-up stages at `debug` with `OMK_LOG_D` (in the module's debug build only), decisions at `info`, refusals and failures at `warn` / `error` | From the log alone it must be clear where the module stopped and why. The line carries the module name |
 | C2 | **Check every API return code** and take a safe path on failure, with a log line | Codes per function: [sdk.md](sdk.md). Typical: `on` -1 (not on this firmware), `prof_enable` -2 (another owner), `file_open` 0 (no folder), `alloc` 0 |
 | C3 | **Check the API level in `module_init`** before using the table: `api->version` and `api->size`. Use a function of a later level only after checking `api->version` | The table only grows. A function's level is in [sdk.md](sdk.md) |
 | C4 | **Call each function only from the context it allows.** | Table in [sdk.md](sdk.md#2-calling-contexts) |
@@ -152,7 +152,7 @@ static void tick(void *ctx)
 {
     (void)ctx;
     ticks++;
-    api->log(self, OMK_LOG_DEBUG, "tick %u at %u ms", ticks, api->ms());
+    OMK_LOG_D(api, self, "tick %u at %u ms", ticks, api->ms());    /* a debug build of the module only */
 }
 
 int module_init(const omk_api *a, omk_mod *m)
@@ -195,9 +195,6 @@ The result is `<dir>/MYMOD.OMM`; `mkmod` prints its sizes. Without `OUT` it goes
 2. In `OMKIT.INI` add the module to `[modules]` and give it settings:
 
    ```ini
-   [core]
-   log_level = debug
-
    [modules]
    enabled = on
    MYMOD = on
@@ -214,14 +211,19 @@ Switch the camera on, use it, switch it off with the power lever (the last lines
 `OMKIT\LOG\CORE.LOG`:
 
 ```
-    1452 I OMKit core 1.27, om5m2 fw1100, run 3F09A2C1
+    1452 I ======== OMKit core 1.46 release (main@<commit>), om5m2 fw1100, run 3F09A2C1, started 2026-11-27 10:15:02 ========
     ...
     1630 I module MYMOD 1.0: image 412, bss 8, resources 0, at <address>
-    1631 I MYMOD: starting on core 1.27, api 19
+    1631 I MYMOD: starting on core 1.46, api 20
     1640 I modules: 1 running, 0 failed
-    1641 I ready, api 19
-    3700 D MYMOD: tick 1 at 3700 ms
+    1641 I modules: MYMOD 1.0
+    1642 I ready, api 20
 ```
+
+The lines of the debug level (`D`, here `MYMOD: tick 1 at 3700 ms`) need a debug build of `core` **and** of the
+module: `make BUILD=debug` for `core` ([build.md](build.md#35-release-and-debug-builds)) and `BUILD=debug` for the module
+(`make -C OMKit/src/modules MOD=mymod VERSION=1.0 BUILD=debug OUT=<dir>`), with `log_level = debug` in `[core]`. A
+release build of `core` keeps no line of the debug level and answers `log_level = debug` with a warning and `info`.
 
 What to look for:
 

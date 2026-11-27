@@ -108,7 +108,7 @@ second (step down from Bloom).
 | `FILMLOOK: optics rows: on` | the module shows the rows; `off (optics or enable_edits)` or `core before API 20` - not, and why |
 | `FILMLOOK: preset N: bloom V`, `... halation V` | a strength set on the camera |
 | `look: optics rows off (no optics layer: [optics] layer)` | `layer = off`: the rows are not shown |
-| `look: optics rows not shown, code N` | the rows could not be put in the column on this firmware |
+| `look: optics rows not shown, code N` | the rows could not be put in the column on this firmware; the stills still get the chosen preset's stored strengths, which the column then does not show (set them to 0 with a FILMLOOK that shows the rows, or `[optics] layer = off`) |
 | `optics: the look's strengths now: Bloom B, Halation H` | the strengths the next stills take (the chosen preset's); `black and white (the halation without colour)` for a black-and-white preset; `(no step in its stills)` when both are 0 |
 | `optics: the look's white now: code W (...)` | the white of the preset in force (section 2) |
 | `optics: KEY = N out of LO..HI, D taken` | a value of `[optics]` out of its range |
@@ -120,7 +120,10 @@ The defaults below are the tuning OMKit is released with; a key left out keeps i
 preset: the per-preset choice is the strength of the rows, and the gains below are those of strength 5.
 
 Change them only to tune the look of the effects; write only the keys you change (the file takes at most 128 entries).
-A number out of range is clamped, with a warning in the log. Keys not on this page are for development; leave them out.
+A number out of range is clamped, with a warning in the log. This page lists the keys most worth changing; the full set
+a release reads - also `bloom_haze`, `emission`, `halation_first`, the day scene's `day_*` and the second Gaussians
+`*_sigma2`, `*_mix` - is in [../../config.md section 6](../../config.md#6-optics). Keys on neither page are a debug
+build's, for development: a release build does not read them.
 
 ### 6.1. On and off
 

@@ -20,7 +20,7 @@ emulator; "(measured on the camera)"; "(assumption)".
 | Strength | Off / Low / Med / High per preset; gains per tile up to 2047; Med = the film's grain in the mid tones | measured on the camera |
 | Colour grain | optional, the blend's noise generator in Cb and Cr (`chroma` in `[grain]`, default 0); never on black-and-white presets | measured on the camera |
 | Where | stills of the active film look only; no grain in live view or video | firmware code; a design decision |
-| Control | FILMLOOK's "Film Grain" item: tile (rear dial) and strength (front dial), stored per preset; core's grain service (API 17) | code |
+| Control | FILMLOOK's grain item (sign G): tile (rear dial) and strength (front dial), stored per preset; core's grain service (API 17) | code |
 
 ## 2. The firmware's grain
 
@@ -299,7 +299,7 @@ OMKit puts no grain on live view or video (W takes job type `0x1000` only) (code
 
 ## 5. User control
 
-### 5.1. FILMLOOK's "Film Grain" item
+### 5.1. FILMLOOK's grain item (sign G)
 
 - With `enable_edits = on` and `grain = on` in `[FILMLOOK]` and at least one valid container, the look's editor column
   gets a grain item (the firmware's own Color/Vivid item, repurposed; see [ui.md](ui.md)) (code).

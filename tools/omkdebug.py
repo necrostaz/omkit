@@ -918,7 +918,7 @@ class StepFailed(Exception):
     pass
 
 
-RESULT_FILE = "OMKIT\\SHOOT.END"          # core's result of a scenario without hands (docs/config.md, 10.2)
+RESULT_FILE = "OMKIT\\SHOOT.END"          # core's result of a scenario without hands (docs/config.md, 12.2)
 HANDS_FREE_ARM_WAIT = 120000                # ms: as charge only the camera shoots within seconds of its start
 MUTE_S = 15.0                               # s: on USB without the debug service this long - core does not run (MTP
                                             # comes up within a second or two after core's operations at a full start)

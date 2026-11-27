@@ -140,8 +140,8 @@ If in step 3 the camera simply starts as usual, it did not find the file: check 
    Let the camera power off completely: switching it on again within about 2 s cancels the power-off and is not a new
    start.
 3. **Check the first start** on the computer: `OMKIT\LOG\CORE.LOG` begins with
-   `OMKit core <version>, om5m2 fw1100, run <id>` and `config OMKIT.INI`, has a line `module NAME <version>: ...` for
-   each bundled module and `modules: 2 running, 0 failed`.
+   `======== OMKit core <version> release (<branch>@<commit>), om5m2 fw1100, run <id>, ...` and `config OMKIT.INI`, has
+   a line `module NAME <version>: ...` for each bundled module and `modules: 2 running, 0 failed`.
 
    No `LOG` folder: the loader did not find `OMKIT\CORE.BIN` (check the folder name and that it is at the root of the
    card), the patch is not installed, or the camera does not run firmware 1.1: `core` then stops at once and writes
@@ -204,6 +204,14 @@ What stays on the card:
   bundled presets you do not want is fine: FILMLOOK lists the `.ISP` files it finds there, at most 64.
 - **What the modules remember**: `OMKIT\STORE\` (the chosen look, preset and profile, the preset edits) and the logs in
   `OMKIT\LOG\`. The profiles' own settings are kept by the camera itself.
+- **The log** `OMKIT\LOG\CORE.LOG` gets a few lines at every power-on and is never cut by OMKit: delete it on the
+  computer now and then, when it gets long; the next start makes a new one.
+
+**Going back to an earlier OMKit release** is the same copy, with the earlier release's files (`CORE.BIN`, `MODULES\`).
+The settings `core` keeps in `OMKIT\STORE\` are read by the earlier `core` as they are. What a release adds may be lost
+on the way back: its `CHANGELOG.md` section says so - for example, going back from 0.2.0 to 0.1.0 drops the edits of
+the presets edited since the update (FILMLOOK 1.12 does not know their new format), and the `[optics]` section of
+`OMKIT.INI` is simply not read.
 
 ## 7. What to expect
 
