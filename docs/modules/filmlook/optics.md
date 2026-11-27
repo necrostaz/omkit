@@ -128,7 +128,7 @@ A number out of range is clamped, with a warning in the log. Keys not on this pa
 |---|---|---|---|
 | `layer` | `on` | switch | `off` - no Bloom and no Halation, and no rows in the look's column |
 | `jobs` | `first` | `first`, `both` | RAW+JPEG: `first` - the effects only on the JPEG; `both` - also on the preview inside the ORF, at the cost of a second computation per press (the picture is written even later) |
-| `white` | `auto` | `auto`, `off`, 160..255 | the scale the codes below are read on: `auto` - from black to the white of the preset (section 2); `off` - the codes as they are, 0..255; a number - that code is white for every preset |
+| `white` | `auto` | `auto`, `table`, `layer`, `off`, 160..255 | the scale the codes below are read on: `auto` - from black to the white of the preset (section 2), computed from its tables or, for tables without a tone curve, found in the picture (`table`, `layer` - only one of the two); `off` - the codes as they are, 0..255; a number - that code is white for every preset |
 
 ### 6.2. Bloom
 
@@ -138,7 +138,7 @@ A number out of range is clamped, with a warning in the log. Keys not on this pa
 | `bloom_steps` | `20, 32, 50, 71, 100` | five numbers 0..200 | strengths 1..5 in percent of `bloom_gain` |
 | `bloom_threshold` | `180` | 0..254 | the code (on the preset's scale) from which a place glows. Higher - only the brightest places glow, bright surfaces stay clean |
 | `bloom_emission` | `4` | 0..64 | how much brighter than white a blown place is taken to be: higher - lamps glow much more than white paper; 0 - the glow is just the excess over the threshold |
-| `bloom_sigma` | `90` | 0..1000 | the size of the near glow, pixels of the picture (a Gaussian's sigma on a 5184-pixel-wide picture) |
+| `bloom_sigma` | `90` | 0..1000 | the size of the near glow, pixels of the picture (a Gaussian's sigma on a 5184-pixel-wide picture). The layer gives sigmas from about 35 to about 510: one below comes out as about 35, one above as about 510 (each with a warning) |
 | `bloom_tail` | `50` | 0..90 | the share of Bloom's light in the long tail, percent. 0 - no tail, only the near glow |
 | `bloom_tail_sigma` | `400` | 0..1000 | the size of the tail, pixels of the picture |
 | `bloom_dark` | `80` | 0..100 | how much less Bloom is added on bright places, percent: 100 - none on white, 0 - as on dark places (the picture gets flatter and lighter) |
@@ -154,7 +154,7 @@ A number out of range is clamped, with a warning in the log. Keys not on this pa
 | `halation_steps` | `10, 19, 34, 80, 140` | five numbers 0..200 | strengths 1..5 in percent of `halation_gain` (steps 4 and 5 are meant to be clearly stronger) |
 | `halation_threshold` | `240` | 0..254 | the code (on the preset's scale) from which a place gives a halo. Lower it to have less bright lights glow, at the cost of more halo on white surfaces |
 | `halation_emission` | `32` | 0..64 | as `bloom_emission`, for Halation: higher - lamps much stronger than other bright places |
-| `halation_sigma` | `45` | 0..1000 | the width of the halo, pixels of the picture |
+| `halation_sigma` | `45` | 0..1000 | the width of the halo, pixels of the picture (about 35 to about 510, as `bloom_sigma`) |
 | `halation_dark` | `100` | 0..100 | how much less Halation is added on bright places, percent (100 - none on white) |
 | `halation_toe` | `3` | 0..50 | a toe for the halo's light, percent of white: weak halos from small glints disappear |
 | `halation_max` | `60` | 0..200 | a ceiling for the halo's light, percent of white: a strong halo stays soft, without a flat disc around a lamp |

@@ -74,10 +74,11 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   view running, until the battery was taken out). The camera was already stuck before the lever: its half-press
   exposure sequence waits for ever, so the firmware never begins its power-off. While the lever is off and the camera
   still runs, `core` now writes nothing to the card (before, it wrote the log again 5 s after the lever, just when the
-  battery may be taken out). If the camera stays stuck in that state for 8 s with the shutter released, `core` saves
-  once and asks the firmware for a power-off with a restart, so the camera starts with the lever off and switches off;
-  the watchdog is the last resort (`[core] power_rescue`, on by default). `core` also keeps its card writes out of a
-  half-press, and reads no display register on its regular passes.
+  battery may be taken out). A release build reads no display register and no state of the camera's application on its
+  regular passes. A debug build also keeps its card writes out of a half-press, and if the camera stays stuck with the
+  lever off for 8 s with the shutter released, it saves once and asks the firmware for a power-off with a restart, so
+  the camera starts with the lever off and switches off; the watchdog is the last resort (`[core] power_rescue`, debug
+  build only).
 
 ## [0.1.0] - 2026-11-20
 

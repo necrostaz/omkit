@@ -153,7 +153,7 @@ without an `[optics]` section the values below are taken - the field-tested set,
 |---|---|---|---|---|
 | `layer` | switch | `on` | | `off` - no Bloom and Halation at all: nothing is installed, and the look's column has no Bloom and Halation rows |
 | `bloom_threshold`, `halation_threshold` | number | `180`, `240` | 0..254 | the code of the picture's brightness where the glow starts |
-| `bloom_sigma`, `halation_sigma` | number | `90`, `45` | 0..1000 | the glow's size: the Gaussian's sigma in pixels of the picture (a sigma below the layer's smallest, about 35, comes out as that, with a warning; one above about 510 comes out as about 510) |
+| `bloom_sigma`, `halation_sigma` | number | `90`, `45` | 0..1000 | the glow's size: the Gaussian's sigma in pixels of the picture (a sigma below the layer's smallest, about 35, comes out as that, one above about 510 as about 510, each with a warning) |
 | `bloom_sigma2`, `bloom_mix`, `halation_sigma2`, `halation_mix` | number | `0` | 0..1000, 0..100 | a second Gaussian and its weight in percent |
 | `bloom_gain`, `halation_gain` | number | `110`, `220` | 0..5000 | the light added at strength 5 at 100 % of the steps, percent of the source |
 | `bloom_steps`, `halation_steps` | five numbers | `20, 32, 50, 71, 100` and `10, 19, 34, 80, 140` | 0..200 each | the strengths 1..5 in percent of the gain. Not five numbers: a warning, the default |
