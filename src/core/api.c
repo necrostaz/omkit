@@ -325,12 +325,13 @@ static int api_overlay_removed(omk_mod *m, const char *text, u32 ms)
     return -1;
 }
 
-/* API 19: 0 free, 1 the camera writes a picture (core defers its own writes then too), -1 power-off or sleep */
+/* API 19: 0 free, 1 the camera writes a picture or is in a half-press or a transition (core defers its own writes then
+ * too; the half-press as the core task saw it at its last pass, power_ui_held), -1 power-off or sleep */
 static int api_card_busy(void)
 {
     if (!power_card_ok())                   /* power-off, sleep, or the lever off without a power-off */
         return -1;
-    return drv_card_busy() || drv_prof_take_recent() ? 1 : 0;
+    return drv_card_busy() || drv_prof_take_recent() || power_ui_held() ? 1 : 0;
 }
 
 static const omk_api api = {

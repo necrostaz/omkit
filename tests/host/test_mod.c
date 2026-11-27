@@ -678,6 +678,16 @@ static void test_power(void)
     CHECK(t && strstr(t, "module CRC: checksum mismatch") && strstr(t, "modules: 1 running, 0 failed"));
     CHECK(t && count(t, "module HELLO 1.0:") == 1);
     free(t);
+
+    /* card_busy (API 19) answers 1 in a half-press too, as core's own writes wait: by what the core loop saw at its
+     * last pass (power_writes_wait), not by a read of its own */
+    CHECK(omk_api_get()->card_busy() == 0);
+    host_ui_state = DRV_UI_HALF;
+    CHECK(omk_api_get()->card_busy() == 0);                 /* not seen by a pass yet */
+    CHECK(power_writes_wait(now += 250) == 1 && omk_api_get()->card_busy() == 1);
+    host_ui_state = 0;                                      /* released: the 0.5 s after it held as well */
+    CHECK(power_writes_wait(now += 250) == 1 && omk_api_get()->card_busy() == 1);
+    CHECK(power_writes_wait(now += 600) == 0 && omk_api_get()->card_busy() == 0);
 }
 
 int main(int argc, char **argv)

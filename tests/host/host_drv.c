@@ -455,9 +455,11 @@ int drv_card_mounted(void)
     return !host_unmounted;
 }
 
+int host_card_busy;                         /* what drv_card_busy answers (1 - the camera writes a picture) */
+
 int drv_card_busy(void)
 {
-    return 0;
+    return host_card_busy;
 }
 
 int host_ended;                             /* core_mark_ended calls (main.c is not in the host build) */

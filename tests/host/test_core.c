@@ -1467,6 +1467,28 @@ static void test_ui_hold(void)
     CHECK(!power_ui_hold(now += 250));
     host_ui_state = 0;
     CHECK(host_ui_reads - reads == 14 && host_probes == 0);  /* RAM words only, once a call */
+
+    /* The core loop's pass (power_writes_wait): the camera's state is read at every pass, while the camera writes a
+     * picture too. A series: a half-press, the picture written for 7 s with the half-press left and taken again in it;
+     * the card free then, the new half-press is held - it began < 6 s ago, not with the first one */
+    CHECK(!power_writes_wait(now += 2000) && !power_ui_held());
+    host_ui_state = DRV_UI_HALF;
+    CHECK(power_writes_wait(now += 250) && power_ui_held());
+    host_card_busy = 1;                                     /* the shot: the camera writes the picture */
+    CHECK(power_writes_wait(now += 250));
+    host_ui_state = 0;
+    for (int i = 0; i < 8; i++)                             /* 2 s out of the half-press, the picture still written */
+        CHECK(power_writes_wait(now += 250));
+    CHECK(!power_ui_held());
+    host_ui_state = DRV_UI_HALF;                            /* the next half-press, 2.5 s into the write */
+    for (int i = 0; i < 18; i++)                            /* 4.5 s more: the write lasts ~7 s in all */
+        CHECK(power_writes_wait(now += 250) && power_ui_held());
+    host_card_busy = 0;                                     /* written; the half-press began 4.5 s ago: held */
+    CHECK(power_writes_wait(now += 250) && power_ui_held());
+    host_ui_state = 0;
+    CHECK(power_writes_wait(now += 250));                   /* released: the 0.5 s after it */
+    CHECK(!power_writes_wait(now += 600) && !power_ui_held());
+    CHECK(host_ui_reads - reads == 14 + 32 && host_probes == 0);   /* once a pass, busy or not */
 }
 
 /* The lever off without a power-off (the camera stuck, the firmware never powers off): no card writes while it stays off,

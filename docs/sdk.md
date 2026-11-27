@@ -137,7 +137,7 @@ used through the cache, see section 2).
 | `void file_close(omk_file *f)` | 3 | closes; the data reaches the card here. `f` 0 is ignored |
 | `u32 file_list(omk_mod *m, const char *pattern, char (*names)[13], u32 max)` | 14 | names of the module folder matching `pattern` (8.3 characters with `*` and `?`, e.g. `"*.ISP"`), upper case, at most `max`. Skipped: folders, empty files, names starting with a dot, names that are not 8.3. Returns how many were stored; 0 also when the folder is missing |
 | `u32 file_list_long(omk_mod *m, const char *pattern, char (*names)[OMK_NAME_MAX], u32 max)` | 15 | as `file_list`, long names too: an 8.3 name in upper case, a long one as on the card (up to 39 printable ASCII characters, none of `\ / : * ? " < > |`); longer or other names are skipped and counted in the log |
-| `int card_busy(void)` | 19 | whether the card may be written now: 0 - free; 1 - the camera is writing a picture or has just made one (`core` postpones its own writes then too); -1 - power-off or sleep, `file_open` refuses. Cheap; any context |
+| `int card_busy(void)` | 19 | whether the card may be written now: 0 - free; 1 - the camera is writing a picture or has just made one, or is in a half-press or a passing state of shooting, or left one less than 0.5 s ago (from `core` 1.46; `core` postpones its own writes then too - the half-press as its task saw it at its last pass, at most 6 s of one); -1 - power-off or sleep, `file_open` refuses. Cheap; any context |
 
 - init and core task only. `core` creates the module folder at the module's first `file_open` or `file_list*` (API 19); there is no seek, append, delete or rename.
 - `file_list*` look at most 256 folder entries; each step of the firmware's folder walk reads the folder from its start.

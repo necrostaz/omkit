@@ -396,7 +396,7 @@ void core_main(void)
         dbg_where(DBG_W_SHOOT);
         tick = shoot_service(now, SERVICE_MS);   /* sooner while a test scenario runs */
         hf_service(now);
-        busy = drv_card_busy() || drv_prof_take_recent() || power_ui_hold(now) || !power_card_ok();
+        busy = power_writes_wait(now);     /* the camera's passing state read at every pass, even while it writes */
         if (busy && !deferred)
             deferred_ms = now;
         deferred += busy;

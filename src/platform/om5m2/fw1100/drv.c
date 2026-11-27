@@ -438,9 +438,9 @@ static u32 app_state(void)
 #define APP_HALF_PRESS 0x5101
 #define APP_TRANSITION 0x0002
 
-/* Both builds: core's card writes wait while the camera is in a passing state (main.c's ui_hold, at every pass of the
- * core task - the owner's decision 2026-11-27: a half-press is a critical operation of the camera, nothing of ours during
- * it). Three RAM words of the chain and one byte - no register of the hardware */
+/* Both builds: core's card writes wait while the camera is in a passing state (power.c's power_ui_hold, at every pass
+ * of the core task - the owner's decision 2026-11-27: a half-press is a critical operation of the camera, nothing of ours
+ * during it). Three RAM words of the chain and one byte - no register of the hardware */
 int drv_ui_state(u32 *app, u32 *keys)
 {
     u32 a = app_state();

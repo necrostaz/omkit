@@ -36,6 +36,7 @@ extern u32 host_opt_loop, host_opt_sleep; /* what drv_optics_loop was given last
 extern u32 host_opt_crumb[DRV_OPTICS_CRUMB];
 extern int host_opt_worker_rc;           /* what drv_optics_worker answers (0 - running) */
 extern u32 host_opt_workers;             /* drv_optics_worker calls */
+extern int host_card_busy;               /* what drv_card_busy answers (1 - the camera writes a picture) */
 extern int host_ui_state;                /* what drv_ui_probe answers (0 - a lasting state) */   /* the crumbs: [0] the magic, the rest as the driver's */
 /* The debug service */
 typedef struct {

@@ -32,6 +32,9 @@ int power_card_ok(void);                    /* running, and core may write to th
                                                stuck camera (the rescue, a debug build's) */
 int power_ui_hold(u32 now);                 /* 1 - the camera is in a half-press or a transition (or left it < 0.5 s ago;
                                                held at most 6 s): core's card writes wait (RAM words only, drv_ui_state) */
+int power_ui_held(void);                    /* power_ui_hold's answer of the core task's last pass (the modules' card_busy) */
+int power_writes_wait(u32 now);             /* core task loop, once a pass: 1 - core's card writes wait (a picture being
+                                               written or just made, power_ui_hold - asked at every pass, the lever) */
 #ifdef OMK_DEBUG
 u32 power_cancels(void);                    /* how many power-offs and sleeps did not happen (core task) */
 u32 power_hook_count(u32 kind);             /* how many times that hook (POWER_HOOK_*) ran since the start */

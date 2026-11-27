@@ -449,6 +449,9 @@ int power_running(void)
 #define UI_HOLD_MAX_MS 6000
 #define UI_SETTLE_MS 500
 
+static volatile int ui_held;               /* power_ui_hold's answer of the last pass, for the modules' card_busy (the
+                                               core task writes it, module code on CPU 0 reads it: one cache) */
+
 int power_ui_hold(u32 now)
 {
     static u32 since, left;
@@ -462,7 +465,7 @@ int power_ui_hold(u32 now)
             since = now;
         }
         after = 0;
-        return now - since < UI_HOLD_MAX_MS;
+        return ui_held = now - since < UI_HOLD_MAX_MS;
     }
     if (in) {
         in = 0;
@@ -470,9 +473,24 @@ int power_ui_hold(u32 now)
         left = now;
     }
     if (after && now - left < UI_SETTLE_MS)
-        return 1;
+        return ui_held = 1;
     after = 0;
-    return 0;
+    return ui_held = 0;
+}
+
+int power_ui_held(void)
+{
+    return ui_held;
+}
+
+/* The camera's state is read at every pass, whatever else holds the writes: its time in a passing state and the moments
+ * it leaves one are counted while the camera writes a picture too, so that a half-press begun during a long write (a
+ * series) is held from its own start, not taken for one older than UI_HOLD_MAX_MS */
+int power_writes_wait(u32 now)
+{
+    int hold = power_ui_hold(now);
+
+    return drv_card_busy() || drv_prof_take_recent() || hold || !power_card_ok();
 }
 
 int power_card_ok(void)
