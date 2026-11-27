@@ -3,7 +3,21 @@
  *    at once; the gates then wait (at most POWER_GATE_MS) until the core task acknowledges;
  *  - the core task calls power_service from its loop: on a new sequence number it does the last save
  *    before power-off (the card is still mounted: the card-off gate waits for us) and acknowledges.
- * While the state is not POWER_RUN the core loop does not write to the card. */
+ * While the state is not POWER_RUN the core loop does not write to the card.
+ *
+ * The lever off without a power-off. The firmware turns the camera off only when its application takes the lever's event;
+ * an application stuck in a shooting state (a half-press whose exposure sequence waits for ever for the live view's
+ * exposure stream to stop - the task dumps of such hangs, state 0x5101) never does: the lever flag stays set, the camera
+ * stays on, and the user takes the battery out. So, while the lever is off and the camera did not go off (power_card_ok):
+ *  - no card writes at all (log, stores, the modules' files): the battery may go at any moment - the lines wait in RAM;
+ *  - the rescue (a debug build only, on unless [core] power_rescue = off): the lever off RESCUE_MS and the application in one passing state
+ *    (drv_ui_probe) all that time, the shutter released and no picture being written - the last save (as at the card-off
+ *    gate), then the firmware's own power-off job with a restart (drv_restart_hfw, as at the test scenario's end); the
+ *    camera starts again with the lever off, and the firmware turns it off at once. The watchdog is the last resort.
+ *
+ * A release build (omk_types.h) has the hooks, the lever's flag (one word of RAM, drv_power_pending), the hold of card
+ * writes at the lever and the hold in a half-press or a transition (power_ui_hold: RAM words, drv_ui_state, once a
+ * pass): no probe line, no rescue, no register read, no read of the subprocessor clock at a sleep. */
 #include "omk_core.h"
 #include "omk_log.h"
 #include "omk_mod.h"
@@ -16,12 +30,35 @@
 #define PROBE_WORDS 7
 
 static volatile u32 state, seq, acked, reason, since_ticks;
-static volatile u32 hook_ticks[POWER_HOOKS], hook_arg[POWER_HOOKS], hook_count[POWER_HOOKS];
-static u32 handled = POWER_RUN, handled_ms, sleep_ticks, sleep_ms, sleep_sec, sleep_frac;
-static int sleep_rtc;                       /* 0 - the subprocessor clock was read when sleep began */
+#ifdef OMK_DEBUG
+static volatile u32 hook_ticks[POWER_HOOKS], hook_arg[POWER_HOOKS], hook_count[POWER_HOOKS];   /* for the dumps */
+#endif
+static u32 handled = POWER_RUN, handled_ms, sleep_ticks;
 static int flag_ignored;                    /* the lever flag stayed 1 although power-off did not happen: ignore until 0 */
+#ifdef OMK_DEBUG
+static u32 sleep_ms, sleep_sec, sleep_frac;
+static int sleep_rtc;                       /* 0 - the subprocessor clock was read when sleep began */
 static u32 probe[PROBE_WORDS], probe_n;
 static u32 cancels;                         /* power-offs and sleeps that did not happen: the task dump watches it */
+#endif
+
+#ifdef OMK_DEBUG
+#define RESCUE_MS 8000                      /* the lever off and the application stuck this long: the rescue (a power-off
+                                               takes 3-5 s on the camera, and POWER_CANCEL_MS gives up on it after 5) */
+#define RESCUE_OFF_WAIT_MS 1000             /* the power-off job: its hook within this, ... */
+#define RESCUE_POSTS 2                      /* ... posted at most this many times */
+#define RESCUE_DONE_WAIT_MS 20000           /* the power-off begun: the power goes within this (a settings write takes up
+                                               to 10 s) */
+#define RESCUE_CAUSE 0x4f4d4b50             /* "OMKP": the cause of the watchdog reset, in (0x8ff000b0) for the next start */
+
+enum { R_WATCH, R_POST, R_OFF, R_GOING };
+static int lever_off, stuck;                /* the lever seen off (since lever_since); the application stuck (since
+                                               stuck_since, in stuck_app) */
+static u32 lever_since, stuck_since, stuck_app, rescue_t, rescue_posts, rescue_offs;
+static int rescue_on = 1, rescue_stage;
+#endif
+static int lever_hold;                      /* the lever is off and the camera did not go off: no card writes */
+static u32 hold_ms;
 
 static const char *const state_names[] = {"running", "power-off", "sleep"};
 
@@ -30,6 +67,7 @@ static u32 ms_since(u32 ticks)
     return drv_ticks_since(ticks) / 1000;
 }
 
+#ifdef OMK_DEBUG
 /* After a sleep: the subprocessor clock says how long it really was. The tick counter loses whole turns of 2^30 us in a
  * sleep longer than ~1073 s; only whole turns are added back, so a clock set by the user during the sleep changes nothing */
 #define TURN_MS 1073742                     /* 2^30 us */
@@ -51,6 +89,7 @@ static void correct_clock(u32 now)
     log_printf(OMK_LOG_INFO, "wake: slept %u s by the subprocessor clock, the tick counter wrapped %u times, clock corrected",
                real / 1000, turns);
 }
+#endif
 
 /* Under drv_lock */
 static void set_state(u32 s, u32 r)
@@ -85,9 +124,11 @@ void power_hook(u32 kind, u32 arg)
 
     if (!kind || kind >= POWER_HOOKS)
         return;
+#ifdef OMK_DEBUG
     hook_ticks[kind] = drv_ticks();
     hook_arg[kind] = arg;
     hook_count[kind]++;
+#endif
     st = drv_lock();
     s = state;
     n = seq;
@@ -146,7 +187,13 @@ void power_install(void)
         else
             log_printf(OMK_LOG_ERROR, "power: hook %s not installed, code %d", name, rc);
     }
-    log_printf(ok == i ? OMK_LOG_DEBUG : OMK_LOG_WARN, "power: %u of %u hooks installed", ok, i);
+    if (ok != i)
+        log_printf(OMK_LOG_WARN, "power: %u of %u hooks installed", ok, i);
+    else
+        log_printf(OMK_LOG_DEBUG, "power: %u of %u hooks installed", ok, i);
+#ifdef OMK_DEBUG
+    rescue_on = cfg_bool("core", "power_rescue", 1);
+#endif
     /* After the hooks: the lever flag is set before CameraCommon::shutDown, so nothing slips between check and hooks */
     if (drv_power_pending()) {
         log_printf(OMK_LOG_WARN, "power: power-off already under way at start, modules wait");
@@ -154,6 +201,7 @@ void power_install(void)
     }
 }
 
+#ifdef OMK_DEBUG
 /* Candidate words for the power-off flag, debug: at start and on every change */
 static void log_probe(void)
 {
@@ -173,6 +221,7 @@ static void log_probe(void)
                n > 1 ? w[1] : 0, n > 2 ? w[2] : 0, n > 3 ? w[3] : 0, n > 4 ? w[4] : 0, n > 5 ? w[5] : 0,
                n > 6 && w[6] ? "viewfinder" : "screen");
 }
+#endif
 
 static void handle(u32 s, u32 r, u32 now)
 {
@@ -191,8 +240,10 @@ static void handle(u32 s, u32 r, u32 now)
         break;
     case POWER_SLEEP:
         sleep_ticks = since_ticks;
+#ifdef OMK_DEBUG
         sleep_ms = now;
         sleep_rtc = drv_rtc(&sleep_sec, &sleep_frac);
+#endif
         log_printf(OMK_LOG_INFO, "sleep: card writes stopped, %u ms after the hook", ms_since(since_ticks));
         modules_power(OMK_POWER_SLEEP);
         log_close();                        /* the card may be away after the sleep */
@@ -201,10 +252,14 @@ static void handle(u32 s, u32 r, u32 now)
         if (handled == POWER_SLEEP && r != TIMED_OUT) {
             log_printf(OMK_LOG_INFO, "wake: result %x, %u ms by the tick counter since sleep began", r,
                        ((since_ticks - sleep_ticks) & DRV_TICKS_MASK) / 1000);
+#ifdef OMK_DEBUG
             correct_clock(now);
+#endif
         } else {
             log_printf(OMK_LOG_WARN, "%s did not happen, running again", state_names[handled]);
+#ifdef OMK_DEBUG
             cancels++;
+#endif
         }
         log_retry_now();                    /* running again: the card may be back, writes that failed are tried at
                                                once rather than after their pause (log.c, store.c) */
@@ -216,11 +271,125 @@ static void handle(u32 s, u32 r, u32 now)
     handled_ms = now;
 }
 
+#ifdef OMK_DEBUG
+/* The last resort: the watchdog. Nothing more is written: the file task may be the one that hangs */
+static void rescue_reset(const char *why)
+{
+    log_printf(OMK_LOG_ERROR, "power: rescue: %s: reset by the watchdog (cause %08x)", why, RESCUE_CAUSE);
+    rescue_stage = R_GOING;                 /* drv_reset does not return on the camera */
+    rescue_t = 0;
+    drv_reset(RESCUE_CAUSE);
+}
+
+/* The lever off: is the application stuck? One passing state all the while, the shutter released (a half-press held keeps
+ * the firmware's power-off waiting by design) and no picture being written */
+static void rescue_service(u32 now)
+{
+    u32 app, keys, dt = now - rescue_t;
+    int r, rc;
+
+    switch (rescue_stage) {
+    case R_WATCH:
+        r = drv_ui_probe(&app, &keys);
+        if ((r != DRV_UI_HALF && r != DRV_UI_TRANSIENT) || !(keys & DRV_KEYS_S1_UP) || drv_card_busy() ||
+            (stuck && app != stuck_app)) {
+            stuck = 0;
+            return;
+        }
+        if (!stuck) {
+            stuck = 1;
+            stuck_since = now;
+            stuck_app = app;
+        }
+        if (now - lever_since < RESCUE_MS || now - stuck_since < RESCUE_MS)
+            return;
+        log_printf(OMK_LOG_WARN, "power: the lever off %u ms, the application in state %x for %u ms: the camera is stuck; "
+                   "rescue - the last save, then the firmware's power-off with a restart", now - lever_since, app,
+                   now - stuck_since);
+        store_save_all();                   /* as at the card-off gate: the camera is still and the card idle */
+        log_flush();
+        log_close();
+        rescue_posts = 0;
+        rescue_stage = R_POST;
+        /* fall through */
+    case R_POST:
+        rescue_offs = power_hook_count(POWER_HOOK_OFF);
+        rc = drv_restart_hfw();
+        rescue_posts++;
+        log_printf(rc ? OMK_LOG_WARN : OMK_LOG_INFO, "power: rescue: the power-off job %s (%d), try %u of %u",
+                   rc ? "NOT posted" : "posted", rc, rescue_posts, RESCUE_POSTS);
+        rescue_stage = R_OFF;
+        rescue_t = now;
+        return;
+    case R_OFF:
+        if (power_hook_count(POWER_HOOK_OFF) != rescue_offs) {
+            rescue_stage = R_GOING;
+            rescue_t = now;
+            return;
+        }
+        if (dt < RESCUE_OFF_WAIT_MS)
+            return;
+        if (rescue_posts < RESCUE_POSTS) {
+            rescue_stage = R_POST;
+            return;
+        }
+        rescue_reset("the power-off job did not run");
+        return;
+    case R_GOING:
+        if (rescue_t && dt >= RESCUE_DONE_WAIT_MS)
+            rescue_reset("the power-off began but the camera stays on");
+        return;
+    }
+}
+
+#endif
+
+/* Every loop of the core task, after the state's own handling: the hold of card writes while the lever is off and the
+ * camera runs. It reads the lever's flag only (one word of RAM); the rescue of a stuck camera is a debug build's */
+static void lever_service(u32 now)
+{
+    if (!drv_power_pending()) {
+        if (lever_hold)
+            log_printf(OMK_LOG_INFO, "power: the lever is on again, card writes again after %u ms without them", now - hold_ms);
+        lever_hold = 0;
+#ifdef OMK_DEBUG
+        lever_off = stuck = 0;
+        if (rescue_stage == R_POST)
+            rescue_stage = R_WATCH;
+#endif
+        return;
+    }
+#ifdef OMK_DEBUG
+    if (!lever_off) {
+        lever_off = 1;
+        lever_since = now;
+    }
+#endif
+    if (!lever_hold && power_running()) {   /* a power-off that did not happen (or never began), the lever still off */
+        lever_hold = 1;
+        hold_ms = now;
+        log_close();
+#ifdef OMK_DEBUG
+        log_printf(OMK_LOG_WARN, "power: the lever is off but the camera did not go off: no card writes until the lever is on "
+                   "again%s", rescue_on ? "; a stuck camera is restarted" : "");
+#else
+        log_printf(OMK_LOG_WARN, "power: the lever is off but the camera did not go off: no card writes until the lever is on "
+                   "again");
+#endif
+    }
+#ifdef OMK_DEBUG
+    if (rescue_on)
+        rescue_service(now);
+#endif
+}
+
 int power_service(u32 now)
 {
     u32 st, s, n, r, limit;
 
+#ifdef OMK_DEBUG
     log_probe();
+#endif
     if (state == POWER_RUN && acked == seq) {   /* fallback for the lever, should the hook miss it */
         if (!drv_power_pending())
             flag_ignored = 0;
@@ -247,9 +416,11 @@ int power_service(u32 now)
             log_printf(OMK_LOG_WARN, "power: lever flag still set, ignored until it clears");
         }
     }
+    lever_service(now);
     return power_running();
 }
 
+#ifdef OMK_DEBUG
 u32 power_hook_count(u32 kind)
 {
     return kind < POWER_HOOKS ? hook_count[kind] : 0;
@@ -259,8 +430,56 @@ u32 power_cancels(void)
 {
     return cancels;
 }
+#endif
 
 int power_running(void)
 {
     return state == POWER_RUN && acked == seq;
+}
+
+/* Core's card writes (the log, the stores - the modules' too) wait while the camera is in a passing state of shooting -
+ * a half-press, whose exposure sequence stops and starts the live view's exposure stream, or a transition -
+ * and UI_SETTLE_MS after it: the firmware itself does no file work then, and a background writer keeps out of the
+ * camera's way as it keeps out of a picture being written (drv_card_busy). Bounded: a passing state longer than
+ * UI_HOLD_MAX_MS is a stuck camera, and its lines go to the card again (the core loop, main.c, asks once a pass).
+ * Both builds (the owner's decision 2026-11-27: a half-press is a critical operation, better nothing of ours during it).
+ * The check reads RAM words only, once a pass (drv_ui_state: the application's state by its chain of pointers and the
+ * raw input byte) - no register of the hardware; the debug build's probe of the camera's state (drv_power_probe, with
+ * the video compositor's register) stays a debug build's */
+#define UI_HOLD_MAX_MS 6000
+#define UI_SETTLE_MS 500
+
+int power_ui_hold(u32 now)
+{
+    static u32 since, left;
+    static int in, after;                   /* in a passing state since `since`; out of it since `left` */
+    u32 app, keys;
+    int r = drv_ui_state(&app, &keys);
+
+    if (r == DRV_UI_HALF || r == DRV_UI_TRANSIENT) {
+        if (!in) {
+            in = 1;
+            since = now;
+        }
+        after = 0;
+        return now - since < UI_HOLD_MAX_MS;
+    }
+    if (in) {
+        in = 0;
+        after = 1;
+        left = now;
+    }
+    if (after && now - left < UI_SETTLE_MS)
+        return 1;
+    after = 0;
+    return 0;
+}
+
+int power_card_ok(void)
+{
+#ifdef OMK_DEBUG
+    if (rescue_stage != R_WATCH)
+        return 0;
+#endif
+    return power_running() && !lever_hold;
 }

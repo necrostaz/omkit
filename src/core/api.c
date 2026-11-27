@@ -106,10 +106,16 @@ static omk_file *api_file_open(omk_mod *m, const char *name, const char *mode)
         log_printf(OMK_LOG_WARN, "%s: file_open(%s): the card is not available now (power-off or sleep)", m->name, n);
         return 0;
     }
+    if (mode[0] == 'w' && !power_card_ok()) {
+        log_printf(OMK_LOG_INFO, "%s: file_open(%s, w): no card writes now (the power lever is off)", m->name, n);
+        return 0;
+    }
+#ifdef OMK_DEBUG
     if (mode[0] == 'w' && !core_card_ok()) {
         log_printf(OMK_LOG_INFO, "%s: file_open(%s, w): no card writes ([debug] card_writes = off)", m->name, n);
         return 0;
     }
+#endif
     mod_dir(m);
     if (omk_path(path, m->name, n)) {
         log_printf(OMK_LOG_WARN, "%s: file_open(%s): the path is longer than %u", m->name, n, OMK_PATH_MAX - 1);
@@ -130,7 +136,7 @@ static u32 api_file_read(omk_file *f, void *buf, u32 len)
 
 static u32 api_file_write(omk_file *f, const void *buf, u32 len)
 {
-    return f && power_running() ? drv_fwrite(buf, 1, len, f) : 0;
+    return f && power_card_ok() ? drv_fwrite(buf, 1, len, f) : 0;
 }
 
 /* Every findnext reads the folder from its start again (the firmware's walk): the count is capped */
@@ -322,7 +328,7 @@ static int api_overlay_removed(omk_mod *m, const char *text, u32 ms)
 /* API 19: 0 free, 1 the camera writes a picture (core defers its own writes then too), -1 power-off or sleep */
 static int api_card_busy(void)
 {
-    if (!power_running())
+    if (!power_card_ok())                   /* power-off, sleep, or the lever off without a power-off */
         return -1;
     return drv_card_busy() || drv_prof_take_recent() ? 1 : 0;
 }
@@ -356,6 +362,7 @@ static const omk_api api = {
     look_grain,
     prof_mono_matrix_get,
     api_card_busy,
+    look_optics,
 };
 
 const omk_api *omk_api_get(void)

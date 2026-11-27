@@ -28,7 +28,9 @@
  * bisection over power-ons - a level a run, mask_jobs of our jobs to pass it; the level under test is written to the
  * card (store GRAIN) before the driver gets it, and a run that did not end with a power-off after it was armed (the
  * allocator in mode 1: a still with grain possible) marks it "reset"; after the list, `mask`. mask_run: another number
- * starts the list again */
+ * starts the list again.
+ * A release build has mask = film | flat | off and chroma; the test levels step and list, mask_test with its bisection
+ * and chroma_test are a debug build's (BIS_ON) */
 #include "omk_core.h"
 #include "omk_log.h"
 #include "omk_mod.h"
@@ -58,6 +60,7 @@ static const char *const lv_names[LV_N] = {"off", "list", "flat", "step", "film"
 #define FILM_STEP 50                        /* the archive's bands: Y 0-50, 50-100, ..., their middles 25, 75, ... */
 static const u16 film_w[5] = {481, 921, 1054, 962, 573};   /* x 1023: 0.47, 0.90, 1.03, 0.94, 0.56 (52 sec. 16) */
 
+#ifdef OMK_DEBUG
 #define BIS_STORE "GRAIN"
 #define BIS_STORE_SIZE 128
 #define BIS_KEY 1
@@ -84,10 +87,15 @@ static struct {
     u32 retry_ms;
     int on, armed;
 } bis;
+#define BIS_ON (bis.on && bis.b.index < bis.n)   /* a level of the list is under test */
+#else
+#define BIS_ON 0
+#endif
 
 static struct {
     u32 level;                              /* `mask`: the level after the list (or without one) */
     u32 chroma, chroma_test;
+    u32 level_test;                         /* [grain] level_test: the strength of a preset at Off, for tests (0 - none) */
     u32 route, ch, tag, given;              /* given to the driver */
     u32 curve, seq, warned;                 /* the curve published (LV_*, 0 none) and the tone it was built on */
     u16 w[256];
@@ -110,11 +118,12 @@ static struct {
     u32 cap;                                /* the slot's size: the largest tile */
     s32 want, loaded, failed;               /* the tile chosen, the one in the slot (-1 none), one that did not load */
     u32 level, gain, large, look;
+    u32 optics;                             /* the optics layer's step wanted on stills without grain (given to the driver) */
     u32 changed_ms, retry_ms;
     u32 entry;
     u32 unready;                            /* the slot is still marked ready with a tile no longer chosen (a fill was
                                                reading it when the choice changed): mark it at the next service */
-} gl = {0, 0, 0, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0};
+} gl = {0, 0, 0, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 static u32 rd16(const u8 *p)
 {
@@ -304,11 +313,20 @@ static int grn_load(u32 k, u32 *ms)
 /* The gain the look's stills get now, and the allocator's layout: to the driver when they change */
 static void gl_publish(void)
 {
-    u32 gain = gl.want >= 0 && gl.level ? grn[gl.want].gain[gl.level] : 0, large = gl.look && gain;
+    u32 gain = gl.want >= 0 && gl.level ? grn[gl.want].gain[gl.level] : 0;
+    /* the optics layer on a still without grain: the mask route's list without the blend (its step is in that list) -
+     * a tile is still needed (the list's texture is built, not blended) */
+    u32 opt = !gain && gl.want >= 0 && optics_route(), large = gl.look && (gain || opt);
 
     if (gain != gl.gain) {
         gl.gain = gain;
         drv_grain_look_gain(gain);
+    }
+    if (opt != gl.optics) {
+        gl.optics = opt;
+        drv_grain_look_optics(opt);
+        log_printf(OMK_LOG_INFO, "grain: %s", opt ? "the look's stills without grain take the mask route's list for the optics "
+                   "layer (no grain blended)" : "no optics layer on the stills without grain");
     }
     if (large != gl.large) {
         gl.large = large;
@@ -351,19 +369,34 @@ static u32 cfg_range(const char *key, int def, int lo, int hi)
 /* [grain]: the working level, the chroma gains, the test list */
 static void mk_config(void)
 {
-    const char *s = cfg_str("grain", "mask", "film"), *p, *q;
-    char word[8];
+    const char *s = cfg_str("grain", "mask", "film");
     u32 lv, n;
+#ifdef OMK_DEBUG
+    const char *p, *q;
+    char word[8];
+#endif
 
     for (n = 0; s[n]; n++)
         ;
+#ifdef OMK_DEBUG
     if (lv_parse(s, n, &lv) || lv == LV_CHROMA) {
         log_printf(OMK_LOG_WARN, "grain: mask = %s: not film, step, flat, list or off - film taken", s);
         lv = LV_FILM;
     }
+#else
+    if (lv_parse(s, n, &lv) || (lv != LV_FILM && lv != LV_FLAT && lv != LV_OFF)) {
+        log_printf(OMK_LOG_WARN, "grain: mask = %s: not film, flat or off - film taken", s);
+        lv = LV_FILM;
+    }
+#endif
     mk.level = lv;
     mk.chroma = cfg_range("chroma", 0, 0, DRV_GRAIN_CHROMA_MAX);
+#ifdef OMK_DEBUG
     mk.chroma_test = cfg_range("chroma_test", 100, 0, DRV_GRAIN_CHROMA_MAX);
+    mk.level_test = cfg_range("level_test", 0, 0, OMK_GRAIN_LEVELS - 1);
+    if (mk.level_test)
+        log_printf(OMK_LOG_WARN, "grain: level_test = %u: a preset with a tile and the strength Off gets strength %u on its "
+                   "stills (a test key)", mk.level_test, mk.level_test);
     bis.jobs = cfg_range("mask_jobs", 4, 1, BIS_JOBS_MAX);
     for (p = cfg_str("grain", "mask_test", ""); *p;) {
         while (*p == ' ' || *p == ',' || *p == '\t')
@@ -384,11 +417,16 @@ static void mk_config(void)
         }
         p = q;
     }
+#endif
 }
 
 static u32 mk_level(void)
 {
-    return bis.on && bis.b.index < bis.n ? bis.levels[bis.b.index] : mk.level;
+#ifdef OMK_DEBUG
+    if (BIS_ON)
+        return bis.levels[bis.b.index];
+#endif
+    return mk.level;
 }
 
 static u32 mk_route(u32 lv)
@@ -417,6 +455,7 @@ static void mk_curve(u32 lv, u16 *w)
     }
 }
 
+#ifdef OMK_DEBUG
 /* The state to the card now: 0, or -1 (not written: the store keeps nothing newer than the card) */
 static int bis_save(void)
 {
@@ -485,12 +524,13 @@ static void bis_start(u32 run)
     else
         log_printf(OMK_LOG_INFO, "grain: mask test run %u finished, the level is mask = %s", run, lv_names[mk.level]);
 }
+#endif
 
 /* The level's route, chroma and curve to the drivers. A mask route is given only once its curve is in the ISP driver
  * (until then the grain film's list, untagged): a still never gets the look's tone as its mask */
 static void mk_publish(void)
 {
-    u32 lv = mk_level(), route = mk_route(lv), ch, tag, seq = drv_isp_tone_seq(), curve, freed, live;
+    u32 lv = mk_level(), route = mk_route(lv), ch, tag, seq = drv_isp_tone_seq(), curve;
     int rc;
 
     curve = route == DRV_GRAIN_MASK ? (lv == LV_CHROMA ? LV_FILM : lv) : 0;
@@ -515,12 +555,20 @@ static void mk_publish(void)
         route = DRV_GRAIN_GF;               /* not yet */
         tag = 0;
     } else {
-        tag = bis.on && bis.b.index < bis.n ? bis.b.index + 1 : 0;
+#ifdef OMK_DEBUG
+        tag = BIS_ON ? bis.b.index + 1 : 0;
+#else
+        tag = 0;
+#endif
     }
     ch = isp_mono() ? 0 : lv == LV_CHROMA ? mk.chroma_test : mk.chroma;
     if (!mk.given || route != mk.route || ch != mk.ch || tag != mk.tag) {
+#ifdef OMK_DEBUG
+        u32 freed, live;
+
         if (tag != mk.tag && !drv_grain_route_state(&freed, &live))
             bis.freed0 = freed;             /* the driver counts the releases of the tag in force */
+#endif
         drv_grain_route(route, ch, tag);
         log_printf(OMK_LOG_INFO, "grain: the look's stills: route %s, level %s, chroma %u%s", route == DRV_GRAIN_GF ? "GF" :
                    route == DRV_GRAIN_LIST ? "list" : "mask", lv_names[lv], ch, tag ? " (mask test)" : "");
@@ -531,6 +579,7 @@ static void mk_publish(void)
     }
 }
 
+#ifdef OMK_DEBUG
 /* Core loop: the level armed, its jobs counted; passed - the next one saved, then given (mk_publish) */
 static void bis_service(u32 now)
 {
@@ -581,6 +630,7 @@ static void bis_service(u32 now)
         bis_report();
     mk_publish();                           /* only now: a reset from here on is the new level's (armed stays saved) */
 }
+#endif
 
 u32 grain_list(omk_mod *m, char (*files)[13], u32 max)
 {
@@ -606,7 +656,9 @@ u32 grain_list(omk_mod *m, char (*files)[13], u32 max)
             return 0;
         }
         mk_config();
+#ifdef OMK_DEBUG
         bis_start((u32)cfg_int("grain", "mask_run", 1));   /* on the card before the hooks can use a level */
+#endif
         c.key = MASK_KEY;                   /* the look's stills: Natural's job key */
         c.type = 0x1000;                    /* stills (live view and video never) */
         log_checkpoint("grain: installing the look's grain hooks");
@@ -662,6 +714,8 @@ int grain_look(u32 entry, s32 tile, u32 level)
         return -2;
     if (tile < -1 || tile >= (s32)ngrn || level >= OMK_GRAIN_LEVELS)
         return -1;
+    if (!level && tile >= 0)                /* [grain] level_test: grain stills for a test without the user's choice */
+        level = mk.level_test;
     rc = drv_look_grain(entry, tile, level);
     if (rc)
         return rc;
@@ -740,6 +794,8 @@ void grain_service(u32 now)
     if (!gl.on)
         return;
     mk_publish();
+#ifdef OMK_DEBUG
     bis_service(now);
+#endif
     drv_grain_service(now);
 }

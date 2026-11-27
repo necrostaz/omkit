@@ -19,7 +19,7 @@
 #define FAILS_MAX 3                         /* pictures not seen made in a row: the scenario stops */
 #define WAIT_MAX 30000                      /* the camera not ready this long at the start of a picture: it stops */
 #define NO_COUNTER_MS 1500                  /* without the picture counter: the least time a picture takes */
-#define STEP_NAME 24
+#define STEP_NAME 32                        /* a look entry's name: up to 31 characters, as look_list takes them (omk_api.h) */
 #define ARM_SETTLE 2000                     /* ms in the shooting state before the start's delay counts: the application
                                                settles after it left the PC mode of USB */
 #define ONCE_FILE "SHOOT.RUN"
@@ -127,7 +127,7 @@ static int parse_step(const char *t, step_t *st)
 
 int shoot_parse(const char *steps)
 {
-    char buf[STEP_NAME + 8];
+    char buf[STEP_NAME + 32];               /* "look:" or "prof:", the name and spaces around it */
     u32 n = 0, k;
 
     s.nsteps = 0;
@@ -137,8 +137,11 @@ int shoot_parse(const char *steps)
         for (k = 0; *steps && *steps != ',' && k < sizeof(buf) - 1; steps++)
             buf[k++] = *steps;
         buf[k] = 0;
-        if (*steps && *steps != ',')        /* a step too long for the buffer */
+        if (*steps && *steps != ',') {      /* a step too long for the buffer */
+            log_printf(OMK_LOG_ERROR, "shoot: step %u '%s...' too long (a look's name is at most %u characters)", n + 1,
+                       trim(buf), STEP_NAME - 1);
             return -1;
+        }
         if (*steps == ',')
             steps++;
         if (!*trim(buf))
@@ -407,9 +410,13 @@ void shoot_setup(u32 now)
         if (k == sizeof(keys) / sizeof(keys[0]))
             log_printf(OMK_LOG_WARN, "config: [shoot] %s unknown", key);
     }
-    if (once || str_ieq(run, "boot"))
-        shoot_start(0, clamp(cfg_int(SEC, "start_delay", 5000), 0, 600000));
-    else if (!str_ieq(run, "off"))
+    if (once || str_ieq(run, "boot")) {
+        if (shoot_start(0, clamp(cfg_int(SEC, "start_delay", 5000), 0, 600000))) {
+            s.result = SHOOT_FAILED;        /* seen at once by whoever waits for it (hands-free), not after its time limit */
+            s.why = "the scenario not understood (the log says why)";
+            log_printf(OMK_LOG_ERROR, "shoot: %s", s.why);
+        }
+    } else if (!str_ieq(run, "off"))
         log_printf(OMK_LOG_WARN, "config: [shoot] run '%s' unknown (off, boot)", run);
 }
 

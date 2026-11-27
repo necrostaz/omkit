@@ -22,6 +22,7 @@
  * the running state (sleep, power-off: log_close from power.c), before the debug service's file jobs, and on an error. */
 #include "omk_core.h"
 #include "omk_log.h"
+#include "omk_power.h"
 
 #define LOG_NAME "CORE.LOG"
 #define RING_SIZE 32768                     /* a power of two */
@@ -53,9 +54,13 @@ static u32 head, tail, lost, lost_told, last_change, last_flush, dropped, droppe
 static u32 retry_ms, retries;               /* the pause before log_service tries again (0 - the last append was taken);
                                                failed tries in a row */
 static int dirty, enabled = 1, level = OMK_LOG_INFO;
+#ifdef OMK_DEBUG
 static int card = 1;                        /* 0 - nothing goes to the card (log_card); the tee may still keep lines */
 static log_tee_fn tee;                      /* the debug service's RAM ring: lines up to tee_level, under the lock */
 static int tee_level = OMK_LOG_OFF;
+#else
+enum { card = 1 };                          /* a release build: the card is the log's only place, no tee */
+#endif
 static char log_path[OMK_PATH_MAX];
 static log_file core_file;
 static void *log_fp;                        /* the open log file, or 0 */
@@ -68,16 +73,21 @@ static u32 last_write;                      /* when the last portion was written
 void log_setup(int on, int lvl)
 {
     enabled = on;
-    level = lvl;
+    level = lvl > LOG_MAX ? LOG_MAX : lvl;
 }
 
 int log_level(void)
 {
     int card_level = enabled && card ? level : OMK_LOG_OFF;
 
-    return tee && tee_level > card_level ? tee_level : card_level;
+#ifdef OMK_DEBUG
+    if (tee && tee_level > card_level)
+        return tee_level;
+#endif
+    return card_level;
 }
 
+#ifdef OMK_DEBUG
 void log_tee(log_tee_fn fn, int lvl)
 {
     tee = fn;
@@ -88,6 +98,7 @@ void log_card(int on)
 {
     card = on;
 }
+#endif
 
 static void put(line_buf *b, char c)
 {
@@ -124,7 +135,12 @@ void log_vprintf_from(int lvl, const char *who, const char *fmt, va_list ap)
     char text[LINE_MAX];
     line_buf b = {text, 0, 0};
     u32 now, st, i, n;
-    int width, zero, to_card = enabled && card && lvl <= level, to_tee = tee && lvl <= tee_level;
+    int width, zero, to_card = enabled && card && lvl <= level;
+#ifdef OMK_DEBUG
+    int to_tee = tee && lvl <= tee_level;
+#else
+    enum { to_tee = 0 };
+#endif
 
     if (lvl <= OMK_LOG_OFF || (!to_card && !to_tee))
         return;
@@ -185,8 +201,10 @@ void log_vprintf_from(int lvl, const char *who, const char *fmt, va_list ap)
     text[b.n++] = '\n';
     n = b.n;
     st = drv_lock();
+#ifdef OMK_DEBUG
     if (to_tee)
         tee(lvl, now, text, n - 2);         /* without the line end */
+#endif
     if (!to_card) {
     } else if (head - tail + n > RING_SIZE) {   /* the card has not taken the older lines yet: drop this one whole */
         lost++;
@@ -205,7 +223,7 @@ void log_vprintf(int lvl, const char *fmt, va_list ap)
     log_vprintf_from(lvl, 0, fmt, ap);
 }
 
-void log_printf(int lvl, const char *fmt, ...)
+void (log_printf)(int lvl, const char *fmt, ...)     /* in parentheses: a release build has a macro of this name (omk_log.h) */
 {
     va_list ap;
 
@@ -214,6 +232,7 @@ void log_printf(int lvl, const char *fmt, ...)
     va_end(ap);
 }
 
+#ifdef OMK_DEBUG
 void log_checkpoint(const char *fmt, ...)
 {
     va_list ap;
@@ -221,9 +240,10 @@ void log_checkpoint(const char *fmt, ...)
     va_start(ap, fmt);
     log_vprintf(OMK_LOG_DEBUG, fmt, ap);
     va_end(ap);
-    if (level >= OMK_LOG_DEBUG)
+    if (level >= OMK_LOG_DEBUG && power_card_ok())   /* not with the lever off: the battery may go */
         log_flush();
 }
+#endif
 
 /* ring[from, from + n) to the file, at most two pieces; returns what fwrite took */
 static u32 write_ring(void *fp, u32 from, u32 n)
@@ -320,14 +340,15 @@ static int append(log_file *f, u32 h)
     return 0;
 }
 
-/* Service loop (and the card-off gate) only: file calls */
-void log_flush(void)
+/* Service loop (and the card-off gate) only: file calls. 1 - the files took everything up to now (a file stopped for a
+ * full card counts as not) */
+int log_flush(void)
 {
     u32 st, h, free_to;
     int ok;
 
     if (!enabled || !card)
-        return;
+        return 0;
     st = drv_lock();
     h = head;
     dirty = 0;
@@ -364,6 +385,7 @@ void log_flush(void)
         log_printf(OMK_LOG_WARN, "log: %u bytes not written, the file was given up", dropped - dropped_told);
         dropped_told = dropped;
     }
+    return ok && core_file.state != FILE_STOPPED && core_file.done == h;
 }
 
 /* Closes the open log file; the next portion opens it again. Core task or the card-off gate (power.c) */
@@ -393,6 +415,7 @@ static void check_open(const char *path)
     }
 }
 
+#ifdef OMK_DEBUG
 /* Free bytes in the ring now: a writer of many lines (the task dump) waits while it is low, rather than losing lines */
 u32 log_room(void)
 {
@@ -401,9 +424,12 @@ u32 log_room(void)
     drv_unlock(st);
     return RING_SIZE - used;
 }
+#endif
 
 void log_service(u32 now)
 {
+    if (!power_card_ok())                   /* the lever off without a power-off: the lines wait in the ring */
+        return;
     if (log_fp && !dirty && now - last_write >= LOG_HOLD_MS)
         log_close();
     if (!dirty || (retry_ms && now - last_flush < retry_ms))   /* nothing new, or the card did not take the last try */

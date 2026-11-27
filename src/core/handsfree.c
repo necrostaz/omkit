@@ -26,6 +26,8 @@
 #define OK_EVERY_MS 3000                    /* the USB dialog: OK pressed again after this, ... */
 #define OK_TRIES 5                          /* ... at most this many times */
 #define OK_HOLD_MS 150
+#define FAILED_SETTLE_MS 3000               /* a scenario that cannot start: the end once the camera shoots this long (out of
+                                               the USB dialog, as at the end of every scenario: the restart known to work) */
 #define STUCK_RESTART_MS 30000              /* the application stuck: this long after its task dump, the scenario ends */
 #define CARD_WAIT_MS 10000                  /* the camera writes a picture: the restart waits at most this long */
 #define OFF_WAIT_MS 1000                    /* the power-off job: its hook within this, ... */
@@ -41,7 +43,7 @@ enum { HF_OFF, HF_HELD, HF_ENDING, HF_RESTART, HF_STAYS, HF_MTP };
 enum { R_POST, R_OFF, R_FLASH, R_CARD, R_CUT };
 
 static struct {
-    u32 state, t0, since, ok_t, oks, stage, stage_t, posts, offs0, cards0, missed_t, last_hits;
+    u32 state, t0, since, ok_t, oks, stage, stage_t, posts, offs0, cards0, missed_t, last_hits, shoot_t;
     int started, stuck, restart;
     const char *why;                        /* core's own reason to end the scenario */
     char session[SESSION_MAX + 1];
@@ -345,13 +347,22 @@ static void held_service(u32 now)
         hf.started = 1;
     if (!hf.why)
         answer_dialog(now);
+    if (drv_usb_hold_hits() != hf.last_hits) {  /* before the start too: the hook's work is seen apart from the scenario's */
+        hf.last_hits = drv_usb_hold_hits();
+        log_usb("the hook took a USB choice");
+    }
     if (hf.why && hf.started) {             /* the hook is not there: the scenario ends at once */
         shoot_abort(hf.why);
         end(now, 0);
         return;
     }
     if (!hf.started) {
-        if (si.state != SHOOT_IDLE || now - hf.t0 >= START_MS) {
+        drv_usb_probe(&u);
+        if (u.app == 0xffffffff)            /* the USB dialog or the PC mode: not yet shooting */
+            hf.shoot_t = 0;
+        else if (!hf.shoot_t)
+            hf.shoot_t = now | 1;
+        if ((si.state != SHOOT_IDLE && hf.shoot_t && now - hf.shoot_t >= FAILED_SETTLE_MS) || now - hf.t0 >= START_MS) {
             hf.why = si.state != SHOOT_IDLE ? si.why : "the scenario did not start (the modules, or a step not understood)";
             end(now, 1);
         }
@@ -360,10 +371,6 @@ static void held_service(u32 now)
     if (si.state != SHOOT_RUNNING) {
         end(now, 1);
         return;
-    }
-    if (drv_usb_hold_hits() != hf.last_hits) {
-        hf.last_hits = drv_usb_hold_hits();
-        log_usb("the hook took a USB choice");
     }
     drv_usb_probe(&u);
     if (u.app == 0xffffffff && (u.choice == DRV_USB_MTP || u.choice == DRV_USB_STORAGE)) {

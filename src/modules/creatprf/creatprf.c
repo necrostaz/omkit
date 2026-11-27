@@ -96,15 +96,16 @@ static void load_pictures(u32 colors, u32 monos)
         missing += r == 0;
         failed += r < 0;
     }
-    api->log(self, failed ? OMK_LOG_WARN : OMK_LOG_DEBUG, "%u pictures set, %u not in the module file, %u failed", set, missing,
-             failed);
+    if (failed)
+        api->log(self, OMK_LOG_WARN, "%u pictures set, %u not in the module file, %u failed", set, missing, failed);
+    else
+        OMK_LOG_D(api, self, "%u pictures set, %u not in the module file, %u failed", set, missing, failed);
 }
 
-static void log_matrix(u32 filter, u32 level, const s16 *m)
-{
-    api->log(self, OMK_LOG_DEBUG, "monochrome filter %u level %u: %d %d %d / %d %d %d / %d %d %d", filter, level, m[0], m[1],
-             m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
-}
+/* A debug build's line: a matrix given to the camera */
+#define log_matrix(filter, level, m) \
+    OMK_LOG_D(api, self, "monochrome filter %u level %u: %d %d %d / %d %d %d / %d %d %d", (u32)(filter), (u32)(level), \
+              (m)[0], (m)[1], (m)[2], (m)[3], (m)[4], (m)[5], (m)[6], (m)[7], (m)[8])
 
 /* mono_filters = alternative: levels 2 and 3 of RED, MAGENTA, BLUE, CYAN replaced by softer ones computed from the camera's
  * own levels 1 and 2 (filters.c). A filter whose matrices cannot be read keeps the camera's own */
@@ -127,7 +128,7 @@ static void mono_filters(void)
 
     if (!same_word(opt, "alternative")) {
         if (same_word(opt, "original"))
-            api->log(self, OMK_LOG_DEBUG, "monochrome filters: the camera's own (mono_filters = %s)", opt);
+            OMK_LOG_D(api, self, "monochrome filters: the camera's own (mono_filters = %s)", opt);
         else
             api->log(self, OMK_LOG_WARN, "mono_filters = %s: not original or alternative - original", opt);
         return;
@@ -163,21 +164,22 @@ int module_init(const omk_api *a, omk_mod *m)
         return 1;
     api = a;
     self = m;
+    OMK_MODULE_KIND(api, self);
     if (!api->prof_count(&colors, &monos)) {
         api->log(self, OMK_LOG_WARN, "this camera has no picture profiles support, nothing to do");
         return 2;
     }
-    api->log(self, OMK_LOG_DEBUG, "%u colour and %u monochrome profiles, opening the store", colors, monos);
+    OMK_LOG_D(api, self, "%u colour and %u monochrome profiles, opening the store", colors, monos);
     store = api->store_open(self, 32);
     if (store)
         api->store_get(store, KEY_ACTIVE, &active, sizeof(active));
-    api->log(self, OMK_LOG_DEBUG, "store %s, saved profile %x, enabling the profiles service", store ? "open" : "missing", active);
+    OMK_LOG_D(api, self, "store %s, saved profile %x, enabling the profiles service", store ? "open" : "missing", active);
     rc = api->prof_enable(self, on_choice, 0);
     if (rc) {
         api->log(self, OMK_LOG_ERROR, "picture profiles not available, code %d", rc);
         return 3;
     }
-    api->log(self, OMK_LOG_DEBUG, "profiles service enabled, setting the pictures");
+    OMK_LOG_D(api, self, "profiles service enabled, setting the pictures");
     load_pictures(colors, monos);
     mono_filters();
     if (active != OMK_PROF_NONE) {

@@ -21,9 +21,17 @@ icons of the same places (sign height and line width measured on them):
   id 6  rear dial's label    <= 56 x 24  "Prev", in place of the Color Creator's "Color"      dial_label.py
   id 7  front dial's label   <= 56 x 24  "Next", in place of "Vivid"                          dial_label.py
   id 8  Color/Level item     66 x 50   "Color" over "Level", as the profiles' Color Level item   profile text
-  id 9  grain item           66 x 50   "Film" over "Grain"                                       profile text
+  id 9  grain item           66 x 50   "G" cut out of a disc, left: in line with the B and H signs   profile icon
   id 10 grain: tile dial     <= 56 x 24  "Tile", over the dial that steps the tile            dial_label.py
   id 11 grain: strength dial <= 56 x 24  "Level", over the dial of Off, Low, Med, High        dial_label.py
+  id 12 Bloom row's sign     46 x 46   "B" cut out of a disc, left of the number                  profile icon
+  id 13 Halation row's sign  46 x 46   "H" cut out of a disc, left of the number                  profile icon
+
+The grain item and the optics rows (ids 9, 12, 13) share one sign, "a letter in a disc": a disc 28 px across, as the
+camera's own row signs (the "S" of a slider row, 46 x 46, in whose place the row signs stand), with a capital G, B or H
+cut out of it, 17 px high, line 3 px (B 2.6 px: else its bowls' openings close up). The grain item is a 66 x 50 item
+picture drawn in the cell at (11, 5), the row signs 46 x 46 at (8, 7): the grain disc's centre is at x = 20 of its
+picture, so that all three discs stand on one vertical (x = 31 of the cell) - the picture itself does the shift.
 
 The dial labels (ids 6, 7, 10, 11) are drawn by dial_label.py in the face, size and rows of the camera's own labels
 ("Color", "Vivid"), as every module's dial label is; "Tile" and "Level" stand for "Type" and "Strength" (FILMLOOK 1.9),
@@ -52,7 +60,8 @@ import dial_label                                   # noqa: E402  the dial label
 
 SS = 4                                              # samples per pixel along each axis
 
-# id: (width, or (None, max width) - cut to the content, height, profile, sign box (x0, y0, x1, y1), line width)
+# id: (width, or (None, max width) - cut to the content, height, profile, sign box (x0, y0, x1, y1) or a letter in a disc
+# ("disc", letter, the disc's centre x), line width)
 PICTURES = {
     0: (66, 50, "icon", (8, 10, 58, 40), 3.0),
     1: (80, 60, "icon", (15, 15, 65, 45), 3.0),
@@ -63,11 +72,13 @@ PICTURES = {
     6: ((None, 56), 24, "dial", "Prev", None),
     7: ((None, 56), 24, "dial", "Next", None),
     8: (66, 50, "text", ("Color", "Level"), 2.2),
-    9: (66, 50, "text", ("Film", "Grain"), 2.2),
+    9: (66, 50, "icon", ("disc", "G", 20.0), 3.0),
     10: ((None, 56), 24, "dial", "Tile", None),
     11: ((None, 56), 24, "dial", "Level", None),
+    12: (46, 46, "icon", ("disc", "B", 23.0), 2.6),
+    13: (46, 46, "icon", ("disc", "H", 23.0), 3.0),
 }
-# The words of the item pictures (ids 8, 9): letters as strokes in a box 0..w x 0..1 (y down, 1 = the cap height; lower
+# The words of the item picture id 8: letters as strokes in a box 0..w x 0..1 (y down, 1 = the cap height; lower
 # case from 0.3)
 GLYPHS = {
     "r": (0.42, [(0, 0.3, 0, 1), (0, 0.48, 0.16, 0.33), (0.16, 0.33, 0.42, 0.3)]),
@@ -80,16 +91,6 @@ GLYPHS = {
                  (0.4, 1, 0.16, 1), (0.16, 1, 0, 0.84), (0, 0.84, 0, 0.46), (0, 0.46, 0.16, 0.3)]),
     "l": (0.1, [(0.05, 0, 0.05, 1)]),
     "L": (0.52, [(0, 0, 0, 1), (0, 1, 0.52, 1)]),
-    "n": (0.54, [(0, 0.3, 0, 1), (0, 0.46, 0.16, 0.3), (0.16, 0.3, 0.38, 0.3), (0.38, 0.3, 0.54, 0.46), (0.54, 0.46, 0.54, 1)]),
-    "F": (0.55, [(0, 0, 0, 1), (0, 0, 0.55, 0), (0, 0.47, 0.46, 0.47)]),
-    "i": (0.1, [(0.05, 0.3, 0.05, 1), (0.05, 0.06, 0.05, 0.12)]),
-    "m": (0.8, [(0, 0.3, 0, 1), (0, 0.44, 0.13, 0.3), (0.13, 0.3, 0.27, 0.3), (0.27, 0.3, 0.4, 0.44), (0.4, 0.44, 0.4, 1),
-                (0.4, 0.44, 0.53, 0.3), (0.53, 0.3, 0.67, 0.3), (0.67, 0.3, 0.8, 0.44), (0.8, 0.44, 0.8, 1)]),
-    "G": (0.68, [(0.68, 0.16, 0.5, 0), (0.5, 0, 0.2, 0), (0.2, 0, 0.02, 0.2), (0.02, 0.2, 0.02, 0.8), (0.02, 0.8, 0.2, 1),
-                 (0.2, 1, 0.5, 1), (0.5, 1, 0.68, 0.84), (0.68, 0.84, 0.68, 0.56), (0.68, 0.56, 0.4, 0.56)]),
-    "a": (0.54, [(0.06, 0.36, 0.2, 0.3), (0.2, 0.3, 0.4, 0.3), (0.4, 0.3, 0.54, 0.44), (0.54, 0.44, 0.54, 1),
-                 (0.54, 0.62, 0.18, 0.62), (0.18, 0.62, 0, 0.75), (0, 0.75, 0, 0.88), (0, 0.88, 0.15, 1), (0.15, 1, 0.4, 1),
-                 (0.4, 1, 0.54, 0.88)]),
 }
 CAP = 16.0                  # px
 RIGHT_MARGIN = 2            # clear columns right of the outline of a cut picture (stock: 2..3)
@@ -137,8 +138,22 @@ def m_andnot(a, b):
     return [p & ~q for p, q in zip(a, b)]
 
 
-def rect(g, x0, y0, x1, y1, r=0.0):
-    """Rectangle [x0, x1] x [y0, y1], corners rounded with radius r"""
+def rect(g, x0, y0, x1, y1, r=0.0, corners=None):
+    """Rectangle [x0, x1] x [y0, y1], corners rounded with radius r; corners = (top left, top right, bottom right, bottom
+    left) rounds only those that are true"""
+    if corners is not None and r > 0:
+        m = rect(g, x0, y0, x1, y1)
+        for k, (cx, cy) in enumerate(((x0 + r, y0 + r), (x1 - r, y0 + r), (x1 - r, y1 - r), (x0 + r, y1 - r))):
+            if not corners[k]:
+                continue
+            i0, i1 = g.cols(min(cx, x0 if k in (0, 3) else x1), max(cx, x0 if k in (0, 3) else x1))
+            for j in range(*g.rows(min(cy, y0 if k < 2 else y1), max(cy, y0 if k < 2 else y1))):
+                dy = g.ys[j] - cy
+                for i in range(i0, i1):
+                    dx = g.xs[i] - cx
+                    if dx * dx + dy * dy > r * r:
+                        m[j] &= ~(1 << i)
+        return m
     m = g.empty()
     if r <= 0:
         i0, i1 = g.cols(x0, x1)
@@ -226,6 +241,52 @@ def negative(g, b, s):
     return m_andnot(m, letter_f(g, (px0 + px1) / 2 - fw / 2 + 0.5, y0 + (H - fh) / 2, fw, fh, s))
 
 
+def disc(g, cx, cy, r):
+    """A disc of radius r"""
+    return rect(g, cx - r, cy - r, cx + r, cy + r, r=r)
+
+
+# The letters of the disc signs: capitals in a box x0..x0 + w, y0..y0 + h, even line s, square ends (as the F above)
+def letter_g(g, x0, y0, w, h, s):
+    """G: a rounded frame open on the right above the middle, a bar from the middle to the right stroke"""
+    r = min(w / 2, h / 2, 5.5)
+    mid = y0 + h * 0.5
+    m = m_andnot(rect(g, x0, y0, x0 + w, y0 + h, r=r), rect(g, x0 + s, y0 + s, x0 + w - s, y0 + h - s, r=max(0.5, r - s)))
+    m = m_andnot(m, rect(g, x0 + w - s - 0.5, y0 + h * 0.27, x0 + w + 0.5, mid))
+    return m_or(m, rect(g, x0 + w * 0.5, mid - s / 2 + 0.5, x0 + w, mid + s / 2 + 0.5))
+
+
+def letter_b(g, x0, y0, w, h, s):
+    """B: two bowls, rounded on the right, the upper one 0.9 of the width, the middle at 0.47 h"""
+    mid = y0 + h * 0.47
+    wu = w * 0.9
+    ru, rl = min(6.0, (mid - y0) / 2), min(7.0, (y0 + h - mid) / 2)
+    right = (False, True, True, False)
+    m = m_or(rect(g, x0, y0, x0 + wu, mid + s / 2, r=ru, corners=right),
+             rect(g, x0, mid - s / 2, x0 + w, y0 + h, r=rl, corners=right))
+    m = m_andnot(m, rect(g, x0 + s, y0 + s, x0 + wu - s, mid - s / 2, r=max(0.5, ru - s), corners=right))
+    return m_andnot(m, rect(g, x0 + s, mid + s / 2, x0 + w - s, y0 + h - s, r=max(0.5, rl - s), corners=right))
+
+
+def letter_h(g, x0, y0, w, h, s):
+    """H: two stems and a bar at 0.47 h"""
+    mid = y0 + h * 0.47
+    m = m_or(rect(g, x0, y0, x0 + s, y0 + h), rect(g, x0 + w - s, y0, x0 + w, y0 + h))
+    return m_or(m, rect(g, x0, mid - s / 2, x0 + w, mid + s / 2))
+
+
+LETTERS = {"G": letter_g, "B": letter_b, "H": letter_h}
+
+
+def disc_sign(g, ch, cx, s):
+    """A letter in a disc (the grain item, the optics rows): a disc 28 px across (as the camera's row signs) centred at
+    (cx, the picture's middle), the letter 11.5 x 17 px cut out of it; B half a pixel right (its right side looks lighter)"""
+    cy = g.h / 2
+    lw, cap = 11.5, 17.0
+    dx = 0.5 if ch == "B" else 0.0
+    return m_andnot(disc(g, cx, cy, 14.0), LETTERS[ch](g, cx - lw / 2 + dx, cy - cap / 2, lw, cap, s))
+
+
 def word(g, text, s, cap=CAP, y0=None, gap=0.24):
     """A word of an item picture: the letters' strokes, centred across (and down unless y0), the cap height cap"""
     gap = gap * cap
@@ -311,8 +372,8 @@ def render(rid):
         return w, h, bytes(k for row in rows for k in row)
     wmax = width[1] if isinstance(width, tuple) else width
     g = Grid(wmax, h)
-    if isinstance(box, str):
-        m = word(g, box, s)
+    if box[0] == "disc":
+        m = disc_sign(g, box[1], box[2], s)
     elif isinstance(box[0], str):                 # two lines, as the profiles' "Color Level": cap 13 px, 21 px apart
         m = m_or(word(g, box[0], s, 13.0, 6.0), word(g, box[1], s, 13.0, 27.0))
     else:

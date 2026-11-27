@@ -13,6 +13,7 @@ run anywhere (tests/test_omkdebug.py, tests/test_omkdebug_session.py).
     python tools/omkdebug.py banks                    both bank headers
     python tools/omkdebug.py snap [-o FILE]           every task of the three CPUs, now
     python tools/omkdebug.py mem ADDR LEN [-o FILE]   memory, as the white list allows (RAM only)
+    python tools/omkdebug.py crumbs                   the optics layer's crumbs (where its step and worker task are)
     python tools/omkdebug.py hist                     the firmware's last 20 PTP operations
     python tools/omkdebug.py level N                  the RAM log's level 0..4 (in RAM only)
     python tools/omkdebug.py mark [TAG]               a mark and a snapshot in the RAM log
@@ -62,7 +63,8 @@ RESULTS = ["ok", "bad path", "cannot open", "card i/o", "size differs", "CRC dif
 RESPONSES = {0x2001: "OK", 0x2002: "GeneralError", 0x2005: "OperationNotSupported", 0x200F: "AccessDenied (no write key)",
              0x2019: "DeviceBusy", 0x201D: "InvalidParameter"}
 LEVELS = "-EWID"
-TRIGGERS = {1: "card+", 2: "card-", 3: "window", 4: "camera busy", 5: "camera idle", 6: "stuck", 7: "mark", 8: "boot", 9: "job"}
+TRIGGERS = {1: "card+", 2: "card-", 3: "window", 4: "camera busy", 5: "camera idle", 6: "stuck", 7: "mark", 8: "boot", 9: "job",
+            10: "event"}
 STATES = {1: "RUN", 2: "RDY", 4: "WAI", 8: "SUS", 12: "WAS", 16: "DMT", 0xFF: "GONE"}
 WAITS = ["-", "SLP", "DLY", "SEM", "FLG", "SDTQ", "RDTQ", "MBX", "MTX", "SMBF", "RMBF", "CAL", "ACP", "RDV", "MPF", "MPL", "W15"]
 
@@ -77,7 +79,18 @@ class Refused(Exception):
 # ---------------------------------------------------------------------------------------------------------------
 # Formats (src/core/include/omk_dring.h, omk_debug.h)
 HEAD_WORDS = ("magic", "version", "boot", "size", "tail", "head", "seq", "lost", "run0", "run1", "beat", "flags",
-              "cause", "snap_ms", "crc", "spare")
+              "cause", "snap_ms", "crc", "where")
+# The core task's place in its loop (omk_debug.h DBG_W_*): the bank header's last word, where << 24 | ms & 0xffffff
+WHERE = ["-", "waiting", "power", "profiles", "scenario", "stores", "memory", "stack", "events", "look", "isp", "grain",
+         "optics", "modules", "task dump", "debug service", "log", "a card write begun", "a card write ended", "a snapshot"]
+
+
+def where_text(w: int) -> str:
+    if not w:
+        return "no place recorded"
+    k = w >> 24
+    place = f"a snapshot, watched task {k - 0x40}" if k >= 0x40 else WHERE[k] if k < len(WHERE) else str(k)
+    return f"the core task last at: {place}, {w & 0xFFFFFF} ms (mod 2^24)"
 
 
 def parse_header(b: bytes) -> dict:
@@ -85,7 +98,7 @@ def parse_header(b: bytes) -> dict:
     h = dict(zip(HEAD_WORDS, w))
     h["run"] = struct.pack("<II", h["run0"], h["run1"]).rstrip(b"\0").decode("ascii", "replace")
     fixed = struct.pack("<6I", *w[0:4], h["run0"], h["run1"])
-    h["valid"] = (h["magic"] == MAGIC and h["version"] == 1 and h["boot"] != 0 and h["size"] and
+    h["valid"] = (h["magic"] == MAGIC and h["version"] in (1, 2) and h["boot"] != 0 and h["size"] and
                   (h["head"] - h["tail"]) % 2**32 <= h["size"] and binascii.crc32(fixed) == h["crc"])
     h["ended"] = bool(h["flags"] & 1)
     return h
@@ -97,17 +110,45 @@ def parse_banks(b: bytes) -> dict:
     return out
 
 
-def parse_records(data: bytes, start: int = 0):
-    """Records {u8 0xA5, u8 type, u16 len, u32 seq, u32 ms} + data padded to 4, from data[0:] at ring position start.
-    Stops at the first record that is not whole (a torn end). Yields (pos, type, seq, ms, payload)"""
-    at, want = 0, None
-    while at + 12 <= len(data):
+GAP = -1                                    # parse_records: a place of the ring that is not a whole record
+
+
+def rec_size(version: int) -> int:
+    return 16 if version >= 2 else 12
+
+
+def parse_records(data: bytes, start: int = 0, version: int = 1):
+    """Records from data[0:] at ring position start. Version 1 (core 1.40-1.44): {u8 0xA5, u8 type, u16 len, u32 seq,
+    u32 ms} + data padded to 4; stops at the first record that is not whole. Version 2: the header has a CRC-32 of its first
+    12 bytes and the data; a place that is not a whole record (its CRC wrong, its number not above the one before: RAM
+    damaged, a torn end) is skipped word by word to the next whole one and yielded as (pos, GAP, 0, 0, its bytes).
+    Yields (pos, type, seq, ms, payload)"""
+    at, last, gap = 0, None, None
+    hs = rec_size(version)
+    while at + hs <= len(data):
         sync, typ, n, seq, ms = struct.unpack_from("<BBHII", data, at)
-        if sync != 0xA5 or at + 12 + n > len(data) or (want is not None and seq != want):
-            return
-        yield start + at, typ, seq, ms, data[at + 12:at + 12 + n]
-        want = seq + 1
-        at += 12 + ((n + 3) & ~3)
+        good = sync == 0xA5 and at + hs + n <= len(data)
+        if good and version >= 2:
+            good = ((last is None or 0 < (seq - last) % 2**32 < 2**31) and
+                    binascii.crc32(data[at + hs:at + hs + n], binascii.crc32(data[at:at + 12])) ==
+                    struct.unpack_from("<I", data, at + 12)[0])
+        elif good:
+            good = last is None or seq == (last + 1) % 2**32
+        if not good:
+            if version < 2:
+                return
+            gap = at if gap is None else gap
+            at += 4
+            continue
+        if gap is not None:
+            yield start + gap, GAP, 0, 0, at - gap
+            gap = None
+        yield start + at, typ, seq, ms, data[at + hs:at + hs + n]
+        last = seq
+        at += hs + ((n + 3) & ~3)
+    if version >= 2 and (gap is not None or at < len(data)):
+        g = at if gap is None else gap
+        yield start + g, GAP, 0, 0, len(data) - g
 
 
 def parse_map(p: bytes) -> dict:
@@ -171,7 +212,9 @@ def wait_name(bit: int) -> str:
     return WAITS[bit] if bit < len(WAITS) else f"W{bit}"
 
 
-def format_record(typ: int, seq: int, ms: int, p: bytes, names: dict) -> str:
+def format_record(typ: int, seq: int, ms: int, p, names: dict) -> str:
+    if typ == GAP:
+        return f"# {p} bytes here are not whole records (RAM damaged or overwritten, or the torn end)"
     if typ == 1:                            # a log line: its level byte, then the line as the log has it
         return p[1:].decode("ascii", "replace")
     if typ == 3:
@@ -193,6 +236,60 @@ def format_record(typ: int, seq: int, ms: int, p: bytes, names: dict) -> str:
     if typ == 5:
         return f"{ms:8d} B {p.hex()}"
     return f"{ms:8d} ? type {typ} {p.hex()}"
+
+
+# The optics layer's crumbs (src/platform/om5m2/fw1100/opticsdrv.c, CR_*): 28 words in the last 128 bytes of the RAM the
+# arena leaves out, written past the cache by the step, the worker task and the core task's heartbeat
+CRUMBS_ADDR, CRUMBS_LEN, CRUMBS_MAGIC = 0xA377FF80, 128, 0x4F435242
+CRUMB_WORDS = ("magic", "boot", "beat", "state", "ticks", "phases", "listed", "ended", "psw", "sp", "sp_min", "task", "stk",
+               "stksz", "mode", "work", "w_loops", "w_empty", "w_fast", "w_naps", "w_rc", "w_phase", "w_ticks", "w_done",
+               "w_sp", "w_psw", "w_pri", "w_flags")
+OPTICS_SUBS = ("N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full")
+OPTICS_PHASES = ("none", "listed", "step entered", "pass waited for", "slots read", "tick given away", "empty loop",
+                 "250 ms busy", "window map called", "window map returned", "64 bytes read", "1 MiB read begun", "1 MiB read",
+                 "cached read begun", "cached read", "stripes begun", "stripes written", "window release called",
+                 "window released", "step returned", "job ended", "handed to the worker", "worker began", "worker ended",
+                 "worker late: stop asked", "the step has the worker's answer")
+WORKER_PHASES = ("none", "started", "waiting", "woken", "working", "answered", "nap")
+
+
+def name_of(names: tuple, i: int) -> str:
+    return names[i] if i < len(names) else str(i)
+
+
+def format_crumbs(b: bytes) -> list[str]:
+    """The crumbs' words, named, and what they say"""
+    w = dict(zip(CRUMB_WORDS, struct.unpack_from(f"<{len(CRUMB_WORDS)}I", b)))
+    if w["magic"] != CRUMBS_MAGIC:
+        return [f"no crumbs (magic {w['magic']:08x}): no optics probe in this run, or the memory was cleared"]
+    st = w["state"]
+    rc = w["w_rc"] - 2**32 if w["w_rc"] >= 2**31 else w["w_rc"]
+    return [f"run {w['boot']:08x}, core heartbeat {w['beat']} ms; jobs listed {w['listed']}, the last ended {w['ended']}",
+            f"job {st >> 16} at {name_of(OPTICS_SUBS, st >> 8 & 0xFF)}: last phase '{name_of(OPTICS_PHASES, st & 0xFF)}' "
+            f"at {w['ticks']} us, phases {w['phases']:08x}",
+            f"step entry: psw {w['psw']:08x}, sp {w['sp']:08x} (lowest {w['sp_min']:08x}), task {w['task']}, stack "
+            f"{w['stk']:08x} + {w['stksz']}, request {w['mode']:08x}; worker request {w['work'] & 0xFFFF} done "
+            f"{w['work'] >> 16}",
+            f"worker: {w['w_loops']} waits, {w['w_empty']} woken with no request ({w['w_fast']} at once), {w['w_naps']} "
+            f"naps, last wait {rc}, phase '{name_of(WORKER_PHASES, w['w_phase'])}' at {w['w_ticks']} us, {w['w_done']} "
+            f"requests done; at its start sp {w['w_sp']:08x} psw {w['w_psw']:08x} priority {w['w_pri'] & 0xFFFF} (base "
+            f"{w['w_pri'] >> 16}), flags {w['w_flags'] & 0xFFFF} {w['w_flags'] >> 16}"]
+
+
+def read_mem(cam, addr: int, n: int) -> bytes:
+    out = bytearray()
+    while len(out) < n:
+        piece = min(n - len(out), STAGE)
+        code, _, data = cam.get(MEM, addr + len(out), piece)
+        ok(code, "MEM")
+        out += data
+    return bytes(out)
+
+
+def parse_mem_spec(spec: str) -> tuple[int, int]:
+    """ADDR:LEN (numbers as in C: 0x... or decimal)"""
+    a, _, n = spec.partition(":")
+    return int(a, 0), int(n or "0", 0)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -398,11 +495,17 @@ def read_bank(cam, which: int, banks: dict, start=None) -> tuple[bytes, int, int
     return bytes(data), first, pos
 
 
-def show_records(data: bytes, start: int, names: dict):
+def show_records(data: bytes, start: int, names: dict, version: int = 1):
     last = start
-    for pos, typ, seq, ms, p in parse_records(data, start):
+    for pos, typ, seq, ms, p in parse_records(data, start, version):
+        if typ == GAP:
+            if pos + p == start + len(data):
+                break                       # a torn end, while following: read again next time
+            print(format_record(typ, seq, ms, p, names))
+            last = pos + p
+            continue
         print(format_record(typ, seq, ms, p, names))
-        last = pos + 12 + ((len(p) + 3) & ~3)
+        last = pos + rec_size(version) + ((len(p) + 3) & ~3)
     return last
 
 
@@ -423,6 +526,7 @@ def main(argv=None) -> int:
     m.add_argument("length")
     m.add_argument("-o")
     sub.add_parser("hist")
+    sub.add_parser("crumbs")
     lv = sub.add_parser("level")
     lv.add_argument("n", type=int)
     mk = sub.add_parser("mark")
@@ -457,7 +561,12 @@ def main(argv=None) -> int:
     se.add_argument("--hands-free", action="store_true", help="the scenario runs with the cable in, as charge only: the "
                     "camera restarts into it, restarts again at its end and comes back in the MTP mode (its USB mode set "
                     "to MTP); implies --restart and --wait")
-    se.add_argument("--pull-log", action="store_true", help="the RAM log and OMKIT\\LOG\\CORE.LOG into the output folder")
+    se.add_argument("--pull-log", action="store_true", help="the RAM logs (this power-on: ramlog.txt, the one before: "
+                    "ramlog_prev.txt) and OMKIT\\LOG\\CORE.LOG into the output folder; also after a failed step while the "
+                    "camera is there (a restart during the scenario: the power-on that ended is the one before)")
+    se.add_argument("--crumbs", action="store_true", help="with the logs: the optics layer's crumbs (crumbs.txt)")
+    se.add_argument("--pull-mem", action="append", default=[], metavar="ADDR:LEN",
+                    help="with the logs: memory as the white list allows, into mem_ADDR.bin; repeatable")
     se.add_argument("--pull-pictures", type=int, default=0, metavar="N", help="the last N pictures into the output folder")
     se.add_argument("-o", "--out", default="session", help="the output folder (default: session)")
     se.add_argument("--connect-timeout", type=float, default=120.0, metavar="S")
@@ -599,20 +708,22 @@ def run(cam, a) -> int:
             for i, h in enumerate(banks["banks"]):
                 print(f"bank {i}: {'valid' if h['valid'] else 'not valid'}, power-on {h['boot']} run {h['run']}, "
                       f"{(h['head'] - h['tail']) % 2**32} bytes, records up to {h['seq']}, lost {h['lost']}, "
-                      f"heartbeat {h['beat']} ms, {'ended with a power-off' if h['ended'] else 'did not end'}")
+                      f"heartbeat {h['beat']} ms, {where_text(h['where'])}, "
+                      f"{'ended with a power-off' if h['ended'] else 'did not end'}")
             return 0
         which = 1 if a.cmd == "postmortem" else 0
         if which and banks["prev"] == 0xFF:
             raise Refused("no RAM log of a power-on before (a power-off or the battery cleared the memory)")
         names: dict = {}
+        ver = banks["banks"][banks["cur"] if which == 0 else banks["prev"]]["version"]
         data, start, end = read_bank(cam, which, banks)
-        pos = show_records(data, start, names)
+        pos = show_records(data, start, names, ver)
         while a.cmd == "tail" and a.follow:
             time.sleep(a.interval)
             code, _, raw = cam.get(BANKS)
             ok(code, "BANKS")
             data, start, end = read_bank(cam, 0, parse_banks(raw), pos)
-            pos = show_records(data, start, names)
+            pos = show_records(data, start, names, ver)
         return 0
     if a.cmd == "snap":
         st = job(cam, SNAP)
@@ -628,14 +739,12 @@ def run(cam, a) -> int:
         for o in d["objects"]:
             print(f"obj {o['kind']:#x} {o['id']:04x} owner {o['owner']:04x} {o['a']} {o['b']}")
         return 0
+    if a.cmd == "crumbs":
+        print("\n".join(format_crumbs(read_mem(cam, CRUMBS_ADDR, CRUMBS_LEN))))
+        return 0
     if a.cmd == "mem":
         addr, n = int(a.addr, 0), int(a.length, 0)
-        out = bytearray()
-        while len(out) < n:
-            piece = min(n - len(out), STAGE)
-            code, _, data = cam.get(MEM, addr + len(out), piece)
-            ok(code, "MEM")
-            out += data
+        out = read_mem(cam, addr, n)
         if a.o:
             Path(a.o).write_bytes(out)
         else:
@@ -787,8 +896,9 @@ SESSION_HELP = """A whole test session, step by step, each with its checks and t
      with a new run; when a CORE.BIN was put, its build must be the one that runs now;
   5. --wait: the scenario runs once the cable is out (by hand, or --usb-off / --usb-on with a hub that switches its
      ports' power); the tool waits for the camera to come back and for the scenario's end;
-  6. --pull-log, --pull-pictures N: the RAM logs of this power-on and of the one before, CORE.LOG and the last N
-     pictures into the output folder.
+  6. --pull-log, --pull-pictures N: the RAM logs, CORE.LOG and the last N pictures into the output folder; --crumbs and
+     --pull-mem add the optics layer's crumbs and memory. The logs are pulled also when a step failed with the camera
+     there - a restart during the scenario leaves the log of the power-on that ended in ramlog_prev.txt.
 
 With --hands-free, steps 3 to 5 need no hands: the scenario goes to SHOOT.RUN with hands_free = on; the camera restarts,
 keeps the cable as charge only (no data link, so it shoots), runs the scenario, writes its result to OMKIT\\SHOOT.END,
@@ -836,6 +946,22 @@ def shoot_run_text(steps: str, shots: int | None, start_delay: int | None, sessi
     if session_id is not None:
         lines += ["hands_free = on", f"session = {session_id}", f"arm_wait = {HANDS_FREE_ARM_WAIT}"]
     return ("\r\n".join(lines) + "\r\n").encode("ascii")
+
+
+SCENARIO_STEPS = 16                         # core/shoot.c: SHOOT_STEPS steps in one scenario
+LOOK_NAME_MAX = 31                          # ... and a look entry's name in look:<name> (as look_list takes it)
+
+
+def scenario_problem(steps: str) -> str | None:
+    """What core would refuse in a scenario's steps, told before the camera restarts for it (a scenario core does not
+    understand never starts: a session without hands would wait for it in vain); None - nothing seen"""
+    parts = [x.strip() for x in steps.split(",") if x.strip()]
+    if len(parts) > SCENARIO_STEPS:
+        return f"{len(parts)} steps, core takes at most {SCENARIO_STEPS}"
+    for i, x in enumerate(parts, 1):
+        if x[:5].lower() == "look:" and len(x[5:]) > LOOK_NAME_MAX:
+            return f"step {i} '{x}': a look's name is at most {LOOK_NAME_MAX} characters"
+    return None
 
 
 def parse_result(data: bytes) -> dict:
@@ -1042,8 +1168,8 @@ class Session:
                 raise StepFailed("scenario: not finished in time: " + shoot_text(s))
             self.sleep(2.0)
 
-    def pull_log(self, out: Path):
-        """The RAM logs of this power-on (ramlog.txt) and of the one before (ramlog_prev.txt), and CORE.LOG"""
+    def pull_log(self, out: Path, a=None):
+        """The RAM logs of this power-on and of the one before, CORE.LOG; with a: its crumbs and memory"""
         code, _, raw = self.cam.get(BANKS)
         ok(code, "BANKS")
         banks = parse_banks(raw)
@@ -1052,21 +1178,37 @@ class Session:
             if which and banks["prev"] == 0xFF:
                 counts.append("no RAM log of a power-on before")
                 continue
-            h = banks["banks"][banks["cur"] if which == 0 else banks["prev"]]
+            idx = banks["cur"] if which == 0 else banks["prev"]
+            h = banks["banks"][idx]
             data, start, _ = read_bank(self.cam, which, banks)
+            # the bank as read (its header, then its records from the tail): what a damaged ring looked like
+            (out / f"{name}.bin").write_bytes(raw[64 * idx:64 * idx + 64] + data)
             names: dict = {}
-            lines = [f"# power-on {h['boot']} run {h['run']}, "
-                     f"{'ended with a power-off' if h['ended'] else 'did NOT end with a power-off'}"]
-            lines += [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in parse_records(data, start)]
+            recs = list(parse_records(data, start, h["version"]))
+            gaps = [r for r in recs if r[1] == GAP]
+            lines = [f"# power-on {h['boot']} run {h['run']}: heartbeat {h['beat']} ms, {where_text(h['where'])}, "
+                     f"{'ended with a power-off' if h['ended'] else 'did NOT end with a power-off'}, lost {h['lost']}, "
+                     f"ring version {h['version']}, {len(data)} bytes from the tail, {len(gaps)} damaged places "
+                     f"({sum(r[4] for r in gaps)} bytes)"]
+            lines += [format_record(typ, seq, ms, p, names) for _, typ, seq, ms, p in recs]
             (out / f"{name}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            counts.append(f"{name}.txt {len(lines) - 1} records (run {h['run']})")
+            counts.append(f"{name}.txt {len(recs) - len(gaps)} records, {len(gaps)} damaged places (run {h['run']})")
         log = read_file(self.cam, "OMKIT\\LOG\\CORE.LOG")
         (out / "CORE.LOG").write_bytes(log)
         self.say(f"log: {', '.join(counts)}, CORE.LOG {len(log)} bytes")
+        if a is not None and getattr(a, "crumbs", False):
+            text = format_crumbs(read_mem(self.cam, CRUMBS_ADDR, CRUMBS_LEN))
+            (out / "crumbs.txt").write_text("\n".join(text) + "\n", encoding="utf-8")
+            self.say("crumbs: " + text[0])
+        for spec in (getattr(a, "pull_mem", None) or []) if a is not None else []:
+            addr, n = parse_mem_spec(spec)
+            (out / f"mem_{addr:08x}.bin").write_bytes(read_mem(self.cam, addr, n))
+            self.say(f"memory: {n} bytes at {addr:08x}")
 
     def run(self, a) -> int:
         out = Path(a.out)
         done: list[str] = []
+        pulled = False
 
         def step(name):
             done.append(name)
@@ -1075,6 +1217,9 @@ class Session:
         hands = getattr(a, "hands_free", False)
         failed = None                       # hands-free: the scenario's failure, told after the logs are pulled
         try:
+            if a.scenario is not None and scenario_problem(a.scenario):
+                step("scenario check")
+                raise StepFailed("scenario: " + scenario_problem(a.scenario))
             step("connect")
             before = self.wait_camera(a.connect_timeout, "connect", "connect: no camera yet - connect it and choose "
                                       "MTP in its USB dialog")
@@ -1138,7 +1283,8 @@ class Session:
                 out.mkdir(parents=True, exist_ok=True)
             if a.pull_log:
                 step("pull the log")
-                self.pull_log(out)
+                pulled = True
+                self.pull_log(out, a)
             if a.pull_pictures:
                 step("pull the pictures")
                 for path, n in pull_pictures(self.cam, a.pull_pictures, out):
@@ -1150,6 +1296,12 @@ class Session:
             return 0
         except (StepFailed, Refused, OSError) as e:
             self.say(f"session: FAILED at '{done[-1] if done else '?'}': {e}")
+            if a.pull_log and not pulled and self.cam is not None:
+                try:                        # what the camera can still tell: after a restart, the run that ended
+                    out.mkdir(parents=True, exist_ok=True)
+                    self.pull_log(out, a)
+                except Exception as e2:     # gone meanwhile: the failure above is the result
+                    self.say(f"log: not pulled after the failure: {e2}")
             return 1
         finally:
             self.drop()

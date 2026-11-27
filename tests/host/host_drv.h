@@ -27,6 +27,16 @@ extern int host_wakes;                   /* drv_wake calls */
 extern int host_isp_ok, host_isp_busy;   /* drv_isp_install works; drv_isp_set answers -2 this many times */
 extern u32 host_isp_stock;               /* drv_isp_set(0, 0) calls */
 
+extern int host_prev_ended;              /* what core_prev_ended returns */
+extern u32 host_opt_level, host_opt_arms;    /* drv_optics_install's level; drv_optics_arm calls */
+extern drv_optics_info host_opt;         /* what drv_optics_service gives (armed: set by drv_optics_arm) */
+extern void (*host_opt_on_arm)(void);    /* called by drv_optics_arm */
+extern u32 host_opt_sub;                 /* the substage drv_optics_sub was given last */
+extern u32 host_opt_loop, host_opt_sleep; /* what drv_optics_loop was given last */
+extern u32 host_opt_crumb[DRV_OPTICS_CRUMB];
+extern int host_opt_worker_rc;           /* what drv_optics_worker answers (0 - running) */
+extern u32 host_opt_workers;             /* drv_optics_worker calls */
+extern int host_ui_state;                /* what drv_ui_probe answers (0 - a lasting state) */   /* the crumbs: [0] the magic, the rest as the driver's */
 /* The debug service */
 typedef struct {
     u32 code, phase;
@@ -44,7 +54,7 @@ extern u32 host_ptp_in_n;
 extern unsigned char host_mem[4096];
 extern drv_task host_tasks[4];
 extern u32 host_ntasks, host_app;
-extern int host_ui;
+extern u32 host_keys;
 extern int host_in_task;
 extern int host_find;                   /* 1 - drv_findfirst lists the host folder */
 extern int host_restarts;               /* drv_restart_request calls */
@@ -55,6 +65,8 @@ extern u32 host_stuck_since, host_k3;
 extern int host_usb_install_rc, host_hfw_rc;
 extern u32 host_usb_mode, host_usb_hits, host_usb_choice, host_usb_factor, host_usb_link, host_usb_installs;
 extern u32 host_ok_presses, host_hfw_posts, host_resets, host_reset_cause;
+extern u32 host_ui_reads;                  /* drv_ui_state's reads (both builds) */
+extern u32 host_probes, host_rtc_reads;    /* the stub's counts: a release build of core must leave them at 0 */
 void host_usb_take(u32 choice);           /* the firmware applies a USB choice (the hook's place) */
 
 #endif

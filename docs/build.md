@@ -114,7 +114,12 @@ make -C OMKit/src/modules MOD=filmlook VERSION=1.12     # one module    -> OMKit
 make -C OMKit card                                      # card bundle   -> OMKit/build/card/OMKIT/
 make -C OMKit test                                      # tests and checks (section 5)
 make -C OMKit clean                                     # removes OMKit/build (OUT)
+make -C OMKit BUILD=debug                               # core, debug   -> OMKit/build/debug/CORE.BIN
+make -C OMKit/src/modules MOD=filmlook VERSION=1.12 BUILD=debug   # -> OMKit/build/debug/modules/FILMLOOK.OMM
+make -C OMKit card BUILD=debug                          # a debug card  -> OMKit/build/debug/card/OMKIT/
 ```
+
+These commands build the **release** kind unless `BUILD=debug` is given (section 3.5).
 
 A module kept outside this tree builds with the same Makefile; `MOD` is its name, `MODDIR` its source folder (every
 `*.c` there, `res/` and `res/disk/` for its resources):
@@ -137,7 +142,8 @@ holds `OMKIT.INI`: the sample `core` writes (`cfg_template` in `src/core/cfg.c`)
 | `core` (`CORE.BIN`; `core.elf`, `core.map`, `core.body`, the object files) | `OMKit/build/` |
 | a module (`<NAME>.OMM`; `<mod>.elf`, `<mod>.map`, `<mod>.gen/res_strings.h`) | `OMKit/build/modules/` |
 | the card bundle | `OMKit/build/card/OMKIT/` |
-| the test programs and the test build of `HELLO` | `OMKit/build/test/` |
+| the same three of a debug build (`BUILD=debug`) | `OMKit/build/debug/`, `OMKit/build/debug/modules/`, `OMKit/build/debug/card/OMKIT/` |
+| the test programs, test images and the test build of `HELLO`, per kind | `OMKit/build/kinds/release/test/`, `OMKit/build/kinds/debug/test/` |
 | a release ZIP ([release.md](release.md)) | `OMKit/build/release/` |
 
 `OMKit/build/` is ignored by git.
@@ -146,7 +152,8 @@ holds `OMKIT.INI`: the sample `core` writes (`cfg_template` in `src/core/cfg.c`)
 
 | Variable | Makefile | Default | Meaning |
 |---|---|---|---|
-| `OUT` | both | `build` (core), `../../build/modules` (modules) | the output folder. Relative paths are relative to the Makefile's folder (`OMKit/` or `OMKit/src/modules/`): pass an absolute path to be safe |
+| `BUILD` | both | `release` | the build's kind: `release` or `debug` (section 3.5). Anything else stops the build |
+| `OUT` | both | `build` (core), `../../build/modules` (modules); with `BUILD=debug` `build/debug` and `../../build/debug/modules` | the output folder. Relative paths are relative to the Makefile's folder (`OMKit/` or `OMKit/src/modules/`): pass an absolute path to be safe |
 | `EXTRA` | both | - | more compiler options, e.g. `EXTRA=-DDEBUG` |
 | `MOD` | modules | `hello` | the module's folder name; upper-cased it is the module and file name |
 | `MODDIR` | modules | `<MOD>` | the module's source folder, for a module outside `src/modules/` |
@@ -157,9 +164,43 @@ holds `OMKIT.INI`: the sample `core` writes (`cfg_template` in `src/core/cfg.c`)
 | `PYTHON` | both | `python3` | the Python that runs the tools and the Python tests |
 | `HOST_CC` | core | `gcc` | the host compiler of the host tests |
 
-A change of `VERSION` or of the resource options rebuilds the module; a change of `EXTRA` does not, so run `make clean`
-(or use another `OUT`) when switching options. Module sources build with `-Wall -Wextra -Werror`; `core` with
+A change of `VERSION`, of the resource options or of `BUILD` rebuilds the module, and a change of `BUILD` rebuilds every
+object of `core` in that `OUT`; a change of `EXTRA` does not, so run `make clean` (or use another `OUT`) when switching
+options. Module sources build with `-Wall -Wextra -Werror`; `core` with
 `-Wall -Wextra`.
+
+### 3.5. Release and debug builds
+
+`core` and the modules are built in two kinds. The kind is chosen at build time by `BUILD`, never by a setting in
+`OMKIT.INI`:
+
+| | `BUILD=release` (the default) | `BUILD=debug` |
+|---|---|---|
+| for | everyone: what is published, what goes on a card for use | development: test sessions over USB, looking for a fault |
+| has | what the user needs: the modules' functions, the short log on the card (start, modules, what the user chose, power states, warnings and errors), the hold of card writes at a power-off, while the power lever is off and during a half-press | all of the release build, and: the debug service over USB with its RAM log ([debug.md](debug.md)), the task dump, the rescue of a camera stuck with the lever off, the probes of the camera's state (the `power probe` line, the application state, the live view context), the hooks' and editors' counters, the log's `debug` level and boot checkpoints, the test scenario `[shoot]` with `SHOOT.RUN` and the run without hands, the grain mask test, the emulator probes (`EXTRA=-DOMK_EMU`) |
+| compiled with | - | `-DOMK_DEBUG` (C), `--defsym OMK_DEBUG=1` (assembly) |
+| output | `OMKit/build/` | `OMKit/build/debug/` |
+| first line of the log | `======== OMKit core 1.45 release (...` | `======== OMKit core 1.45 debug (...` |
+
+- The code of the debug kind is **not compiled** into a release build: its files (`taskdump.c`, `dring.c`, `debug.c`,
+  `shoot.c`, `handsfree.c`) are not built, and the debug parts of the other files are under `#ifdef OMK_DEBUG`
+  (`.ifdef OMK_DEBUG` in `thunks.s`). A call of the log at the constant level `OMK_LOG_DEBUG` is not compiled either -
+  neither the call nor its text.
+- A release build reads no setting of the debug kind ([config.md](config.md) marks them "debug build only"), and the
+  sample `OMKIT.INI` it writes names none of them.
+- A release build reads of the camera's state only what its functions need: the power lever's flag, the card's busy
+  and mounted flags, the application's state (a few words of memory once a pass: its card writes wait during a half-press
+  or a change of state), the setting cells of the picture mode screen, the task that calls an event hook. It reads no
+  hardware register besides the tick counter.
+- A module has the same two kinds: its lines of the debug level are written with `OMK_LOG_D(api, self, ...)`
+  ([sdk.md](sdk.md)) and exist only in its debug build. Either kind of a module loads into either kind of `core`.
+- **Every new function belongs to one kind.** A probe of the hardware, of a register or of the camera's state, a hook
+  or a task that the user's functions do not need goes under `OMK_DEBUG`.
+- `tools/buildcheck.py` checks an image's kind: `python3 tools/buildcheck.py --kind release --map build/core.map
+  build/CORE.BIN build/modules/*.OMM` fails if a release image holds a text, a register address or (with the map) a
+  function of the debug kind. `make card` and `make test` run it.
+- The default is `release`, so that a build made without thinking about the kind is never the one with the development
+  code. The emulator option `OMK_EMU` needs `BUILD=debug`.
 
 ### 3.4. The loader patch description (maintainers only)
 
@@ -218,8 +259,15 @@ make -C OMKit test
 | data checks | `grainset.py check`, `presetset.py check`, `mkicons_film.py --check`; `mkicons_creatprf.py --check` | numpy for the last one (skipped without it) |
 | apps | `python3 -m unittest discover -s apps -t apps` | numpy and Pillow (skipped without them) |
 
+`make test` runs the host tests **for both build kinds** (`test-kinds`: each kind into its own folder; the tests of the
+debug service, of the test scenario and of the rescue run for the debug kind only, and the group `core: kind` checks
+what each kind does with the debug level and the debug build's settings), and for each kind builds the camera image
+and the bundled modules and checks them with `tools/buildcheck.py` (`test-image`; skipped without the MN10300
+toolchain).
+
 Each part prints its result; the target fails on the first failing part and ends with `make test: all passed`. The
-parts can be run alone: `make -C OMKit test-host`, `test-tools`, `test-data`, `test-apps`.
+parts can be run alone: `make -C OMKit test-kinds`, `test-tools`, `test-data`, `test-apps`; `make -C OMKit test-host
+BUILD=debug` and `test-image BUILD=release` run one kind.
 
 ## 6. Release and apps
 

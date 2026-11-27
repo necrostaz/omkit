@@ -43,6 +43,8 @@ Details: [docs/modules/creatprf/README.md](docs/modules/creatprf/README.md).
 - A **tone curve** editor per preset, kept across power-offs.
 - **Film grain** on the stills: 11 grain tiles in four strengths (Off, Low, Med, High), weaker in the shadows and
   highlights as on film ([the tiles](docs/modules/filmlook/grain.md)).
+- **Bloom and Halation** on the stills, strength 0-5 per preset: the glow of a diffusion filter, and the red-orange halo
+  around lamps of a film without an anti-halation layer ([how they work and their limits](docs/modules/filmlook/optics.md)).
 
 Details: [docs/modules/filmlook/README.md](docs/modules/filmlook/README.md).
 

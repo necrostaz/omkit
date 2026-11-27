@@ -1,16 +1,18 @@
 # FILMLOOK: film looks in the picture mode screen
 
-FILMLOOK (version 1.12, needs core API 16; the grain needs API 17) puts a film look into the camera's picture mode
-screen. One stock picture mode of the strip - the **slot**, i-Enhance by default - is replaced by the look. In its place
-the user steps with the dials through **presets**: `.ISP` files on the card, each a set of colour tables for the camera's
-image processor, usually made to look like one film. Live view and the pictures take the chosen preset at once. In the
-same screen the user can bend the preset's tone curve and add film grain to the stills; both are kept per preset.
+FILMLOOK (version 1.12, needs core API 16; the grain needs API 17, Bloom and Halation API 20) puts a film look into the
+camera's picture mode screen. One stock picture mode of the strip - the **slot**, i-Enhance by default - is replaced by
+the look. In its place the user steps with the dials through **presets**: `.ISP` files on the card, each a set of colour
+tables for the camera's image processor, usually made to look like one film. Live view and the pictures take the chosen
+preset at once. In the same screen the user can bend the preset's tone curve and add film grain, Bloom and Halation to
+the stills; all are kept per preset.
 
 | Page | Contents |
 |---|---|
 | this page | what the module does, how it is used, its settings, files, store and log |
 | [presets.md](presets.md) | the 32 bundled presets, their names and order, installing and adding presets |
 | [grain.md](grain.md) | the 11 bundled grain tiles, how grain is chosen, the tone mask and colour grain |
+| [optics.md](optics.md) | Bloom and Halation: the rows, what the pictures get, the limitations, the `[optics]` settings |
 
 ## 1. Getting started
 
@@ -79,6 +81,7 @@ of the preset in memory, never the file, and are kept per preset (section 6).
 |---|---|---|---|---|---|
 | Tone curve | the preset has a gamma and a tone curve (every bundled one does) | the highlights ("Hi", the right label), as in the camera's Highlight & Shadow screen | the shadows ("Sh", the left label) | both dials edit the mid tones; again - back | all three back to 0 |
 | Film grain | `grain = on` and at least one valid tile in `OMKIT\GRAIN\` | the tile ("Tile") | the strength Off, Low, Med, High ("Level") | - | strength Off |
+| Bloom, Halation | `optics = on` and `[optics] layer = on` in `OMKIT.INI` | the strength 0..5 on a slider | the same | - | 0 (off) |
 
 - **Tone curve.** The drawing shows the preset's own curve with three points: shadows, mid tones, highlights. Each point
   moves -7..+7 steps; a step lifts or lowers the curve's output at that point by about 2 % of the range, smoothly to both
@@ -92,6 +95,10 @@ of the preset in memory, never the file, and are kept per preset (section 6).
   chosen one framed in yellow, and "n / N" of the tile. The tile steps round through all tiles; the strength stops at Off
   and High. Grain goes on **stills only**, never on live view or video; the shooting screen does not change. A preset
   never edited starts at Off with the default tile (`grain_tile`). Details: [grain.md](grain.md).
+- **Bloom and Halation.** Two rows after the grain item, signs B and H (the grain item's sign is G): the glow of a
+  diffusion filter and the red halo of a film without an anti-halation layer, strength 0 (off) to 5 per preset. On the
+  **stills only**, like the grain. The column then takes two pages: Halation is on the second. Details, and the
+  limitations: [optics.md](optics.md).
 
 **Not shown.** The code also holds a saturation editor per colour sector (Color/Vivid) and a black-and-white filter
 editor (Color/Level), but both are taken out in this version: they are not shown, and edits of them stored by earlier
@@ -104,6 +111,7 @@ versions are dropped (section 6).
 | the preset's colour tables, with the tone curve edit | yes, with `scope = both` or `live` | yes, with `scope = both` or `stills` |
 | grain | never | when the strength is not Off; not on multi-frame shots (High Res Shot and the like) |
 | colour grain (`[grain] chroma`) | never | colour presets only |
+| Bloom and Halation | never | when the preset's strength is not 0; the JPEG only, without colour on a black-and-white preset ([optics.md](optics.md#3-what-the-pictures-get)) |
 
 The camera's other settings of Natural (sharpness, contrast, noise filter and so on) stay as they are. Which stills get
 grain in detail: [../../platform/om5m2/grain.md](../../platform/om5m2/grain.md#31-which-stills-get-grain).
@@ -190,6 +198,7 @@ case as below.
 | `save_preset_edits` | `on` | switch | `on` - every preset keeps its edits across preset changes and power-offs. `off` - an edit lasts only while its preset stays chosen: choosing another preset resets the edits (the grain too), and nothing is stored |
 | `grain` | `on` | switch | `off` - no grain item and no grain. The grain also needs `enable_edits = on` |
 | `grain_tile` | empty | a tile's file name, with or without `.GRN` (`CLASS400`) | the tile of a preset not edited yet. Empty, or a tile that is not there (a warning): the first tile by file name |
+| `optics` | `on` | switch | `off` - no Bloom and Halation rows. The rows also need `enable_edits = on`, core API 20 and `[optics] layer = on` ([optics.md](optics.md#1-turning-them-on)) |
 | `exif` | `off` | switch | `on` - write the preset, its edits and its matrix into the JPEG's UserComment (section 7). For checking a preset on the computer |
 
 Two more keys are read by `core` for every module (`memory`, `event_<event>`): [../../config.md](../../config.md#6-keys-core-reads-in-every-modules-section).
@@ -204,7 +213,7 @@ The module's store is `OMKIT\STORE\FILMLOOK.STA` and `.STB` (two copies, written
 |---|---|
 | whether the look is on | brought back at power-on (if the stored picture mode is still Natural) |
 | the chosen preset | by its file name |
-| each preset's edits: the tone curve's three points, the grain tile and strength | by the preset's file name and the CRC-32 of the whole file; at most 64 presets with edits |
+| each preset's edits: the tone curve's three points, the grain tile and strength, the Bloom and Halation strengths | by the preset's file name and the CRC-32 of the whole file; at most 64 presets with edits |
 
 Edits are dropped when:
 
@@ -213,9 +222,14 @@ Edits are dropped when:
   them;
 - the file is renamed: the edits stay in the store under the old name and come back if the old name does;
 - `save_preset_edits = off`: edits are not stored, and choosing another preset resets the edits of the one left;
-- they were made by FILMLOOK 1.2 or older (`edits of an older FILMLOOK dropped`), or they are Color/Vivid or Color/Level
-  edits of an earlier version (`Color/Vivid and Color/Level edits dropped`): those editors are not shown in this version;
+- they were made by FILMLOOK 1.2 or older, or stored in a format newer than this version knows (`edits of an older
+  FILMLOOK dropped` in both cases), or they are Color/Vivid or Color/Level edits of an earlier version (`Color/Vivid and
+  Color/Level edits dropped`): those editors are not shown in this version;
 - the stored grain tile's file is gone: the grain item shows "NONE" and the preset gets no grain until a tile is chosen.
+
+The edits are stored in the format of the version that saved them. A FILMLOOK with the Bloom and Halation rows saves a
+format that an earlier FILMLOOK does not know: going back to such a version drops (and deletes) the edits of every preset
+saved since - the tone curve and grain too ([optics.md](optics.md#4-limitations)).
 
 Edits of a preset whose file is not on the card stay in the store; they come back with the unchanged file. Only when
 all 64 places are taken and a preset on the card needs one, the first such record gives way (`NAME: its edits take the
@@ -227,14 +241,14 @@ everything the module keeps, delete `FILMLOOK.STA` and `FILMLOOK.STB` from `OMKI
 With `exif = on` every JPEG taken with the look carries a text in its EXIF UserComment (at most 117 characters):
 
 ```
-FILMLOOK <file> CRC <crc> [E [t=<shadows>,<mid>,<highlights>] [g=<tile>,<strength>]] [F <matrix>] '<profile name>'
+FILMLOOK <file> CRC <crc> [E [t=<shadows>,<mid>,<highlights>] [g=<tile>,<strength>] [o=<bloom>,<halation>]] [F <matrix>] '<profile name>'
 ```
 
 | Part | Meaning |
 |---|---|
 | `<file>` | the preset's file name; spaces in it are written as `_` |
 | `CRC <crc>` | the CRC-32 of the whole file, 8 hex digits: tells which version of the file it was |
-| `E ...` | present only when the preset is edited: `t=` the tone curve's points -7..7, `g=` the grain tile (file name without `.GRN`) and strength 1 Low, 2 Med, 3 High |
+| `E ...` | present only when the preset is edited: `t=` the tone curve's points -7..7, `g=` the grain tile (file name without `.GRN`) and strength 1 Low, 2 Med, 3 High, `o=` the Bloom and Halation strengths 0..5 (when either is not 0) |
 | `F <matrix>` | the preset's colour matrix, 9 numbers in three groups (rows), 128 = 1.0 |
 | `'<profile name>'` | the name in the file's header |
 
@@ -259,6 +273,8 @@ FILMLOOK writes its lines to `OMKIT\LOG\CORE.LOG` with the prefix `FILMLOOK:`. T
 | `grain: N tiles, the default TILE` | the grain item is on |
 | `grain: off (grain or enable_edits)`, `grain: no tiles from core` | no grain item, and why |
 | `grain_tile = X: no such tile, the first one is the default` | `grain_tile` names a missing tile |
+| `optics rows: on` | the Bloom and Halation rows are shown; `off (optics or enable_edits)`, `core before API 20` - not, and why |
+| `preset N: bloom V`, `preset N: halation V` | a Bloom or Halation strength set on the camera |
 | `N cassette pictures, M presets without one` | cassette pictures set at power-on |
 | `FILE (CRC xxxxxxxx): its tables are on, before the presets are read` | power-on with the look on: the chosen preset's colour tables are in force already |
 | `look restored, preset N 'NAME'` / `look not restored, code -4` | the look came back at power-on / the stored picture mode was not Natural |
@@ -273,7 +289,8 @@ FILMLOOK writes its lines to `OMKIT\LOG\CORE.LOG` with the prefix `FILMLOOK:`. T
 | `NAME: no room for its edits in the store` | 64 presets on the card already have stored edits |
 
 `core`'s own lines about the look start with `look:` (for example `look: no slot 'x' here; slots: ...`, `look: entry N:
-cassette picture refused: <reason>`), its grain lines with `grain:`. More detail with `log_level = debug` in `[core]`.
+cassette picture refused: <reason>`), its grain lines with `grain:`, its Bloom and Halation lines with `optics:`
+([optics.md](optics.md#5-log-lines)). More detail with `log_level = debug` in `[core]`.
 
 ## 9. Limits
 
@@ -290,7 +307,8 @@ cassette picture refused: <reason>`), its grain lines with `grain:`. More detail
 ## 10. Technical details
 
 - The module uses the film look service (`look_*`, API 14-17), the ISP colour table service (`isp_scope`,
-  `isp_override`, API 13) and the grain service (`grain_list`, `look_grain`, API 17): [../../sdk.md](../../sdk.md). It
+  `isp_override`, API 13), the grain service (`grain_list`, `look_grain`, API 17) and the optics rows (`look_optics`,
+  API 20): [../../sdk.md](../../sdk.md). It
   takes the ISP service first (the slot's hooks go in then); a second module that wants the same service makes it fail.
 - The order at power-on: the store, the two services (their hooks), the chosen preset's tables when the look was on,
   then every preset file - one open and one read each, which gives the checks, the name, the CRC-32 and the cassette

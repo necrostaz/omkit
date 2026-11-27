@@ -6,13 +6,16 @@
 #include "omk_mem.h"
 
 #define CORE_VERSION "1.45"
+#define CORE_KIND OMK_BUILD                  /* "release" or "debug" (omk_types.h): the first line of the log names it */
 #ifndef CORE_BUILD                          /* the Makefile: git branch@commit of the build, "-dirty" with changes */
 #define CORE_BUILD "unknown"
 #endif
 
 /* Milliseconds since camera start. The driver counter wraps every 1073 s, so call this at least once every 17 minutes */
 u32 omk_ms(void);
+#ifdef OMK_DEBUG
 void omk_ms_add(u32 ms);                    /* clock.c: time the tick counter could not see (a long sleep) */
+#endif
 
 /* Config C:\OMKIT\OMKIT.INI: sections, key = value, comments ; and #. Names are case-insensitive */
 int cfg_load(void);                     /* 1 - read, 0 - did not exist, sample created, -1 - failed */
@@ -22,12 +25,15 @@ int cfg_bool(const char *section, const char *key, int def);
 int cfg_size(const char *section, const char *key, u32 *out);   /* bytes, suffixes K and M: 1 - present, 0 - no such key, -1 - not a number */
 u32 cfg_count(void);
 void cfg_entry(u32 i, const char **section, const char **key, const char **value);
+int cfg_debug_section(const char *section);   /* 1 - a section of the debug build, in a release build */
 u32 cfg_bad_lines(u32 *first);          /* how many lines failed to parse, and the number of the first one */
+#ifdef OMK_DEBUG
 /* A one-shot file of the OMKit folder with keys of one section (no header, or that section's), read after OMKIT.INI:
  * its keys win. 1 read (wrong: its lines not understood), 0 not there, -1 longer than 1 KB (not used). Once per start */
 int cfg_once(const char *name, const char *section, u32 *wrong);
 void cfg_once_drop(void);                   /* its keys forgotten (it could not be consumed) */
 const char *cfg_once_str(const char *section, const char *key);   /* a key of the one-shot file itself, or 0 */
+#endif
 
 int str_ieq(const char *a, const char *b);
 u32 str_len(const char *s);
@@ -48,10 +54,17 @@ u32 crc32_update(u32 crc, const void *data, u32 n);           /* start with 0 */
 int core_in_task(void);                     /* main.c: 1 - the caller is the core task (by its stack) */
 void core_mark_ended(void);                 /* main.c: the run reached the end of a power-off */
 int core_prev_ended(void);                  /* main.c: 1 - the previous run ended with a power-off (or it is not known) */
+#ifdef OMK_DEBUG
 const char *core_run(void);                 /* main.c: this power-on's name (8 hex digits) */
+#endif
 /* debug.c: core is about to write to the card (begin 1) or is done (0) - the log, a store, a file of the debug service;
- * what - the path. Snapshots of the file tasks around it when the debug service is on; nothing otherwise */
+ * what - the path. Snapshots of the file tasks around it when the debug service is on; nothing otherwise, and nothing at
+ * all in a release build */
+#ifdef OMK_DEBUG
 void core_card_write(int begin, const char *what);
+#else
+#define core_card_write(begin, what) ((void)0)
+#endif
 
 /* grain.c: the look's grain - the tile containers, the slot and the driver's hooks; its work from the core loop */
 void grain_service(u32 now);
@@ -59,5 +72,14 @@ struct omk_mod;
 u32 grain_list(struct omk_mod *m, char (*files)[13], u32 max);   /* API 17: the grain containers; the first call takes the service */
 void grain_drop_module(struct omk_mod *m);  /* the owner failed module_init: no grain, the service is free */
 int grain_look(u32 entry, s32 tile, u32 level);   /* the look owner's choice (look.c checks the owner): 0, -1 bad, -2 no service */
+
+/* optics.c: the optics layer - [optics] probe, its store for the cached read (level 2); before the modules */
+void optics_setup(void);
+void optics_service(u32 now);
+/* 1 - the optics layer is on and the stills of the look get a strength (the rows', or a test's): grain.c gives them the
+ * mask route's list even without grain */
+int optics_route(void);
+/* look.c, core task: the look's strengths (and the tables' black and white, white) to the driver now */
+void optics_strength_now(void);
 
 #endif

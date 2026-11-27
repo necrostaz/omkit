@@ -21,6 +21,7 @@
  * of another size, files of an older core): once per card and slot file. */
 #include "omk_core.h"
 #include "omk_log.h"
+#include "omk_power.h"
 #include "omk_store.h"
 
 #define STORE_MAX 8
@@ -49,12 +50,16 @@ struct omk_store {
 
 static omk_store stores[STORE_MAX];
 static u32 nstores;
+#ifdef OMK_DEBUG
 static int card = 1;                        /* 0 - changes stay in memory (store_card, the debug service) */
 
 void store_card(int on)
 {
     card = on;
 }
+#else
+enum { card = 1 };                          /* a release build: the stores always go to the card */
+#endif
 
 /* Store mutex. Callers are tasks on CPU 0 (modules, the core task, the card-off gate), never interrupts. The firmware lock
  * (interrupts off) guards only the flag; the work - copies up to the store size, file writes - runs with interrupts on.
@@ -434,7 +439,7 @@ void store_service(u32 now)
 {
     u32 i;
 
-    if (!card)
+    if (!card || !power_card_ok())          /* the lever off without a power-off: the battery may go at any moment */
         return;
     for (i = 0; i < nstores; i++)
         if (stores[i].mem && stores[i].dirty &&

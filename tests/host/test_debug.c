@@ -29,7 +29,7 @@ void modules_power(u32 event)                /* power.c's call into module.c, no
 
 /* ---- the ring ---- */
 typedef struct {
-    u32 n, first, last, bad, types[8];
+    u32 n, first, last, bad, types[8], gaps, skipped;
     char text[64];
 } seen_t;
 
@@ -58,7 +58,7 @@ static seen_t walk(const dring_bank *b)
     seen_t s;
 
     memset(&s, 0, sizeof(s));
-    dring_walk(b, walk_buf, b->size / 4, count, &s);
+    dring_walk(b, walk_buf, b->size / 4, count, &s, &s.gaps, &s.skipped);
     return s;
 }
 
@@ -104,7 +104,26 @@ static void test_ring(void)
     }
     s = walk(&r.bank[1]);
     CHECK(s.n > 1000 && s.n < 5000 && s.last == 4999 && !s.bad && !strcmp(s.text, "wrap 4999.."));
-    CHECK(r.bank[1].h[DH_HEAD] - r.bank[1].h[DH_TAIL] <= r.bank[1].size);
+    CHECK(r.bank[1].h[DH_HEAD] - r.bank[1].h[DH_TAIL] <= r.bank[1].size && !s.gaps && !s.skipped);
+    /* the RAM of a camera that went down (card159: a bank of 85 s, 2 records read with version 1): damage in the middle -
+     * a header's bit, a data bit (the CRC), a run of zeros over several records - costs the records it hits, the walk
+     * goes on to the head */
+    {
+        seen_t whole = s;
+        u32 p1 = r.bank[1].h[DH_TAIL], k, len;
+        u8 *d = (u8 *)r.bank[1].d;
+
+        for (k = 0; k < 10; k++) {          /* the 11th record from the tail */
+            len = d[(p1 + 2) % 65536] | d[(p1 + 3) % 65536] << 8;
+            p1 += DRING_REC + (len + 3) / 4 * 4;
+        }
+        d[(p1 + 5) % 65536] ^= 0x10;        /* its number */
+        d[(p1 + 300) % 65536] ^= 0x01;      /* a few records on: a byte of data or header */
+        memset(d + (p1 + 2000) % 65000 / 4 * 4, 0, 400);   /* further on: 400 bytes of zeros */
+        s = walk(&r.bank[1]);
+        CHECK(s.gaps == 3 && s.skipped > 400 && s.n + 4 < whole.n && s.n + 20 > whole.n && s.last == 4999);
+        CHECK(!strcmp(s.text, "wrap 4999.."));
+    }
     memset(big, 1, sizeof(big));
     CHECK(!dring_put(&r.bank[1], DR_SNAP, 0, big, sizeof(big), 0, 0) && r.bank[1].h[DH_LOST] == 1);
 
@@ -270,6 +289,7 @@ static void test_proto(void)
         CHECK(!strncmp((char *)host_ptp_out, want, sizeof(want) - 1));
     }
     CHECK(strstr((char *)host_ptp_out, "\nrestart=no\nshoot=idle\n") != 0);
+    CHECK(strstr((char *)host_ptp_out, "\nkind=debug\n") != 0);          /* the build's kind */
 
     /* the log reaches the ring; the snapshots name the watched tasks; the core task's write of the log is marked */
     log_printf(OMK_LOG_INFO, "hello ring");
@@ -284,6 +304,21 @@ static void test_proto(void)
     b.size = 65536;
     s = walk(&b);
     CHECK(s.n > 5 && s.types[DR_LOG] && s.types[DR_MAP] == 1 && s.types[DR_SNAP] >= 2 && s.types[DR_MARK] >= 2 && !s.bad);
+    {                                       /* another service's event: a mark with its text, a snapshot, the window */
+        u32 marks = s.types[DR_MARK], snaps = s.types[DR_SNAP], i, found = 0;
+        static const char ev[] = "optics: armed W1";
+
+        dbg_event("optics: armed", "W1");
+        s = walk(&b);
+        CHECK(s.types[DR_MARK] == marks + 1 && s.types[DR_SNAP] == snaps + 1 && !s.bad);
+        for (i = 0; i + sizeof(ev) - 1 <= 65536 && !found; i++)
+            found = !memcmp(host_keep + 128 + i, ev, sizeof(ev) - 1);
+        CHECK(found);
+        CHECK(dbg_tick(250) == 50);         /* the window after it: the core loop serves the snapshots */
+        for (i = 0; i < 25; i++)
+            service();
+        CHECK(dbg_tick(250) == 250);
+    }
     r = call(DBG_OP_GET, DBG_BANK, 0, 0, 4096);
     CHECK(r.code == 0x2001 && r.n == 3 && r.p[0] == 4096 && host_ptp_out_n == 4096 && r.p[1] == 0 && r.p[2] > 100);
     CHECK(host_ptp_out[0] == DRING_SYNC);
@@ -466,6 +501,40 @@ static void test_nocard(void)
     CHECK(log_level() >= OMK_LOG_INFO);
 }
 
+/* [debug] stuck_mem: the ranges' words into the log once, when the application stays in a passing state; a range out of
+ * the readable memory ends the list (warned) */
+static void test_stuck(void)
+{
+    u32 i;
+    long n;
+    char *t, p[512];
+    FILE *f;
+
+    memset(host_keep, 0, sizeof(host_keep));
+    for (i = 0; i < 64; i++)
+        host_mem[i] = (u8)i;
+    start("[debug]\r\nenabled = on\r\nstuck_mem = 0xa0001000:32, 0x60001010:4, 0x90000000:16, 0xa0001000:16\r\n");
+    host_ui_state = DRV_UI_HALF;            /* the half-press state, for good */
+    for (i = 0; i < 40; i++)
+        service();
+    host_ui_state = 0;
+    log_flush();
+    snprintf(p, sizeof(p), "%s/LOG/CORE.LOG", host_dir);
+    f = fopen(p, "rb");
+    t = calloc(1, 65536);
+    n = f && t ? (long)fread(t, 1, 65535, f) : 0;
+    if (f)
+        fclose(f);
+    CHECK(n > 0 && strstr(t, "debug: stuck_mem: a range not ADDR:LEN of readable memory"));
+    CHECK(n > 0 && strstr(t, "debug: application state 5101 for"));
+    CHECK(n > 0 && strstr(t, "debug: mem a0001000: 03020100 07060504 0b0a0908 0f0e0d0c"));
+    CHECK(n > 0 && strstr(t, "debug: mem a0001010: 13121110 17161514 1b1a1918 1f1e1d1c"));
+    CHECK(n > 0 && strstr(t, "debug: mem 60001010: 13121110 00000000 00000000 00000000"));
+    CHECK(n > 0 && !strstr(t, "debug: mem a0001020"));     /* once a stay; the range after the bad one left out */
+    CHECK(n > 0 && strstr(t, "debug: stuck_mem words (stuck)"));
+    free(t);
+}
+
 int main(int argc, char **argv)
 {
     const char *what = argc > 2 ? argv[2] : "ring";
@@ -482,6 +551,8 @@ int main(int argc, char **argv)
         test_write();
     else if (!strcmp(what, "nocard"))
         test_nocard();
+    else if (!strcmp(what, "stuck"))
+        test_stuck();
     else
         failed = 1;
     if (failed)

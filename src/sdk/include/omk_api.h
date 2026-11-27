@@ -8,13 +8,24 @@
 #include "omk_types.h"
 #include "omk_events.h"
 
-#define OMK_API_VERSION 19
+#define OMK_API_VERSION 20
 
 #define OMK_LOG_OFF 0
 #define OMK_LOG_ERROR 1
 #define OMK_LOG_WARN 2
 #define OMK_LOG_INFO 3
 #define OMK_LOG_DEBUG 4
+/* A module's line of the debug level: OMK_LOG_D(api, self, "text %u", n). It is compiled into a debug build of the module
+ * only (OMK_DEBUG, make BUILD=debug); a release build has neither the call nor its text, and its arguments are not
+ * evaluated. A release core keeps no line of the debug level, whoever sends it */
+#ifdef OMK_DEBUG
+#define OMK_LOG_D(api, self, ...) ((api)->log((self), OMK_LOG_DEBUG, __VA_ARGS__))
+#else
+#define OMK_LOG_D(api, self, ...) ((void)0)
+#endif
+/* In module_init, once api and self are known: a debug build of the module says so (a line of the debug level).
+ * tools/buildcheck.py tells a module file's kind by this line's text */
+#define OMK_MODULE_KIND(api, self) OMK_LOG_D(api, self, "a debug build of the module")
 
 #define OMK_STORE_PERSIST 1
 
@@ -63,6 +74,13 @@ typedef void (*omk_look_fn)(u32 event, u32 arg, void *ctx);
                                                (Off, Low, Med, High); a long OK on the item: index 1, value 0 */
 #define OMK_GRAIN_LEVELS 4                  /* Off, Low, Med, High */
 #define OMK_GRAIN_TILES 32                  /* grain tile containers at most */
+#define OMK_EDIT_OPTICS 4                   /* API 20: the optics rows (Bloom, Halation) after the grain item. In
+                                               look_edits' groups: the rows are shown. Events: index OMK_OPTICS_* - the
+                                               row, value its strength 0..OMK_OPTICS_MAX; a long OK on a row: value 0 */
+#define OMK_OPTICS_BLOOM 0
+#define OMK_OPTICS_HALATION 1
+#define OMK_OPTICS_ROWS 2
+#define OMK_OPTICS_MAX 5                    /* strengths 0 (off) .. 5 */
 #define OMK_EDIT_RESET 0x80                 /* with a group: the group back to the entry's own values (index, value 0) */
 #define OMK_EDIT_EVENT(group, index, value) ((u32)(group) << 24 | (u32)(index) << 16 | ((u32)(value) & 0xffff))
 #define OMK_EDIT_GROUP_OF(arg) ((arg) >> 24 & 0x7f)
@@ -98,7 +116,9 @@ typedef struct omk_look_edits {
 #define OMK_LOOK_PIC_TYPE 10                /* API 17: the grain item's label over the dial that changes the tile, up to 56 x 24 */
 #define OMK_LOOK_PIC_STRENGTH 11            /* API 17: ... over the dial that changes the strength, up to 56 x 24 (core 1.29;
                                                116 and 104 before) */
-#define OMK_LOOK_PICTURES 12
+#define OMK_LOOK_PIC_BLOOM 12               /* API 20: the optics rows' signs in the editor column's left cell, 46 x 46, */
+#define OMK_LOOK_PIC_HALATION 13            /* left of the camera's own number (without them: the camera's "S") */
+#define OMK_LOOK_PICTURES 14
 
 /* Event handler: data is the event structure from omk_events.h, ctx is what the module passed at registration */
 typedef void (*omk_handler)(omk_ev *ev, void *data, void *ctx);
@@ -290,6 +310,15 @@ typedef struct {
      * one), a module defers its own writes as core does; -1 - not available (power-off or sleep: file_open refuses).
      * Any module, from its periodic call or an event handler; cheap (two reads of the firmware's state) */
     int (*card_busy)(void);
+
+    /* API 20. The optics rows of the look's column (OMK_EDIT_OPTICS in look_edits' groups): the strengths 0..OMK_OPTICS_MAX
+     * of entry `entry`, the one the UI shows, by row (OMK_OPTICS_BLOOM, OMK_OPTICS_HALATION; count OMK_OPTICS_ROWS). The rows
+     * show them, a dial's change comes back as OMK_LOOK_EDIT (OMK_EDIT_OPTICS); core keeps the chosen entry's strengths for
+     * the look's stills. The rows keep every entry's strengths given and show them at once when a dial chooses that entry
+     * (the column is drawn then, before the module answers): a module gives all entries' at its start, the chosen entry's
+     * last - core takes the last ones given as the chosen entry's. Only the owner of the look; copied. 0; -1 not the owner
+     * or bad; -2 the rows are not available on this firmware; -3 no optics layer ([optics] layer off): no rows */
+    int (*look_optics)(omk_mod *m, u32 entry, const u8 *strength, u32 count);
 } omk_api;
 
 #define OMK_ISP_LIVE 1

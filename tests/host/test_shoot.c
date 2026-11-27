@@ -180,6 +180,13 @@ static void test_parse(void)
     CHECK(shoot_parse("prof:c16") == -1);
     CHECK(shoot_parse("nothing") == -1);
     CHECK(shoot_parse("look:a-name-much-longer-than-the-buffer-of-a-step") == -1);
+    /* a look's name takes up to 31 characters, as look_list: the 27 of 'Kodak Ektachrome E100 Night' too */
+    CHECK(shoot_parse("look:Kodak Gold 200, keep, look:Kodak Ektachrome E100 Night, keep") == 0);
+    CHECK(shoot_parse(" look:abcdefghijklmnopqrstuvwxyz01234 , keep") == 0);
+    CHECK(shoot_parse("look:abcdefghijklmnopqrstuvwxyz012345") == -1);
+    CHECK(shoot_parse("look:Kodak Ektar 100, keep, look:Kodak Gold 200, keep, look:Fujifilm Eterna 500, keep, "
+                      "look:Kodak Ektachrome E100 Night, keep, look:Ilford HP5 Plus 400, keep, look:Kodak Tri-X 400 SHC, "
+                      "keep, look:Kodak Gold 200, keep") == 0);
     CHECK(shoot_parse("keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep") == 0);
     CHECK(shoot_parse("keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep,keep") == -1);
 }
@@ -523,6 +530,32 @@ static void test_hands_stuck(void)
     CHECK(host_hfw_posts == 2 && host_resets == 1 && host_reset_cause == 0x4f4d4b48);
 }
 
+/* A step not understood in SHOOT.RUN: the scenario fails at once - SHOOT.END says so and the camera restarts once it shoots
+ * (OK in the dialog taken as charge only, as at the end of every scenario), without the two minutes' wait for a start
+ * that cannot come */
+static void test_hands_badstep(void)
+{
+    char b[300];
+    shoot_info si;
+    u32 t0;
+
+    reset_cam();
+    cam.usb = 1;
+    host_usb_choice = DRV_USB_DIALOG;
+    write_once("[shoot]\r\nsteps = keep, look:a-name-much-longer-than-the-31-characters\r\nhands_free = on\r\n"
+               "session = 00000004\r\n");
+    hf_setup(shoot_once());
+    shoot_setup(now_ms());
+    shoot_status(&si);
+    CHECK(si.state == SHOOT_FAILED && strstr(si.why, "not understood"));
+    t0 = now_ms();
+    run_hands(20000, 1);
+    CHECK(host_hfw_posts == 1 && now_ms() - t0 < 10000);
+    CHECK(host_ok_presses == 1 && host_usb_hits == 1);
+    CHECK(read_end(b, sizeof(b)) > 0 && strstr(b, "session=00000004") && strstr(b, "result=failed") &&
+          strstr(b, "not understood"));
+}
+
 /* hands_free in OMKIT.INI is not taken: one-shot only (OMKIT.INI of this group has it) */
 static void test_hands_ini(void)
 {
@@ -559,6 +592,8 @@ int main(int argc, char **argv)
             test_hands_missed();
         else if (!strcmp(t, "stuck"))
             test_hands_stuck();
+        else if (!strcmp(t, "badstep"))
+            test_hands_badstep();
         else
             test_hands_ini();
         if (failed)

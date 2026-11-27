@@ -7,13 +7,27 @@
 #include "omk_look.h"
 #include "omk_prof.h"
 
+/* [core] fw_cache_inv: the firmware's own cache invalidation in the hooks of the picture mode screen instead of the read
+ * eviction - not tried on the camera, a debug build's key; a release build always evicts by reading */
+#ifdef OMK_DEBUG
+#define FW_CACHE_INV cfg_bool("core", "fw_cache_inv", 0)
+#else
+#define FW_CACHE_INV 0
+#endif
+
 static omk_mod *owner;
 static omk_look_fn owner_fn;
 static void *owner_ctx;
 static drv_look_info seen;
+#ifdef OMK_DEBUG
 static u32 trace_at;                        /* the dial trace: the next entry to log */
-static u32 upkeep_ms, warned, seen_takes;
-static int edits_rc, grain_rc;
+static u32 seen_takes;
+#endif
+static u32 upkeep_ms, warned;
+static int edits_rc, grain_rc, optics_rc;
+static u8 optics_val[OMK_OPTICS_ROWS];      /* the optics rows' strengths of the owner's chosen entry (API 20) */
+static u32 optics_entry;
+static int optics_known;
 
 int look_enable(omk_mod *m, const char *slot, omk_look_fn fn, void *ctx)
 {
@@ -27,7 +41,7 @@ int look_enable(omk_mod *m, const char *slot, omk_look_fn fn, void *ctx)
         slot = "";
     log_printf(OMK_LOG_INFO, "look: installing hooks, slot %s", slot);
     log_flush();
-    rc = drv_look_install(cfg_bool("core", "fw_cache_inv", 0), slot);
+    rc = drv_look_install(FW_CACHE_INV, slot);
     if (rc == -1) {
         log_printf(OMK_LOG_ERROR, "look: no slot '%s' here; slots: %s", slot, drv_look_slots());
         return -1;
@@ -154,6 +168,47 @@ int look_grain(omk_mod *m, u32 entry, s32 tile, u32 level)
     return rc;
 }
 
+/* API 20: the optics rows' strengths of entry `entry`: the driver shows them while the UI is at that entry; core keeps
+ * them as the chosen entry's for the look's stills (look_optics_now) whatever the driver answers - they are the owner's
+ * values of the preset it applies, the rows only show them */
+int look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 count)
+{
+    u32 i, same;
+    int rc;
+
+    if (!m || m != owner || !strength || count != OMK_OPTICS_ROWS)
+        return -1;
+    for (i = 0, same = optics_known && entry == optics_entry; i < OMK_OPTICS_ROWS; i++) {
+        if (strength[i] > OMK_OPTICS_MAX)
+            return -1;
+        same &= strength[i] == optics_val[i];
+    }
+    rc = drv_look_optics(entry, strength);
+    if (rc && rc != optics_rc)              /* once per code */
+        log_printf(rc == -3 ? OMK_LOG_INFO : OMK_LOG_WARN, rc == -3 ? "look: optics rows off (no optics layer: [optics] "
+                   "layer)" : "look: optics rows not shown, code %d", rc);
+    optics_rc = rc;
+    if (!same)
+        log_printf(OMK_LOG_DEBUG, "look: entry %u: bloom %u, halation %u", entry + 1, strength[OMK_OPTICS_BLOOM],
+                   strength[OMK_OPTICS_HALATION]);
+    for (i = 0; i < OMK_OPTICS_ROWS; i++)
+        optics_val[i] = strength[i];
+    optics_entry = entry;
+    optics_known = 1;
+    optics_strength_now();                  /* the next still takes them, not only after core's next pass */
+    return rc;
+}
+
+int look_optics_now(u8 *out)
+{
+    u32 i;
+    int on = owner && optics_known && drv_look_active();
+
+    for (i = 0; i < OMK_OPTICS_ROWS; i++)
+        out[i] = on ? optics_val[i] : 0;
+    return on;
+}
+
 /* CANI v1 (OMKit/docs/formats/isp.md): a 64-byte header {u16 version 1, u16 kind 1 (a drawing), u16 256, u16 256, u16
  * records 1..64, u16 flags, u32 bytes of records <= 6144, texts}, then the records {u8 op 1 fill non-zero, 2 fill even-odd,
  * 3 stroke; u8 caps 0..2; u16 0; u32 RGBA; u32 stroke width (float bits); u16 segments 1..352; u16 points 0..320} + the
@@ -256,6 +311,7 @@ void look_drop_module(omk_mod *m)
     drv_look_list(0, 0, 0);
     owner = 0;
     owner_fn = 0;
+    optics_known = 0;
     log_printf(OMK_LOG_WARN, "look: %s failed to start, the slot shows the look without entries", m->name);
 }
 
@@ -281,6 +337,7 @@ void look_service(u32 now)
         }
     }
     drv_look_stats(&s);
+#ifdef OMK_DEBUG
     {
         drv_prof_info p;
 
@@ -291,6 +348,7 @@ void look_service(u32 now)
                        s.index + 1, s.count, drv_exif_count());
         }
     }
+#endif
     run = owner_fn && owner->state == MOD_RUNNING;
     if (s.seq != seen.seq) {                /* the user chose the look or left it */
         log_printf(OMK_LOG_INFO, "look: the user turned it %s (entry %u of %u)", s.ui_on ? "on" : "off", s.index, s.count);
@@ -299,6 +357,7 @@ void look_service(u32 now)
         if (run)
             owner_fn(s.ui_on ? OMK_LOOK_ON : OMK_LOOK_OFF, s.ui_on ? s.index : 0, owner_ctx);
     }
+#ifdef OMK_DEBUG
     for (;;) {                              /* every dial write since the last loop, with its time */
         u32 t[8], w[8], n, i, lost;
 
@@ -314,6 +373,7 @@ void look_service(u32 now)
     }
     if (s.swallowed != seen.swallowed && s.pick == seen.pick && s.dial_last >> 21 & 1)
         log_printf(OMK_LOG_DEBUG, "look: dial 615 hue wrote %u, not a step (%u dial writes)", s.dial_last & 0xffff, s.swallowed);
+#endif
     seen.swallowed = s.swallowed;
     for (;;) {                              /* the editors' changes, oldest first */
         u32 ev[8], n, i, lost;

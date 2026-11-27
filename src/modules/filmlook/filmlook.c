@@ -4,7 +4,7 @@
  * .isp files (OMKit/docs/formats/isp.md) in OMKIT\FILMLOOK\ - 8.3 or long names - shown by the title in their header. The chosen preset and
  * whether the look is on are kept in the module's store and brought back at the next power-on.
  * The editors after the look's item (enable_edits) change the chosen preset's values in a copy of its tables (edits.c),
- * the file is not touched. Shown: the tone curve and the grain item. edits.c also holds the sectors' saturation
+ * the file is not touched. Shown: the tone curve, the grain item and the optics rows. edits.c also holds the sectors' saturation
  * (Color/Vivid) and the black-and-white filter (Color/Level), but they are not shown (show()), and such edits stored by
  * earlier versions are dropped at load. The edits of every preset are kept in the store by its file name and CRC
  * (save_preset_edits); a changed file drops them.
@@ -25,6 +25,7 @@
  *   grain = on             ; API 17: the grain item (the tile and its strength, per preset) when core has grain tiles
  *   grain_tile =           ; the tile of a preset not edited yet: its container's name (CLASS400 or CLASS400.GRN);
  *                          ; empty - the first by name
+ *   optics = on            ; API 20: the optics rows Bloom and Halation (strengths 0..5 per preset) after the grain item
  *
  * The grain (core 1.15, API 17): core keeps the grain tiles (OMKIT\GRAIN\*.GRN) and puts the grain on the look's stills;
  * the grain item after the editors steps the tile (rear dial) and the strength Off, Low, Med, High (front dial), a long
@@ -32,6 +33,9 @@
  * Colour grain (core 1.21, [grain] chroma in OMKIT.INI): never on a black-and-white preset - a Cb or Cr gain of 0, or the
  * rows of its matrix (with the edits: a black-and-white filter writes equal rows) within 2 of each other in every column
  * (omk_ispb.h; core applies the same rule to the block it gets). The log line of a preset says which it is.
+ * The optics rows (API 20): Bloom and Halation, strengths 0 (off) .. 5 per preset, kept with its edits (EDITS_FORMAT 3;
+ * older records: 0); a long OK on a row sets it to 0. Core keeps the chosen preset's strengths for the look's stills; the
+ * effects themselves are core's optics layer ([optics] layer = on in OMKIT.INI; without it the rows are not shown).
  */
 #include "omk_api.h"
 #include "edits.h"
@@ -65,6 +69,9 @@ typedef struct {
 } edit_rec;
 
 #define EDIT_REC_V1 (OMK_NAME_MAX + 4 + EDITS_V1_SIZE)   /* a record of format 1 (FILMLOOK 1.3, 1.4): no grain */
+/* A record of format 2 (78 bytes of fields, padded to 80 and stored zeroed) has the size of one of format 3: the optics
+ * strengths sit in its padding, the format byte tells them apart */
+typedef char edit_rec_size_kept[sizeof(edit_rec) == 80 ? 1 : -1];
 #define STORE_SIZE (64 + OMK_LOOK_MAX * (8 + sizeof(edit_rec)))
 
 enum { NOTHING, APPLY, STOCK };
@@ -92,6 +99,7 @@ static u32 keys_used[2];                    /* the store keys KEY_EDIT + k taken
 static int same(const char *a, const char *b);
 static char (*tiles)[13];                   /* the grain tiles core has (their container files), API 17 */
 static u32 ntiles, tile_default;
+static u32 optics_on;                       /* API 20: the optics rows shown (optics = on, enable_edits = on) */
 
 /* The grain tile of a preset: the number of its container, -1 - its file is gone */
 static s32 tile_of(const preset *p)
@@ -115,6 +123,24 @@ static void grain_publish(void)
     rc = api->look_grain(self, current, edits_on ? tile_of(&presets[current]) : -1, edits_on ? presets[current].e.grain : 0);
     if (rc)
         api->log(self, OMK_LOG_WARN, "grain not given to core, code %d", rc);
+}
+
+/* The chosen preset's optics strengths to core: the rows show them, core keeps them for the look's stills. all: every
+ * other preset's first - the rows keep each preset's and show them at once when a dial chooses it (the column is drawn
+ * in that step, before the preset's apply); core keeps the last ones given as the chosen preset's, so those go last */
+static void optics_publish(u32 all)
+{
+    u32 i;
+    int rc;
+
+    if (!optics_on || current >= count)
+        return;
+    for (i = 0; all && i < count; i++)
+        if (i != current)
+            api->look_optics(self, i, presets[i].e.optics, OMK_OPTICS_ROWS);
+    rc = api->look_optics(self, current, presets[current].e.optics, OMK_OPTICS_ROWS);
+    if (rc)
+        api->log(self, OMK_LOG_WARN, "optics strengths not given to core, code %d", rc);
 }
 
 static u32 get16(const u8 *p)
@@ -223,7 +249,7 @@ static int add(const char *file)
     if (arts_on && cani && !api->look_art(self, count, cani, cani_n))   /* the entry's number is its place in the list */
         arts++;
     count++;
-    api->log(self, OMK_LOG_DEBUG, "preset %u: %s '%s', %u bytes, CRC %08x", count, p->file, p->title, n, p->crc);
+    OMK_LOG_D(api, self, "preset %u: %s '%s', %u bytes, CRC %08x", count, p->file, p->title, n, p->crc);
     return 1;
 }
 
@@ -335,7 +361,8 @@ static u32 put_num(char *o, u32 k, s32 v, u32 hex)
     return k;
 }
 
-/* "FILMLOOK <file> CRC <crc> [E [t=Sh,Mid,Hi] [v=12 shifts] [l=filter,level]] [F <matrix by rows>] '<title>'": the edits
+/* "FILMLOOK <file> CRC <crc> [E [t=Sh,Mid,Hi] [v=12 shifts] [l=filter,level] [g=tile,strength] [o=bloom,halation]]
+ * [F <matrix by rows>] '<title>'": the edits
  * right after the CRC, so a long name cuts the matrix or the title rather than them; a text cut to EXIF_MAX ends in '~' */
 static void exif_text(const u8 *ispb)
 {
@@ -375,6 +402,12 @@ static void exif_text(const u8 *ispb)
             k = put_str(t, k, ",");
             k = put_num(t, k, p->e.grain, 0);
         }
+        if (p->e.optics[OMK_OPTICS_BLOOM] || p->e.optics[OMK_OPTICS_HALATION]) {   /* the optics rows' strengths */
+            k = put_str(t, k, " o=");
+            k = put_num(t, k, p->e.optics[OMK_OPTICS_BLOOM], 0);
+            k = put_str(t, k, ",");
+            k = put_num(t, k, p->e.optics[OMK_OPTICS_HALATION], 0);
+        }
     }
     if (ispb && (get16(ispb + 2) & 1)) {    /* the matrix present */
         k = put_str(t, k, " F");
@@ -409,6 +442,8 @@ static void show(void)
         groups |= 1u << OMK_EDIT_TONE;
     if (edits_on && ntiles)
         groups |= 1u << OMK_EDIT_GRAIN;     /* the grain item: whatever the preset */
+    if (optics_on)
+        groups |= 1u << OMK_EDIT_OPTICS;    /* the optics rows: whatever the preset */
 
     edits_show(base, work, &presets[current].e, groups, &st);
     st.entry = current;
@@ -462,6 +497,7 @@ static int apply(void)
         exif_text(work);
         show();
         grain_publish();
+        optics_publish(0);
     }
     return rc;
 }
@@ -527,6 +563,9 @@ static int rec_get(u32 k, edit_rec *r)
     n = api->store_get(store, (u16)(KEY_EDIT + k), r, sizeof(*r));
     if (n != (int)sizeof(*r) && !(n == EDIT_REC_V1 && r->e.format == 1))
         return 0;                           /* format 1 (no grain): its fields as they are, the grain 0 - Off */
+    if (r->e.format < 3)                    /* formats 1, 2: no optics strengths (2: the padding there) - 0, off */
+        for (i = 0; i < OMK_OPTICS_ROWS; i++)
+            r->e.optics[i] = 0;
     r->file[sizeof(r->file) - 1] = 0;
     return 1;
 }
@@ -541,6 +580,9 @@ static void rec_clean(edits_t *e)
         e->grain = 0;
     for (n = 0; n < 3; n++)
         e->tone[n] = e->tone[n] < -7 ? -7 : e->tone[n] > 7 ? 7 : e->tone[n];
+    for (n = 0; n < OMK_OPTICS_ROWS; n++)
+        if (e->optics[n] > OMK_OPTICS_MAX)
+            e->optics[n] = 0;
 }
 
 /* The stored edits back: by the file name, if the file is the same (CRC); a changed file drops them. Records of files not
@@ -558,8 +600,8 @@ static void load_edits(void)
             ;
         if (i == count)
             continue;
-        if (r.e.format != EDITS_FORMAT && r.e.format != 1) {   /* FILMLOOK 1.2 kept Color/Vivid as values in place of the
-                                                                   preset's */
+        if (r.e.format < 1 || r.e.format > EDITS_FORMAT) {    /* FILMLOOK 1.2 kept Color/Vivid as values in place of the
+                                                                   preset's (format 0) */
             api->log(self, OMK_LOG_INFO, "%s: edits of an older FILMLOOK dropped", presets[i].file);
             api->store_del(store, (u16)(KEY_EDIT + k));
             keys_used[k / 32] &= ~(1u << k % 32);
@@ -622,7 +664,7 @@ static void restore_early(const char *saved)
     /* the preset's edits as load_edits will take them: the same file (name and CRC), a format still read, without the
      * editors taken out. Should the two ever differ, apply() puts it right at the first tick */
     for (k = 0; store && edits_save && edits_on && k < OMK_LOOK_MAX; k++)
-        if (rec_get(k, &r) && same(r.file, saved) && r.crc == early_crc && (r.e.format == EDITS_FORMAT || r.e.format == 1)) {
+        if (rec_get(k, &r) && same(r.file, saved) && r.crc == early_crc && r.e.format >= 1 && r.e.format <= EDITS_FORMAT) {
             rec_clean(&r.e);
             e = r.e;
             edits_reset(&e, OMK_EDIT_VIVID);
@@ -691,8 +733,10 @@ static void on_look(u32 event, u32 arg, void *ctx)
         break;
     case OMK_LOOK_ENTRY:
         if (arg < count) {
-            if (!edits_save && current < count && arg != current)
+            if (!edits_save && current < count && arg != current) {
                 edits_reset(&presets[current].e, OMK_EDIT_GROUPS);    /* an edit lasts while its preset stays chosen */
+                optics_publish(0);          /* the rows keep its strengths (now 0) for a dial's way back to it */
+            }
             current = arg;
             pending = APPLY;
             edit_only = 0;
@@ -714,6 +758,21 @@ static void on_look(u32 event, u32 arg, void *ctx)
                      tiles[tile_of(p)] : "(none)", p->e.grain);
             save_edits(current);
             grain_publish();
+            if (base_of == current)
+                exif_text(work);
+            return;
+        }
+        if (optics_on && current < count && OMK_EDIT_GROUP_OF(arg) == OMK_EDIT_OPTICS) {
+            preset *p = &presets[current];
+            s32 v = OMK_EDIT_VALUE_OF(arg);
+            u32 i = OMK_EDIT_INDEX_OF(arg);
+
+            if (i >= OMK_OPTICS_ROWS || v < 0 || v > OMK_OPTICS_MAX || p->e.optics[i] == (u8)v)
+                return;
+            p->e.optics[i] = (u8)v;
+            api->log(self, OMK_LOG_INFO, "preset %u: %s %d", current + 1, i == OMK_OPTICS_BLOOM ? "bloom" : "halation", v);
+            save_edits(current);
+            optics_publish(0);
             if (base_of == current)
                 exif_text(work);
             return;
@@ -807,8 +866,10 @@ static void load_pictures(void)
         failed += r < 0;
     }
     api->free(self, px);
-    api->log(self, failed ? OMK_LOG_WARN : OMK_LOG_DEBUG, "%u pictures set, %u not in the module file, %u failed", set, missing,
-             failed);
+    if (failed)
+        api->log(self, OMK_LOG_WARN, "%u pictures set, %u not in the module file, %u failed", set, missing, failed);
+    else
+        OMK_LOG_D(api, self, "%u pictures set, %u not in the module file, %u failed", set, missing, failed);
 }
 
 /* The order: the store and the two services first (their hooks go in at isp_scope and look_enable), so that a look that
@@ -825,6 +886,7 @@ int module_init(const omk_api *a, omk_mod *m)
         return 1;
     api = a;
     self = m;
+    OMK_MODULE_KIND(api, self);
     presets = api->alloc(self, OMK_LOOK_MAX * sizeof(preset));
     if (!presets)
         return 2;
@@ -875,6 +937,9 @@ int module_init(const omk_api *a, omk_mod *m)
     if (store && edits_save)
         load_edits();
     grain_init();
+    optics_on = api->version >= 20 && edits_on && api->cfg_bool(self, "optics", 1);
+    api->log(self, OMK_LOG_INFO, "optics rows: %s", optics_on ? "on" : api->version < 20 ? "core before API 20" :
+             "off (optics or enable_edits)");
     load_pictures();
     rc = api->look_name(self, api->cfg_str(self, "name", "Film Look"));
     if (rc)
@@ -883,6 +948,8 @@ int module_init(const omk_api *a, omk_mod *m)
     rc = api->look_list(self, names, count, current);
     if (rc)
         api->log(self, OMK_LOG_WARN, "presets not given to the editor, code %d", rc);
+    optics_publish(1);                      /* now, not at the first apply: the column the UI builds when the user steps
+                                               onto the look has the optics rows only once core has had their values */
     if (active && count) {
         rc = look_tried ? look_rc : api->look_set(self, 1);
         if (rc) {                           /* the picture mode was changed without OMKit: the look is off */

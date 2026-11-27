@@ -1,8 +1,11 @@
 #!/bin/sh
 # Run the host tests built by `make -C OMKit test` (OMKit/Makefile builds the programs; run from OMKit/).
 #
-#   sh tests/host/run.sh <dir of the test programs> <host C compiler> [<module dir> <MN10300 prefix> <python>]
+#   sh tests/host/run.sh <dir of the test programs> <host C compiler> <release|debug> [<module dir> <MN10300 prefix> <python>]
 #
+# The build's kind is the one the programs were compiled as (OMKit/Makefile, BUILD): the tests of the debug kind's own
+# parts - the test scenario, the scenario without hands, the debug service - run for a debug build only, and the group
+# "kind" of test_core checks what each kind does with the debug build's settings.
 # <module dir> holds HELLO.OMM built with the MN10300 toolchain and <MN10300 prefix> is its tool prefix
 # (.../bin/mn10300-elf-); without them (empty) the module loader and the firmware symbol checks are skipped.
 # Each program runs in a fresh temporary folder (it stands for the card); prints one line per check and exits 1 when
@@ -10,9 +13,10 @@
 set -u
 BIN=$1
 HOST_CC=$2
-MODS=${3:-}
-TC=${4:-}
-PYTHON=${5:-python3}
+KIND=$3
+MODS=${4:-}
+TC=${5:-}
+PYTHON=${6:-python3}
 
 failed=0
 pass() { echo "  ok    $1"; }
@@ -20,8 +24,9 @@ fail() { echo "  FAIL  $1"; failed=1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-# core parts (tests/host/test_core.c): the default group, then cfg, mem and power, each on its own empty "card"
-for group in all cfg mem power; do
+# core parts (tests/host/test_core.c): the default group, then cfg, mem, power, the lever off without a power-off, the
+# hold of card writes in a half-press and the build's kind, each on its own empty "card"
+for group in all cfg mem power lever uihold kind; do
     mkdir "$tmp/$group"
     arg=$group
     [ "$group" = all ] && arg=
@@ -29,6 +34,54 @@ for group in all cfg mem power; do
     out=$("$BIN/test_core" "$tmp/$group" $arg 2>&1)
     if [ "$out" = ok ]; then pass "core: $group"; else fail "core: $group"; echo "$out" | sed 's/^/        /'; fi
 done
+
+# The optics layer as a user gets it (core/optics.c), both build kinds: 1 - no [optics] section, 2 - no OMKIT.INI (the
+# sample written): on, the field set's values, the stills get the layer; 4 - layer = off: nothing installed. 3, a
+# release build only: the keys of a debug build in [optics] - none read, one warning
+for phase in 1 2 3 4; do
+    [ "$phase" = 3 ] && [ "$KIND" = debug ] && continue
+    mkdir "$tmp/layer_default$phase"
+    out=$("$BIN/test_core" "$tmp/layer_default$phase" layer_default $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics layer by default $phase"; else fail "core: optics layer by default $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+
+if [ "$KIND" = debug ]; then
+# The optics probe's cached read (core/optics.c): three power-ons in one folder - armed only with the log and the state on
+# the card, a reset while armed stops it, another run number starts again
+mkdir "$tmp/optics"
+for phase in 1 2 3; do
+    out=$("$BIN/test_core" "$tmp/optics" optics $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics, power-on $phase"; else fail "core: optics, power-on $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+
+# The optics probe's bisection: substages armed one by one with the log and the state on the card, a reset stops it at
+# the one before, another run number starts again; a run from a substage on, a test that resets lets it go on
+mkdir "$tmp/bisect"
+for phase in 1 2 3 4 5 6 7; do
+    out=$("$BIN/test_core" "$tmp/bisect" bisect $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics bisection, power-on $phase"; else fail "core: optics bisection, power-on $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+
+# The optics schedule: one entry a press, the loop or the sleep with it, bad entries left out
+mkdir "$tmp/schedule"
+out=$("$BIN/test_core" "$tmp/schedule" schedule 2>&1)
+if [ "$out" = ok ]; then pass "core: optics schedule"; else fail "core: optics schedule"; echo "$out" | sed 's/^/        /'; fi
+
+# The optics layer's settings: strengths alone (the jobs get L4, defaults), a schedule of layer substages (route 403,
+# byte positions, warnings)
+for phase in 1 2; do
+    mkdir "$tmp/layer$phase"
+    out=$("$BIN/test_core" "$tmp/layer$phase" layer $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics layer settings $phase"; else fail "core: optics layer settings $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+# ... and its further sets: schedule entries L4:X with [optics.X] over [optics]
+mkdir "$tmp/layer_sets"
+out=$("$BIN/test_core" "$tmp/layer_sets" layer_sets 2>&1)
+if [ "$out" = ok ]; then pass "core: optics layer settings by the press"; else fail "core: optics layer settings by the press"; echo "$out" | sed 's/^/        /'; fi
+# ... and the field's: [optics] layer = on, the strengths from the look's rows, the steps and the day's keys
+mkdir "$tmp/layer_rows"
+out=$("$BIN/test_core" "$tmp/layer_rows" layer_rows 2>&1)
+if [ "$out" = ok ]; then pass "core: optics layer by the look's rows"; else fail "core: optics layer by the look's rows"; echo "$out" | sed 's/^/        /'; fi
 
 # The test scenario (tests/host/test_shoot.c): its state machine against a simulated camera, by keys and by wifi events
 for path in keys wifi; do
@@ -39,12 +92,14 @@ done
 
 # The scenario without hands (core/handsfree.c), each case a start of its own: the hold, the USB dialog answered, the
 # result file and the restart (full); MTP asked for once at the start after it (next); connected to the computer before
-# the hold (missed); the application stuck, the power-off job not taken, the watchdog (stuck); not from OMKIT.INI (ini)
-for case in full next missed stuck ini; do
+# the hold (missed); the application stuck, the power-off job not taken, the watchdog (stuck); a step not understood: the
+# end at once (badstep); not from OMKIT.INI (ini)
+for case in full next missed stuck badstep ini; do
     mkdir "$tmp/hands_$case"
     out=$("$BIN/test_shoot" "$tmp/hands_$case" hands $case 2>&1)
     if [ "$out" = ok ]; then pass "core: hands-free ($case)"; else fail "core: hands-free ($case)"; echo "$out" | sed 's/^/        /'; fi
 done
+fi
 
 # A module sees only src/sdk/include: the public header declares no driver, and the driver header is not there
 if printf '#include "omk_api.h"\n#ifdef OMK_DRV_H\n#error driver\n#endif\nint f(const omk_api *a) { return a->version; }\n' |
@@ -56,11 +111,13 @@ fi
 
 # The debug service (tests/host/test_debug.c): the RAM ring over power-ons (a torn end, wrap, a damaged header), the
 # memory the computer may read, the USB operations and their jobs, no card writes; each on its own empty "card"
-for group in ring memread proto write nocard; do
+if [ "$KIND" = debug ]; then
+for group in ring memread proto write nocard stuck; do
     mkdir "$tmp/debug_$group"
     out=$("$BIN/test_debug" "$tmp/debug_$group" $group 2>&1)
     if [ "$out" = ok ]; then pass "debug: $group"; else fail "debug: $group"; echo "$out" | sed 's/^/        /'; fi
 done
+fi
 
 # The black-and-white rule of an ISP block (omk_ispb_mono) and FILMLOOK's use of it after its filter (edits_mono):
 # a line is the parts present, Cb, Cr, the nine matrix numbers, the filter 0..8 and its level; the answer is
@@ -117,7 +174,7 @@ fi
 # presets. "first" leaves the look on with an edited preset in the store kept in the folder; the others are later
 # power-ons from that store
 mkdir "$tmp/filmlook"
-for what in first again leftlook notnatural gone notlisted; do
+for what in first again leftlook notnatural gone notlisted format2; do
     out=$("$BIN/test_filmlook" "$tmp/filmlook" resources/modules/filmlook/presets "$what" 2>&1)
     if [ "$out" = ok ]; then pass "filmlook start: $what"; else fail "filmlook start: $what"; echo "$out" | sed 's/^/        /'; fi
 done
@@ -129,8 +186,10 @@ out=$("$BIN/test_filmlook" "$tmp/filmedits" resources/modules/filmlook/presets e
 if [ "$out" = ok ]; then pass "filmlook edits: the blocks and the pace"; else fail "filmlook edits"; echo "$out" | sed 's/^/        /'; fi
 
 # The driver's plain C parts (src/platform/om5m2/fw1100): the grain texture's fill by rows against the word-by-word
-# one and the definition; the editors' quarter sine table against the full one it replaced
-for t in test_texfill test_edtrig; do
+# one and the definition; the editors' quarter sine table against the full one it replaced; the optics probe's address
+# checks, sum and stripes; the handing of its work to its worker task (request, answer, stop, the limits); the layer's
+# curves, read, Gaussians (their sigma) and words, and the fast code against the first version (the same values); the column's switches
+for t in test_texfill test_edtrig test_optprobe test_optwork test_optlayer test_rowsw; do
     if out=$("$BIN/$t" 2>&1) && [ "$out" = ok ]; then pass "driver: ${t#test_}"; else fail "driver: ${t#test_}"; echo "$out" | sed 's/^/        /'; fi
 done
 

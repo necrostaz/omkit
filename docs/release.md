@@ -50,8 +50,9 @@ python3 OMKit/release/build_release.py --version 0.1.0 --test       # a TEST bui
 python3 OMKit/release/build_release.py --version 0.1.0 --card DIR   # reuse a built OMKIT folder
 ```
 
-Without `--card` the builder runs `make -C OMKit card` with its own `OUT` and `CARD` in the output folder (on Windows
-through `wsl bash -lc`). Output: `OMKit/build/release/` (next to the Makefile's default `OMKit/build/`; `--out DIR` for another folder):
+Without `--card` the builder runs `make -C OMKit card BUILD=release` with its own `OUT` and `CARD` in the output folder
+(on Windows through `wsl bash -lc`): a release is always a release build ([build.md](build.md#35-release-and-debug-builds)),
+and `make card` checks the images' kind with `tools/buildcheck.py`. Output: `OMKit/build/release/` (next to the Makefile's default `OMKit/build/`; `--out DIR` for another folder):
 `OMKit-<version>-<platform>-<firmware>.zip`, its `.sha256` and `.notes.md`, the text of the GitHub release
 (section 3.1). A `--test` build is named `...-TEST.zip`, carries
 `TEST-BUILD-NOT-FOR-PUBLISHING.txt` and a banner in `INSTALL.txt`, and `RELEASE.json` says `"test": true`: never publish

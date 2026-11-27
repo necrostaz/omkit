@@ -4,6 +4,11 @@
 
 #include "omk_types.h"
 
+/* OMK_EMU - the probes for runs in an emulator - is an option of a debug build: a release image is tested as it is */
+#if defined(OMK_EMU) && !defined(OMK_DEBUG)
+#error "OMK_EMU needs a debug build (BUILD=debug)"
+#endif
+
 #define OMK_CPUS 3
 
 /* NMI handler record. sp, psw and pc of CPU 0 are overwritten by the regular interrupt, they cannot be trusted */
@@ -86,6 +91,9 @@ u32 drv_setting_read(u32 id);           /* read-only access to the working value
 /* Startup timeline kept by the firmware: name up to 20 characters and time in drv_ticks. 0 - no more entries */
 int drv_boot_event(u32 i, char *name, u32 *time);
 int drv_crash_read(int cpu, omk_crash *out);   /* 1: a record exists */
+/* The firmware's word of its last requested restart (0x8ff000b0, written by 0x60058ae0 right before it restarts the
+ * camera, 255 by the NMI path 0x60059ec2; read by 0x60058afa): read only, as early as possible */
+u32 drv_restart_cause(void);
 
 /* Module code: core writes the image at an address from drv_mem_region, it executes at drv_exec_addr (on the camera, a
  * cached alias). drv_code_sync: after writing code, before the first call */
@@ -163,6 +171,13 @@ u32 drv_look_edit_take(u32 *ev, u32 max, u32 *lost);
  * 0, -1 bad, -2 not available */
 int drv_look_grain_tiles(const char *const *names, u32 count);
 int drv_look_grain(u32 entry, s32 tile, u32 level);
+/* The look's optics rows (API 20, platform pictprof.c): drv_look_optics - entry's strengths (OMK_OPTICS_ROWS of
+ * 0..OMK_OPTICS_MAX) to show; another entry than the UI shows: dropped (0). 0, -1 bad, -2 the rows are not available
+ * (not installed on this firmware). Core task */
+int drv_look_optics(u32 entry, const u8 *strength);
+/* The optics rows wanted (core task, before the look is installed): only with the optics layer on; without it they are
+ * not installed at all and drv_look_optics answers -3 */
+void drv_look_rows(int on);
 int drv_look_picture_size(u32 pic, u32 *w, u32 *h);
 int drv_look_picture(u32 pic, u32 w, u32 h, const u8 *pixels);
 /* The EXIF UserComment of the following pictures (S+0xf7c, written in the shooting parameter reader's filter): text up to
@@ -215,6 +230,9 @@ void drv_grain_service(u32 now);
 int drv_grain_slot_begin(u32 *gen);
 void drv_grain_slot_ready(u32 gen, const u8 *src, u32 side, u32 mean, const char *name);
 void drv_grain_look_gain(u32 gain);
+/* The optics layer without grain (core task): with gain 0 and on 1 the look's stills still go the mask route's work list,
+ * as DRV_GRAIN_LIST (no grain blended), so that the layer's step is in it */
+void drv_grain_look_optics(u32 on);
 /* The route of the next stills (core 1.21): DRV_GRAIN_GF - the grain film's work list (texture blend on the development,
  * stage 0x100); DRV_GRAIN_LIST - the monochrome profile's list (key 12: mask development 0x900, development 0x901) with the
  * texture built but no blend; DRV_GRAIN_MASK - that list, the texture blended on 0x901 with the mask as its weight. chroma:
@@ -226,6 +244,146 @@ void drv_grain_look_gain(u32 gain);
 #define DRV_GRAIN_CHROMA_MAX 1024
 void drv_grain_route(u32 route, u32 chroma, u32 tag);
 int drv_grain_route_state(u32 *freed, u32 *live);
+/* The optics layer's probe (platform opticsdrv.c, core 1.33): a CPU step of our own in the look's still jobs on the mask
+ * route (DRV_GRAIN_LIST, DRV_GRAIN_MASK), after the development into the picture buffer and before the pass to the job's
+ * outputs. It measures and logs (level 1), also reads through the window's cached view when armed (level 2, one job an
+ * arming), or writes stripes into the picture (level 3). drv_optics_install: once, the level 1..3 - 0, or a code (1 bad
+ * level, 2 no memory, 10 and up a firmware function not as expected); not installed - the job lists are as without it.
+ * drv_optics_arm: the next job of level 2 reads through the cached view. drv_optics_service: core task - the jobs'
+ * reports to the log, the counts since install in *st */
+enum {                                      /* the bisection's substages (opticsdrv.c's header), in their order */
+    DRV_OPTICS_N, DRV_OPTICS_A0, DRV_OPTICS_A, DRV_OPTICS_B, DRV_OPTICS_C1, DRV_OPTICS_C2, DRV_OPTICS_C3, DRV_OPTICS_W0,
+    DRV_OPTICS_W1, DRV_OPTICS_W2, DRV_OPTICS_D, DRV_OPTICS_E, DRV_OPTICS_F, DRV_OPTICS_FULL,
+    /* the layer's substages (Bloom and Halation, opticsdrv.c's header), after the probe's: not in a bisection */
+    DRV_OPTICS_L0, DRV_OPTICS_L1, DRV_OPTICS_L2, DRV_OPTICS_L3, DRV_OPTICS_L4, DRV_OPTICS_SUBS
+};
+#define DRV_OPTICS_PROBES (DRV_OPTICS_FULL + 1) /* the bisection's substages: N .. FULL */
+#define DRV_OPTICS_TESTS (1u << DRV_OPTICS_C3)  /* tests only: the ones after them do not include them, so a reset there
+                                                   does not end the bisection */
+#define DRV_OPTICS_WORKER DRV_OPTICS_W0        /* from this substage on the work is done by the worker task */
+#define DRV_OPTICS_CRUMB 28                 /* the crumb words: magic, boot, heartbeat ms, state (job << 16 | substage << 8 |
+                                               phase), ticks, phases reached (bits), jobs listed, the last job ended; at the
+                                               step's entry: psw, sp, the lowest sp seen, task id, its stack base and size,
+                                               the request C (mode | RawJpeg << 16 | FileType << 24), the worker's
+                                               request | done << 16 (16 bits each); the worker task (16..23): its loops,
+                                               wakes with no request, those in a row at once, naps, the last wait's result,
+                                               its phase, the ticks then, requests done; (24..27) at its start: its sp, psw,
+                                               current | base priority << 16 (its TCB), the flags' ids req | done << 16 */
+typedef struct {
+    u32 jobs;                               /* jobs reported */
+    u32 cached, cached_same;                /* of them: a cached read begun; ended with the same sum as past the cache */
+    u32 armed;                              /* the arming not taken yet */
+    u32 listed, noroom, lost;               /* steps put into lists, lists with no room, jobs not reported (ring) */
+    u32 seconds;                            /* second jobs of RAW+JPEG presses listed without the layer (jobs = first) */
+    u32 ended[DRV_OPTICS_SUBS];             /* our jobs ended (H3), by the substage they were listed with */
+} drv_optics_info;
+int drv_optics_install(u32 level);
+/* The optics layer (Bloom and Halation, feature/optics-layer): its settings, given before drv_optics_install (core task;
+ * the driver keeps a copy, makes its curves and takes its work buffer from the arena). route: DRV_OPTICS_PAIR - the
+ * firmware's Soft Focus pair (enlarge 0x401 into a picture-sized buffer, blend 0x402), DRV_OPTICS_403 - a last step of
+ * ours with the pass that enlarges and blends at once (0x403). 0, or a code (1 bad, 2 no memory) */
+#define DRV_OPTICS_PAIR 1
+#define DRV_OPTICS_403 2
+#define DRV_OPTICS_ORDER_AUTO 0xffffffffu  /* the layer's byte positions guessed from the first dump (substage L1) */
+typedef struct {
+    u32 route;
+    u32 width;                              /* the layer's width, 42..400 (the height by the picture's aspect) */
+    u32 order;                              /* the bytes of Y, Cb, Cr in a layer word: py | pcb << 8 | pcr << 16, or AUTO */
+    u32 gamma;                              /* the curve to linear light, x100 (200..300) */
+    u32 tb, th;                             /* thresholds of Bloom and Halation, codes 0..255 */
+    u32 sb, sh;                             /* their Gaussians: sigma of the first | of the second << 16, pixels of the
+                                               picture (the second 0 - one Gaussian) */
+    u32 mixb, mixh;                         /* the second Gaussian's weight, Q8 */
+    u32 gb, gh;                             /* their gains, Q8 (the strength in them) */
+    u32 dark;                               /* Halation by darkness, Q8 */
+    s32 hcb, hcr;                           /* Halation's colour: Cb, Cr a unit of its Y, Q8 */
+    u32 read;                               /* read the picture's rows for the sources (1) or not */
+    u32 read_us;                            /* the read's time a job */
+    u32 cached;                             /* the read through the window's cached view */
+    u32 lcached;                            /* the layer read and written (L4) through the window's cached view */
+    u32 emb;                                /* Bloom's source, as em (bloom_emission; emission when not given) */
+    u32 em;                                 /* the source: 0 - the excess over the threshold; 1..64 - the emission of a
+                                               blown pixel standing for em whites (optlayer.h's ol_emission) */
+    u32 bdark;                              /* Bloom by darkness, Q8 */
+    u32 hfirst;                             /* 1 - Halation's code from the place's own light, Bloom after it */
+    u32 st;                                 /* Bloom's tail: sigma, pixels of the picture (0 - none) */
+    u32 tmix;                               /* its weight, Q8 (0 - none; at most DRV_OPTICS_TAIL_MAX) */
+    u32 haze;                               /* Bloom's haze: the share of all the light in the tail's sources, Q12 (0 -
+                                               none; with a tail only) */
+    /* The strengths (feature/optics-layer, after card166): a job's Bloom and Halation strengths 0..5 are the look's
+     * optics rows' (drv_optics_strength) unless the set gives its own (a test: sbv, shv 0..5; DRV_OPTICS_ROWS - the
+     * rows'). Strength k scales the gains gb, gh (those of the strongest step) by steps[0 Bloom, 1 Halation][k - 1]
+     * percent; both 0 - the job gets no step at all */
+    u32 sbv, shv;
+    u32 steps[2][5];
+    /* The scene's darkness (a night's lamp stands for many whites, a day's blown metal or window for few): from the layer's
+     * Y, its mean and the share of its pixels at the code 200 or above (DRV_OPTICS_DAY_CODE: the Bloom threshold of
+     * card167, fixed since card168 so that Bloom's own threshold does not move the day); the day's weight 0..256 grows
+     * from 0 at day[0] to 256 at day[1] (mean, codes) or at day[2] .. day[3] (share, permille) - the larger of the two; the gains
+     * of a day scene are day[4] (Bloom), day[5] (Halation) percent of the night's. day[4] = day[5] = 100 - off (Bloom's
+     * 100 by default since card168: a diffusion filter glows by day as by night) */
+    u32 day[6];
+    u32 bench;                              /* 1 - the bench of card164/165 in every L4 job (CPU time, a test) */
+    /* The strength's curves after the blur (card169; optlayer.h's ol_curve): Bloom's and Halation's toe and ceiling of
+     * the added light, Q12 of white (0 each: no curve, the light as before) */
+    u32 btoe, bmax, htoe, hmax;
+    /* The jobs of a RAW+JPEG press that get the layer (card169): DRV_OPTICS_JOBS_FIRST - the first only (FileType 1,
+     * whose picture is the JPEG; the second, FileType 3, makes the ORF's preview: camera's pictures compared), BOTH */
+    u32 jobs;
+    /* card170. The look's white (optlayer.h's ol_white): DRV_OPTICS_WHITE_OFF - the codes as they are (255), _AUTO - the
+     * look's tables' (drv_optics_strength), else the shelf of the layer's Y, _TABLE - the tables' only, _LAYER - the
+     * shelf only, or a code 160..255 (a test) */
+    u32 white;
+    s32 hcb2, hcr2;                         /* the halation's colour at its weak edge, Q8 (hcb, hcr: its strong one) */
+    u32 hcode;                              /* the halation's code from which it has the strong colour (0 - one colour) */
+    u32 hcore;                              /* 1 - its colour weighted by darkness once more (a white core) */
+    u32 bcol;                               /* Bloom's colour: the share of its sources' chromaticity, Q8 (0 - neutral) */
+} drv_optics_layer_cfg;
+#define DRV_OPTICS_WHITE_OFF 0
+#define DRV_OPTICS_WHITE_AUTO 1
+#define DRV_OPTICS_WHITE_TABLE 2
+#define DRV_OPTICS_WHITE_LAYER 3
+#define DRV_OPTICS_JOBS_FIRST 0
+#define DRV_OPTICS_JOBS_BOTH 1
+#define DRV_OPTICS_ROWS 0xff
+#define DRV_OPTICS_TAIL_MAX 230             /* 90 %: the near part keeps 10 % (its share divides the tail, Q8) */
+#define DRV_OPTICS_DAY_CODE 200            /* the day's share: the layer's pixels at this code or above */
+int drv_optics_layer(const drv_optics_layer_cfg *c);
+/* Further sets of the layer's settings, 1..DRV_OPTICS_SETS (core task, after drv_optics_layer): a job takes the set in
+ * force when it is listed (drv_optics_set, between presses, as drv_optics_sub); the route, the width, the bytes and the
+ * curve are the first set's. 0, or 1 (bad, or no layer) */
+#define DRV_OPTICS_SETS 6
+int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c);
+void drv_optics_set(u32 k);                 /* 0 - the first set ([optics]), 1..DRV_OPTICS_SETS - the further ones */
+/* The look's optics rows' strengths of the chosen entry (core task, when they change): Bloom, Halation 0..5, and mono 1
+ * when the colour tables in force are black and white (isp_mono: the halation's colour then 0 - a light halo on a black-
+ * and-white film; its light kept), white - the tables' white (isp_white: a code of Y, 0 - not known). A job takes those in
+ * force when it is listed (with its set, as drv_optics_set); mono and white hold for a test's strengths too */
+void drv_optics_strength(u32 bloom, u32 halation, u32 mono, u32 white);
+/* The layer's state for the log: the smallest sigma (pixels) the transport gives a picture W wide, 0 - no layer; *wsize
+ * the worker's buffer, *wbuf its address (the cached one) */
+u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf);
+void drv_optics_arm(void);
+void drv_optics_service(drv_optics_info *st);
+/* The bisection (core 1.34): drv_optics_sub - the substage of the jobs listed from now on (after install: N, no step);
+ * drv_optics_crumb - at start, the crumbs of the run before into old[DRV_OPTICS_CRUMB], this run's start (boot) in their
+ * place: 1 - they were there (the memory outlived the reset or power-off); drv_optics_beat - core's heartbeat (ms);
+ * names of substages and phases for the log */
+void drv_optics_sub(u32 sub);
+/* The empty loop of C3, W1 and W2 for the jobs listed from now on: n iterations (0 - the default, 1 000 000; at least 10
+ * for W2), or for W1 a sleep of sleep_ms in the worker instead (0 - no) - the job waits as long with the CPU free */
+void drv_optics_loop(u32 n, u32 sleep_ms);
+int drv_optics_crumb(u32 boot, u32 *old);
+void drv_optics_beat(u32 ms);
+/* The worker task (core 1.37): made once by the core task, CPU 0, priority 56, its stack from the arena; it does the
+ * work of the substages from W1 on for the step, which waits for it. 0 - running (*tid its id), or a code: 1 no probe,
+ * 2 no memory, 3 no event flag, 4 the task not made, 5 made but not running after the wait */
+int drv_optics_worker(u32 *tid);
+/* Core task, a test of the worker without a picture ([optics] worker_test): a request of the loop of W2 handed and
+ * waited for as the step does. 0 - answered (*us the wait, *work the worker's own time, *state OW_*), -1 no worker */
+int drv_optics_worker_test(u32 *us, u32 *work, u32 *state);
+const char *drv_optics_sub_name(u32 sub);
+const char *drv_optics_phase(u32 phase);
 /* The image memory allocator in its large layout (mode 1, as for the ART filters) or not: the allocator setup hook
  * (platform pictprof.c) installed if needed; a change asks the GUI task for a picture mode rebuild (at the next UI read of
  * 111 or write). 0, or a code. drv_alloc_mode: the mode now (any task, any CPU) */
@@ -311,7 +469,13 @@ int drv_obj_read(u32 kind, u32 id, drv_obj *o);
 int drv_mutex_read(u32 cpu, u32 i, drv_obj *o);
 enum { DRV_UI_HALF = 1, DRV_UI_TRANSIENT = 2 };
 #define DRV_APP_SHOOTING 0x5100
+#define DRV_KEYS_S1_UP 0x02                 /* drv_ui_probe's keys: bit 1 set while the shutter is not half-pressed (camera
+                                               logs: 0x14 with the half-press state 0x5101, 0x16 after it) */
 int drv_ui_probe(u32 *app, u32 *keys);
+/* drv_ui_state: the same answer in both builds, from RAM words only (the application's state by its chain of pointers,
+ * the raw input byte) - no register: core's card writes wait in a passing state (main.c's ui_hold). drv_ui_probe is the
+ * debug build's name of it */
+int drv_ui_state(u32 *app, u32 *keys);
 
 /* The debug service (core/debug.c, core 1.40).
  * drv_keep_area: memory that outlives a reset of the camera (not a power-off or the battery taken out), outside the

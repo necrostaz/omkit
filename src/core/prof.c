@@ -6,13 +6,25 @@
 #include "omk_mod.h"
 #include "omk_prof.h"
 
+/* [core] fw_cache_inv: the firmware's own cache invalidation in the hooks of the picture mode screen instead of the read
+ * eviction - not tried on the camera, a debug build's key; a release build always evicts by reading */
+#ifdef OMK_DEBUG
+#define FW_CACHE_INV cfg_bool("core", "fw_cache_inv", 0)
+#else
+#define FW_CACHE_INV 0
+#endif
+
 #define UPKEEP_MS 1000
 #define STATS_MS 10000
 
 static omk_mod *owner;
 static omk_prof_fn owner_fn;
 static void *owner_ctx;
-static u32 seen_seq, upkeep_ms, stats_ms, warned, seen_takes, lv_ms;
+static u32 seen_seq, upkeep_ms, warned;
+
+/* A debug build's: the live view context once a second, a line a picture, the hooks' and the editors' counters */
+#ifdef OMK_DEBUG
+static u32 stats_ms, seen_takes, lv_ms;
 static drv_lv_view lv_seen;
 static int lv_bad, lv_logged;
 
@@ -51,8 +63,9 @@ static void watch_live_view(u32 now)
     log_printf(OMK_LOG_DEBUG, "profiles: lv sat/sh/gr/ct %u,%u,%u,%u s12 %u,%u tone %u,%u,%u (active profile %x)", v.sat, v.sharp,
                v.grad, v.contrast, v.s12[0], v.s12[1], v.tone[0], v.tone[1], v.tone[2], drv_prof_get());
 }
-static drv_prof_info logged;
 static u32 ed_logged[2], ed_ms;           /* graphic editor counters last logged */
+#endif
+static drv_prof_info logged;
 static u32 imp_logged[4];                   /* import counters last logged */
 
 static int valid(u32 prof)
@@ -99,7 +112,7 @@ int prof_enable(omk_mod *m, omk_prof_fn fn, void *ctx)
      * here before anything reached the card) */
     log_printf(OMK_LOG_INFO, "profiles: installing hooks");
     log_flush();
-    rc = drv_prof_install(cfg_bool("core", "fw_cache_inv", 0));
+    rc = drv_prof_install(FW_CACHE_INV);
     if (rc) {
         log_printf(OMK_LOG_ERROR, "profiles: hooks not installed, code %d", rc);
         return -1;
@@ -196,7 +209,6 @@ void prof_drop_module(omk_mod *m)
 void prof_service(u32 now)
 {
     drv_prof_info s;
-    u32 gmin, glast, gcount;
     int rc;
 
     drv_prof_flush();                       /* filter matrices set since the last loop: one cache push for them all */
@@ -204,14 +216,16 @@ void prof_service(u32 now)
         return;
     drv_prof_prepare();                     /* the block the shooting hook copies: here, in the core task */
     drv_edp_service();                      /* the graphic editor's drawing off outside its item */
-    watch_live_view(now);
     drv_prof_stats(&s);
+#ifdef OMK_DEBUG
+    watch_live_view(now);
     if (s.takes != seen_takes) {            /* a picture: what happened to the profile */
         seen_takes = s.takes;
         log_printf(OMK_LOG_DEBUG, "profiles: shot %u, active %x, applied %u, skipped: mode %u, movie/scene %u, art bracketing %u, "
                    "block %u, allocator %u (mode %u)", s.takes, drv_prof_get(), s.applied, s.skip_mode, s.skip_cam, s.skip_bkt,
                    s.skip_block, s.skip_alloc, s.alloc_mode);
     }
+#endif
     if (s.ui_seq != seen_seq) {             /* the user picked a profile or left it: tell the owner, here in the core task */
         seen_seq = s.ui_seq;
         log_printf(OMK_LOG_INFO, "profiles: the user chose %s %u", kind(s.ui_prof), OMK_PROF_NUM(s.ui_prof));
@@ -230,6 +244,7 @@ void prof_service(u32 now)
             log_printf(OMK_LOG_WARN, "profiles: foreign values in the firmware tables, left alone");
         }
     }
+#ifdef OMK_DEBUG
     if (now - stats_ms >= STATS_MS && (s.takes != logged.takes || s.reads != logged.reads || s.writes != logged.writes ||
                                        s.lv_reads != logged.lv_reads || s.lv_applied != logged.lv_applied ||
                                        s.recalcs != logged.recalcs)) {
@@ -240,6 +255,7 @@ void prof_service(u32 now)
                    s.lv_applied);
         mem_copy(&logged, &s, sizeof(s));
     }
+#endif
     {
         u32 lines, selects, skipped, last, bad;
 
@@ -257,6 +273,10 @@ void prof_service(u32 now)
                        "%u lines for custom modes skipped", lines, selects, kind(last), OMK_PROF_NUM(last), skipped);
         }
     }
+#ifdef OMK_DEBUG
+    {
+    u32 gmin, glast, gcount;
+
     if ((s.ed_items != ed_logged[0] || s.ed_renders != ed_logged[1]) && now - ed_ms >= 1000) {   /* only while an editor
                                                                                                      item is in use */
         ed_ms = now;
@@ -269,4 +289,6 @@ void prof_service(u32 now)
             log_printf(OMK_LOG_DEBUG, "profiles: editor: film look frames %u apart at least, last %u (ms, %u)",
                        gmin / 1000, glast / 1000, gcount);
     }
+    }
+#endif
 }

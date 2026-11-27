@@ -79,7 +79,7 @@ can be built for).
 
 | Function | L | Meaning |
 |---|---|---|
-| `void log(omk_mod *m, int level, const char *fmt, ...)` | 3 | One log line `ms L NAME: text`. `level`: `OMK_LOG_ERROR` 1, `OMK_LOG_WARN` 2, `OMK_LOG_INFO` 3, `OMK_LOG_DEBUG` 4; lines above `log_level` of `[core]` are dropped at once (cheap) |
+| `void log(omk_mod *m, int level, const char *fmt, ...)` | 3 | One log line `ms L NAME: text`. `level`: `OMK_LOG_ERROR` 1, `OMK_LOG_WARN` 2, `OMK_LOG_INFO` 3, `OMK_LOG_DEBUG` 4; lines above `log_level` of `[core]` are dropped at once (cheap). A release build of `core` keeps no line of the debug level; write a module's debug lines as `OMK_LOG_D(api, self, "text %u", n)` - the macro of `omk_api.h` compiles them into the module's debug build only (`make BUILD=debug`), and `OMK_MODULE_KIND(api, self)` at the start of `module_init` marks a debug build of the module for `tools/buildcheck.py` |
 
 - Format: `%s %c %d %u %x %X`, a width with an optional zero (`%08x`, `%5u`). No `%l`, `%p`, floating point or precision;
   any other character after `%` is printed as is.
@@ -244,6 +244,7 @@ stored picture mode stays Natural and shooting gets Natural; the colour comes fr
 | `int look_name(omk_mod *m, const char *text)` | 14 | the look's name where the slot's mode name was, in every language: up to 23 printable ASCII characters. 0; -1 - not the owner or bad; -2 - no memory; -3 - the firmware's string table is not as expected |
 | `int look_art(omk_mod *m, u32 index, const void *data, u32 size)` | 14 | the cassette picture of entry `index`: the `CANI` section of an `.isp` file ([formats/isp.md](formats/isp.md)); checked (version 1, at most 64 records and 6144 bytes, every record's operation, segments and points) and copied. 0; -1 - not the owner, bad index, or a section that fails the checks (the log says why); -2 - no memory |
 | `int look_edits(omk_mod *m, const omk_look_edits *e)` | 16 | the editors shown after the look's item for the chosen entry and their values (copied). 0; -1 - not the owner or bad; -2 - editors not available on this firmware |
+| `int look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 count)` | 20 | the Bloom and Halation strengths 0..`OMK_OPTICS_MAX` (5) of entry `entry`, by row (`OMK_OPTICS_BLOOM` 0, `OMK_OPTICS_HALATION` 1; `count` `OMK_OPTICS_ROWS` 2); copied. The rows keep every entry's strengths given and show them at once when a dial chooses that entry, before the module answers; so a module gives all entries' at its start, the chosen entry's last: `core` takes the last ones given as the chosen entry's for the look's stills ([modules/filmlook/optics.md](modules/filmlook/optics.md)). 0; -1 - not the owner or bad; -2 - the rows are not available on this firmware; -3 - no optics layer (`[optics] layer = off`), no rows |
 
 Look events (`fn(event, arg, ctx)`):
 
@@ -262,6 +263,7 @@ Editor groups (`omk_look_edits.groups` and `.edited` are bit masks `1 << OMK_EDI
 | `OMK_EDIT_VIVID` 1 | 16 | index 0..11, a hue sector; value -5..5, a shift of 0.05 per step from the entry's own saturation |
 | `OMK_EDIT_LEVEL` 2 | 16 | index 0 the filter 0..8 (0 - the entry's own), index 1 the level 1..3 |
 | `OMK_EDIT_GRAIN` 3 | 17 | index 0 the grain tile (its number in `grain_list`), index 1 the strength 0..3 (Off, Low, Med, High) |
+| `OMK_EDIT_OPTICS` 4 | 20 | the Bloom and Halation rows after the grain item (the bit in `groups`: the rows are shown); index `OMK_OPTICS_BLOOM` 0 or `OMK_OPTICS_HALATION` 1, value the strength 0..5; a long OK on a row - value 0 |
 
 `omk_look_edits` also carries what is drawn: `entry` (the entry these values belong to; if the UI has moved on they are
 not shown), `tone[3]`, `vivid[12]`, `filter`, `level`, `curve[64]` (the curve drawn, output 0..255 at inputs k/63),
@@ -273,7 +275,8 @@ Look pictures (`OMK_LOOK_PIC_*`, same pixel format as 4.11): `MODE` 0 (strip, 66
 (menu line, up to 124 x 39), `PANEL` 3 (control panel cell, up to 128 x 39), `SHOOT` 4 (shooting screen sign, up to 80 x
 36), `ITEM` 5 (editor column item, 66 x 50), `PREV` 6 and `NEXT` 7 (dial labels, up to 56 x 24); level 16: `LEVEL` 8
 (Color/Level item of a black-and-white entry, 66 x 50); level 17: `GRAIN` 9 (grain item, 66 x 50), `TYPE` 10 (its tile
-dial label, up to 56 x 24), `STRENGTH` 11 (its strength dial label, up to 56 x 24; core 1.29 - 116 and 104 before). The
+dial label, up to 56 x 24), `STRENGTH` 11 (its strength dial label, up to 56 x 24; core 1.29 - 116 and 104 before); level
+20: `BLOOM` 12 and `HALATION` 13 (the signs of the optics rows, 46 x 46, left of the camera's number). The
 sizes are those of the first platform; ask `look_picture_size`. Dial labels follow one rule - the camera's face, size and
 place, drawn with `tools/dial_label.py`, a shorter word where one does not fit:
 [platform/om5m2/ui.md](platform/om5m2/ui.md#451-rule-dial-labels-and-the-editing-area).
@@ -297,7 +300,7 @@ place, drawn with `tools/dial_label.py`, a shorter word where one does not fit:
 |---|---|---|
 | `int isp_scope(omk_mod *m, u32 scope)` | 13 | which jobs get the tables: `OMK_ISP_LIVE` (live view, also what the camera meters and focuses on) and/or `OMK_ISP_STILLS` (the default). Call before `isp_override` |
 | `int isp_override(omk_mod *m, const void *block, u32 size)` | 13 | publishes the platform's ISP block (the `ISPB` section of an `.isp` file, [formats/isp.md](formats/isp.md), layout in `omk_ispb.h`); copied, may be freed after the call. `block` 0 - back to the camera's own tables |
-| `int isp_census(omk_mod *m, int on)` | 13 | 1 - log the jobs of the colour path at debug level; 0 - stop |
+| `int isp_census(omk_mod *m, int on)` | 13 | 1 - log the jobs of the colour path at debug level; 0 - stop. A debug build of `core` only: a release build returns -1 |
 
 - The first module to call any of the three owns the service; that first call must come from `module_init` (the hooks
   go in then).
@@ -351,6 +354,11 @@ The meaning of every field is in [formats/isp.md](formats/isp.md), section 5.
 sets the Cb/Cr gains with one of them 0, or sets the matrix with rows that differ by at most `OMK_ISPB_MONO_ROWS` (2) in
 every column; parts the block does not set are not looked at. `core` uses the same function (for example, colour grain
 is never put on a black-and-white look).
+
+`omk_ispb_white(b)` returns the block's white: the code of Y (1..255) a blown pixel gets - the tone curve's output for
+the gamma's largest input ([formats/isp.md](formats/isp.md), section 5.2); 0 when the block does not set both the gamma
+and the tone curve. `core` takes it from the block in force as the scale of Bloom and Halation
+([modules/filmlook/optics.md](modules/filmlook/optics.md)).
 
 ## 7. The C library
 

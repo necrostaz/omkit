@@ -1,6 +1,7 @@
 # Thunks to OM-5 Mark II 1.1 firmware functions. GCC: the first two words in d0, d1, the rest at (12,sp), (16,sp).
 # Firmware: pointers in a0, a1, integers in d0, d1; registers and frame are encoded in the call instruction and must match the function's ret.
 # call writes the return address to (sp), so the thunk reserves its own slot. The addresses are in fw.ld.
+# OMK_DEBUG (--defsym, a debug build): the thunks of the debug build alone are under .ifdef OMK_DEBUG.
 	.text
 	.global	_drv_findfirst, _drv_findnext, _drv_findclose
 	.global	_drv_fopen_long
@@ -246,6 +247,7 @@ _drv_setting_read:
 	add	4,sp
 	rets
 
+	.ifdef	OMK_DEBUG				# the test scenario's keys and events, the restart job, the reset, the USB hold
 # API 0xD0002 (0x6032b57f): d0 the key's application event, d1 state (0 pressed, 1 released) -> d0 the API's answer (u16).
 # Its callers use call ...,[d2,d3],16 (0x602f4b4a, 0x6085b565); it ends with ret [d2,d3],16
 _drv_key_api:
@@ -349,6 +351,7 @@ _drv_tramp_usb:
 	add	8,sp
 	.byte	0x82,0x3c,0x20,0x08,0x6c	# displaced: mov d0,d2; mov sp,a0; add 8,a0; mov d3,(a0)
 	jmp	usb_back
+	.endif
 
 _drv_lock:
 	clr	d0
@@ -1343,6 +1346,355 @@ _drv_fw_tex_release:
 	add	4,sp
 	rets
 
+# The optics layer's probe (opticsdrv.c). The step runs in the firmware's still job task; its C code keeps to the arena
+# block, the job and the stack, and calls the firmware only through the thunks below - the calls the stock CPU step
+# 0x6038c84a and the window's users (0x604258a5, 0x60425a1c) make.
+	.global	_drv_tramp_optics_step, _drv_fw_job_wait, _drv_fw_job_buf, _drv_fw_win_map, _drv_fw_win_unmap
+	.global	_drv_fw_cache_flush
+
+# A step of the job's list, called by the step executor 0x60389f71 with calls (a1), a0 = h: the return address at (sp),
+# no frame made for it (the stock step 0x6038c84a makes its own: movm [a2],(sp); add -4,sp ... ret [a2],8).
+# drv_optics_step(h) with every register kept, then d0 0 - the executor's "next step" - and rets
+_drv_tramp_optics_step:
+	movm	[d2,d3,a2,a3,other],(sp)
+	add	-12,sp
+	mov	a0,d0
+	call	_drv_optics_step,[],0
+	add	12,sp
+	movm	(sp),[d2,d3,a2,a3,other]
+	clr	d0
+	rets
+
+# The wait for the pass of the step before, as 0x6038c850 calls it: a0 = h -> d0 (u16; 0 - the pass ended well). d0 h
+_drv_fw_job_wait:
+	mov	d0,a0
+	add	-4,sp
+	call	fw_job_wait,[a2],8
+	add	4,sp
+	rets
+
+# The job's buffer by its type, as the firmware's callers do: a0 = h, d0 the type -> d0 the slot, 48 - none. d0 h, d1 type
+_drv_fw_job_buf:
+	mov	d0,a0
+	mov	d1,d0
+	add	-4,sp
+	call	fw_job_buf,[d2],4
+	add	4,sp
+	rets
+
+# The image memory window, as 0x604258a5 maps and 0x60425a1c releases it: d0 the bus address, d1 the flags (bit 0: do
+# not wait for the window's semaphore) -> d0 the window's address, 0 - none; release: d0 the window's address -> d0, 0 -
+# not released
+_drv_fw_win_map:
+	add	-4,sp
+	call	fw_win_map,[d2,d3,a2,a3],48
+	add	4,sp
+	rets
+
+_drv_fw_win_unmap:
+	add	-4,sp
+	call	fw_win_unmap,[d2,d3,a2,a3],52
+	add	4,sp
+	rets
+
+# This CPU's data cache written back (with the system cache) and dropped, no arguments
+_drv_fw_cache_flush:
+	add	-4,sp
+	call	fw_cache_flush,[d2,d3],16
+	add	4,sp
+	rets
+
+
+# The optics layer (opticsdrv.c, Bloom and Halation): the reduction, the pass to the outputs, our last step, the size hook.
+	.global	_drv_fw_sf_down, _drv_fw_xfer, _drv_tramp_optics_final, _drv_tramp_optics_size
+
+# The reduction 0x603937f8 as 0x603938fe calls it: a0 = h -> d0 (u16) the slot of 0x1060, 48 or more - none. d0 h
+_drv_fw_sf_down:
+	mov	d0,a0
+	add	-4,sp
+	call	fw_sf_down,[d2,d3,a2,a3],24
+	add	4,sp
+	rets
+
+# The pass to the outputs 0x6038c50f as 0x603934ba calls it: a0 = h, d0 the input's slot, d1 the callback, a1 the
+# dependency word (the pass before in, the new pass out) -> d0 (u16) 0 or a code. C: h, slot, callback, &dependency
+_drv_fw_xfer:
+	mov	d0,a0
+	mov	d1,d0
+	mov	(12,sp),d1
+	mov	(16,sp),a1
+	add	-4,sp
+	call	fw_xfer,[d2,a2],12
+	add	4,sp
+	rets
+
+# Our last step (route 403), called by the step executor with calls (a1), a0 = h, as _drv_tramp_optics_step, but d0 is
+# drv_optics_final's: 0 - the next step, else the job ends with it. Every other register kept: d0 goes into the slot movm
+# saved it in (above the 48 bytes, as the grain's W trampoline does)
+_drv_tramp_optics_final:
+	add	-4,sp
+	movm	[d2,d3,a2,a3,other],(sp)
+	add	-12,sp
+	mov	a0,d0
+	call	_drv_optics_final,[],0
+	add	12,sp
+	mov	d0,(48,sp)
+	movm	(sp),[d2,d3,a2,a3,other]
+	mov	(sp),d0
+	add	4,sp
+	rets
+
+# The size hook in the reduction 0x603937f8 at 0x60393879 (a0 -> {u16 w, u16 h} of the small frame, d3 = h, a2 = its
+# descriptor R+340; d0, d1, a1 free, the flags not read after): for the job in drv_optics_hook[0] (its uncached address)
+# a0 points at our {w, h} in drv_optics_hook[1]; then the displaced mov 773,d0; movhu d0,(8,a2)
+_drv_tramp_optics_size:
+	mov	(_drv_optics_hook+0x40000000),d0
+	cmp	d0,d3
+	bne	1f
+	mov	_drv_optics_hook+0x40000004,a0
+1:
+	mov	773,d0
+	movhu	d0,(8,a2)
+	jmp	optics_size_back
+
+# The worker task of the optics probe (opticsdrv.c). Its entry, as the kernel starts a task made by acre_Task (the
+# loader's OMK_LOAD task is entered the same way): a frame for the C call, drv_optics_worker_main (it does not return;
+# if it ever does, the task ends itself as the loader's does, ext_tsk)
+	.global	_drv_tramp_optics_worker, _drv_fw_acre_task, _drv_fw_job_cancel
+_drv_tramp_optics_worker:
+	add	-12,sp
+	call	_drv_optics_worker_main,[],0
+	add	12,sp
+	call	fw_ext_tsk,[a2],8
+
+# acre_Task 0x60051d5c as the loader calls it: d0 the start (2 - now), d1 exinf, a0 name, a1 entry, (4,sp) priority,
+# (8,sp) stack size, (12,sp) the stack's base (0 - the kernel's pool; acre_tsk 0x60030b02 keeps a given one) -> d0 the
+# task id, -1 none (also when the name table is full - the task made all the same). C: d0 name, d1 entry, (12,sp)
+# priority, (16,sp) size, (20,sp) base; our frame: (0,sp) the slot call writes its return address to, (4..12,sp) the
+# arguments
+_drv_fw_acre_task:
+	add	-16,sp
+	mov	(28,sp),a0
+	mov	a0,(4,sp)
+	mov	(32,sp),a0
+	mov	a0,(8,sp)
+	mov	(36,sp),a0
+	mov	a0,(12,sp)
+	mov	d0,a0
+	mov	d1,a1
+	mov	2,d0
+	clr	d1
+	call	fw_acre_task,[d2,d3,a2,a3],56
+	add	16,sp
+	rets
+
+# The job's cancel check 0x6038a8a5 as the stock waits call it (0x60386bd6): a0 = P (h+4), a1 = h+11318 -> d0 (u8) 1 -
+# the job is cancelled (it then sets the u16 at a1 to 1), 0 - go on. d0 P, d1 the u16
+_drv_fw_job_cancel:
+	mov	d0,a0
+	mov	d1,a1
+	add	-4,sp
+	call	fw_job_cancel,[a2],8
+	add	4,sp
+	extbu	d0
+	rets
+
+# ------------------------------------------------------------------------------------------------------------------
+# The look's optics rows (pictprof.c, "The look's optics rows"): items ROW_I0 (Bloom) and ROW_I1 (Halation), in 7..5377 (the
+# range of the column's switches); their children are sliders of kind 0 on the virtual settings ROW_SET + row, values
+# 0..ROW_N - 1. The numbers are pictprof.c's (ITEM_BLOOM, ITEM_HALATION, ROW_SET, ROW_STR, OMK_OPTICS_MAX + 1). GUI task, CPU 0
+	.equ	ROW_I0, 5372
+	.equ	ROW_I1, 5370
+	.equ	ROW_SET, 0x7e00
+	.equ	ROW_SEND, 0x7e02
+	.equ	ROW_N, 6
+	.equ	ROW_STR, 0x7f00
+	.global	_drv_row_find1, _drv_row_find2, _drv_row_fac0, _drv_row_fac1, _drv_row_bar, _drv_row_hold
+	.global	_drv_row_stop, _drv_row_order, _drv_row_sign, _drv_row_digit, _drv_row_str
+	.global	_drv_ui_count, _drv_ui_byidx, _drv_ui_selectable
+
+# The redraw's item table search, 0x60e49d6b (mov d3,a0; movhu (a0),d2; mov 0x611b50f8,a0): our descriptors first
+_drv_row_find1:
+	mov	d3,a0
+	movhu	(a0),d2
+	mov	_drv_row_desc,a0
+	movhu	(a0),d0
+	cmp	d2,d0
+	beq	1f
+	add	40,a0
+	movhu	(a0),d0
+	cmp	d2,d0
+	beq	1f
+	mov	0x611b50f8,a0
+	jmp	find1_back
+1:	mov	a0,(4452,a3)
+	jmp	find1_found
+
+# The left column's search, 0x60e4a1a2 (exthu d3; clr d1; mov 0x611b50f8,a3): the same, the descriptor to (16,sp)
+_drv_row_find2:
+	exthu	d3
+	clr	d1
+	mov	_drv_row_desc,a3
+	movhu	(a3),d0
+	cmp	d3,d0
+	beq	1f
+	add	40,a3
+	movhu	(a3),d0
+	cmp	d3,d0
+	beq	1f
+	mov	0x611b50f8,a3
+	jmp	find2_back
+1:	mov	a3,(16,sp)
+	jmp	find2_found
+
+# The child factory's cases of our rows (switch 0x611a0a98): a kind-0 child on the virtual setting
+_drv_row_fac0:
+	mov	ROW_SET,d0
+	jmp	fac_kind0
+_drv_row_fac1:
+	mov	ROW_SET+1,d0
+	jmp	fac_kind0
+
+# The redraw's case of our rows (switch 0x611b79a8): the stock slider handler (it finds no value for an unknown item),
+# then drv_row_draw(panel) puts the row's value on the bar
+_drv_row_bar:
+	mov	a3,a0
+	mov	a0,a1
+	call	item_slider_fw,[d2,d3,a2,a3],40
+	mov	a3,d0
+	add	-32,sp
+	call	_drv_row_draw,[],0
+	add	32,sp
+	jmp	item_back
+
+# The column's long OK (0x903e), 0x60e3ca64 (exthu d0; cmp 5029,d0), d0 the item under the cursor, a3 the column + 72:
+# our rows are reset here (drv_row_reset(item) -> 1, the column's result in d2), then the row's child reads its value
+_drv_row_hold:
+	exthu	d0
+	cmp	ROW_I0,d0
+	beq	1f
+	cmp	ROW_I1,d0
+	beq	1f
+	cmp	5029,d0
+	jmp	hold_back
+1:	add	-32,sp
+	call	_drv_row_reset,[],0
+	add	32,sp
+	mov	d0,d2
+	mov	(4,a3),a0			# the row's child (as 0x60e3ca7f passes the editors' long OK to it)
+	cmp	0,a0
+	beq	2f
+	call	child_update,[d2,d3,a2,a3],68	# it reads its value again (else its next step starts from the old one)
+2:	jmp	hold_none
+
+# The slider child's setup (0x60e2c3..): +116 = 1 (stop at the ends, no wrap) for the ids of the table
+# 0x611979ac (239 ids), set at 0x60e2c46a (clr d0; mov 116,a0; add a3,a0) before its search: ours get 1
+_drv_row_stop:
+	mov	(16,sp),a1			# the child's setting id (the stock code loads a1 again right after)
+	movhu	(a1),d0
+	cmp	ROW_SET,d0
+	bcs	1f
+	cmp	ROW_SEND,d0
+	bcc	1f
+	mov	1,d0
+	bra	2f
+1:	clr	d0
+2:	mov	116,a0
+	add	a3,a0
+	jmp	stop_back
+
+# ... its value list's order: a2 = 1 (top-down) for the ids of the table 0x61197b8a (324 ids), searched before 0x60e2c637
+# (mov (16,sp),a0; movhu (a0),d0; cmp 469,d0); ours get 1, and the control's +152 = 1 (the dials step one fixed way, as
+# 0x60e3159f sets it for the stock sliders after this builder 0x60e2c539, which keeps its a0 at (24,sp))
+_drv_row_order:
+	mov	(16,sp),a0
+	movhu	(a0),d0
+	cmp	ROW_SET,d0
+	bcs	1f
+	cmp	ROW_SEND,d0
+	bcc	1f
+	mov	1,a2
+	mov	(24,sp),a0
+	mov	1,d0
+	mov	d0,(152,a0)
+	mov	(16,sp),a0
+	movhu	(a0),d0
+1:	cmp	469,d0
+	jmp	order_back
+
+# The left cell's readout: the sign (0x60e4b02c) and digit (0x60e4b09d) lookups pick a table by the item; ours take item
+# 5376's -5..+5 tables. At 0x60e4b043 / 0x60e4b0b4 (cmp 5376,d0; beq <5376's case>), the beq said again with absolute jumps
+_drv_row_sign:
+	cmp	5376,d0
+	beq	1f
+	cmp	ROW_I0,d0
+	beq	1f
+	cmp	ROW_I1,d0
+	beq	1f
+	jmp	sign_back
+1:	jmp	sign_11
+_drv_row_digit:
+	cmp	5376,d0
+	beq	1f
+	cmp	ROW_I0,d0
+	beq	1f
+	cmp	ROW_I1,d0
+	beq	1f
+	jmp	digit_back
+1:	jmp	digit_11
+
+# The string getter 0x60d52ed5 (call ..,[d2],8; d2 the string id -> a0 UTF-16), at 0x60d52edb (extbu d0; asl2 d0;
+# mov 0x61e53d30,a0): our ids ROW_STR + row are our titles
+_drv_row_str:
+	mov	d2,a0
+	cmp	ROW_STR,a0
+	beq	1f
+	cmp	ROW_STR+1,a0
+	beq	2f
+	extbu	d0
+	asl2	d0
+	mov	0x61e53d30,a0
+	jmp	str_back
+1:	mov	_drv_row_text,a0
+	ret	[d2],8
+2:	mov	_drv_row_text+24,a0
+	ret	[d2],8
+
+# UI object +24 / +28 / +36 for the virtual settings (method words); any other id - the firmware's method
+_drv_ui_count:
+	cmp	ROW_SET,d0
+	bcs	9f
+	cmp	ROW_SEND,d0
+	bcc	9f
+	mov	ROW_N,d0
+	rets
+9:	jmp	orig_ui_count
+_drv_ui_byidx:
+	cmp	ROW_SET,d0
+	bcs	9f
+	cmp	ROW_SEND,d0
+	bcc	9f
+	mov	d1,d0
+	cmp	ROW_N,d0
+	bcs	2f
+	mov	-1,d0
+2:	cmp	0,a1
+	beq	3f
+	mov	d0,(a1)
+3:	rets
+9:	jmp	orig_ui_byidx
+_drv_ui_selectable:
+	cmp	ROW_SET,d0
+	bcs	9f
+	cmp	ROW_SEND,d0
+	bcc	9f
+	clr	d0
+	cmp	ROW_N,d1
+	bcc	2f
+	mov	1,d0
+2:	rets
+9:	jmp	orig_ui_selectable
+
 # ---------------------------------------------------------------------------------------------------------------
 # PTP vendor operations (ptp.c) and the file rename of the debug service.
 	.global	_drv_tramp_ptp_reg, _drv_ptp_entry, _drv_ptp_reg_fw, _drv_ptp_send_fw, _drv_ptp_recv_len_fw, _drv_ptp_recv_fw
@@ -1358,6 +1710,7 @@ _drv_tramp_ptp_reg:
 	mov	0x970c,d0
 	jmp	imp_reg_back
 
+	.ifdef	OMK_DEBUG				# the C operations of the debug service
 # A C operation, called by the dispatcher 0x614c050f with calls (a2): a0 the request, a1 the response, the return
 # address at (sp) and in mdr. drv_ptp_call(request, response) with every register kept (the dispatcher reads d2, d3
 # after the call), then rets - as the optics step's entry, which the camera runs
@@ -1370,6 +1723,7 @@ _drv_ptp_entry:
 	add	12,sp
 	movm	(sp),[d2,d3,a2,a3,other]
 	rets
+	.endif
 
 # 0x614c0156(d0 code, d1 phase, a0 handler, a1 flag) -> d0 (u16). C: code, phase, handler, flag
 _drv_ptp_reg_fw:
@@ -1380,6 +1734,7 @@ _drv_ptp_reg_fw:
 	add	4,sp
 	rets
 
+	.ifdef	OMK_DEBUG				# the data phases and the rename of the debug service
 # Data to the computer 0x614c02d6(d0 piece, d1 total, a0 buffer) -> d0 (u16) 1 sent, as 0x614b9c84 calls it
 _drv_ptp_send_fw:
 	mov	(12,sp),a0
@@ -1412,3 +1767,4 @@ _drv_rename:
 	call	f_rename,[d2,d3,a2,a3],36
 	add	4,sp
 	rets
+	.endif

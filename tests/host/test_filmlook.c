@@ -15,6 +15,8 @@
  *   notnatural as again, but core refuses to turn the look on (the stored picture mode changed): asked once, no tables;
  *   gone       as again, but the stored preset's file is not on the card: no early tables, the first preset instead;
  *   notlisted  as again, with `presets =` naming other files: no early tables, the list's first preset;
+ *   format2    as again, the stored record made one of format 2 (FILMLOOK 1.5..1.12: no optics strengths, its last two
+ *              bytes padding - set to garbage here): read with the optics rows at 0, the other edits kept;
  *   edits      (its own empty work dir) every preset chosen in turn and its curve edited: each block given to the ISP
  *              service is, byte for byte, the file's ISPB block with the edits applied (built here apart from the
  *              module's cached copies); an edit sooner than 41 ms after the last tables waits first and is built and
@@ -38,7 +40,7 @@ static int failed;
     } while (0)
 
 /* ---- what the module did, in order ---- */
-enum { T_OPEN, T_LOOK_SET, T_OVERRIDE, T_STOCK, T_LIST, T_ART, T_EDITS, T_ENABLE, T_SCOPE };
+enum { T_OPEN, T_LOOK_SET, T_OVERRIDE, T_STOCK, T_LIST, T_ART, T_EDITS, T_ENABLE, T_SCOPE, T_OPTICS };
 static struct {
     int what;
     u32 arg;
@@ -95,6 +97,9 @@ static u8 last_block[ISPB_SIZE];            /* the last one, whatever their numb
 static u32 nblocks, now_ms = 1000;
 static u32 pace, last_ok_ms, refused, slept_ms;   /* pace: the ISP service refuses tables sooner than 40 ms after the last */
 static omk_look_edits last_edits;
+static u8 last_optics[OMK_OPTICS_ROWS];     /* the last strengths given to core (look_optics) */
+static u8 optics_of[OMK_LOOK_MAX][OMK_OPTICS_ROWS];    /* ... the last ones of each entry, and how often given */
+static u32 optics_n[OMK_LOOK_MAX];
 static void (*tick_fn)(void *);
 
 static void f_log(omk_mod *m, int level, const char *fmt, ...)
@@ -390,6 +395,36 @@ static int f_look_edits(omk_mod *m, const omk_look_edits *e)
     return 0;
 }
 
+/* The optics strengths at the module's start (FILMLOOK 1.13): every preset's given once - the rows show a preset's at
+ * once when a dial chooses it, before its apply - and the chosen one's last (core keeps the last as the chosen's) */
+static int optics_all_given(u32 chosen)
+{
+    int i, last = -1;
+    u32 k;
+
+    for (i = 0; i < (int)ntrace; i++)
+        if (trace[i].what == T_OPTICS)
+            last = i;
+    for (k = 0; k < count; k++)
+        if (optics_n[k] != 1)
+            return 0;
+    return count_of(T_OPTICS) == count && last >= 0 && trace[last].arg == chosen && first_of(T_OPTICS) > first_of(T_LIST);
+}
+
+static int f_look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 n)
+{
+    (void)m;
+    if (n != OMK_OPTICS_ROWS)
+        return -1;
+    note(T_OPTICS, entry, 0);
+    memcpy(last_optics, strength, OMK_OPTICS_ROWS);
+    if (entry < OMK_LOOK_MAX) {
+        memcpy(optics_of[entry], strength, OMK_OPTICS_ROWS);
+        optics_n[entry]++;
+    }
+    return 0;
+}
+
 static u32 f_grain_list(omk_mod *m, char (*files)[13], u32 max)
 {
     (void)m;
@@ -434,6 +469,7 @@ static void fake_init(void)
     fake.look_art = f_look_art;
     fake.look_edits = f_look_edits;
     fake.grain_list = f_grain_list;
+    fake.look_optics = f_look_optics;
 }
 
 /* ---- the reference: the bit-wise CRC-32 FILMLOOK had ---- */
@@ -486,6 +522,7 @@ static void run_first(void)
     CHECK(!count_of(T_OVERRIDE) && !count_of(T_LOOK_SET) && !count_of(T_STOCK));
     CHECK(count_of(T_LIST) == 1 && trace[first_of(T_LIST)].arg == (count << 8 | 0));
     CHECK(pending == NOTHING && tick_fn == tick);
+    CHECK(optics_all_given(0));             /* no store: the first preset chosen */
     CHECK(strstr(logtext, " presets in OMKIT\\FILMLOOK\\") && strstr(logtext, " cassette pictures, 0 presets without one"));
 
     /* the user chooses the look with preset CHOSEN + 1 and moves the shadows of its curve */
@@ -497,6 +534,19 @@ static void run_first(void)
     tick(0);
     CHECK(count_of(T_OVERRIDE) == 2 && presets[CHOSEN].e.tone[0] == 3 && presets[CHOSEN].key);
     CHECK(memcmp(blocks[0], blocks[1], ISPB_SIZE) != 0);       /* the edit changes the tables */
+    /* the optics rows: shown (their group with the editors), the chosen preset's strengths given to core at its apply;
+     * Bloom 3 - kept with the preset's edits and given to core at once, the tables not touched; a strength past the top
+     * or a row past the last is not taken */
+    CHECK(optics_on && last_edits.groups >> OMK_EDIT_OPTICS & 1 && count_of(T_OPTICS) == count + 2);   /* start, on, edit */
+    CHECK(!last_optics[0] && !last_optics[1]);
+    on_look(OMK_LOOK_EDIT, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, OMK_OPTICS_BLOOM, 3), 0);
+    on_look(OMK_LOOK_EDIT, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, OMK_OPTICS_HALATION, 6), 0);
+    on_look(OMK_LOOK_EDIT, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, 2, 1), 0);
+    tick(0);
+    CHECK(presets[CHOSEN].e.optics[OMK_OPTICS_BLOOM] == 3 && !presets[CHOSEN].e.optics[OMK_OPTICS_HALATION]);
+    CHECK(count_of(T_OPTICS) == count + 3 && last_optics[OMK_OPTICS_BLOOM] == 3 && !last_optics[OMK_OPTICS_HALATION]);
+    CHECK(count_of(T_OVERRIDE) == 2 && pending == NOTHING);
+    CHECK(strstr(logtext, "preset 6: bloom 3") && !strstr(logtext, "halation 6"));
     store_write();
 }
 
@@ -604,7 +654,8 @@ static void run_edits(void)
 static void run_again(const char *what)
 {
     int notnatural = !strcmp(what, "notnatural"), gone = !strcmp(what, "gone");
-    int notlisted = !strcmp(what, "notlisted"), early_want = !notnatural && !gone && !notlisted;
+    int notlisted = !strcmp(what, "notlisted"), format2 = !strcmp(what, "format2");
+    int early_want = !notnatural && !gone && !notlisted;
     char saved[OMK_NAME_MAX] = "";
     u32 i, opens;
     int at;
@@ -617,6 +668,20 @@ static void run_again(const char *what)
         hidden = saved;
     if (notlisted)
         cfg_presets = "TRIX, GOLD";
+    if (format2) {                          /* the record as FILMLOOK 1.5..1.12 wrote it, its padding not zero */
+        for (i = 0; i < nrecs && recs[i].key < KEY_EDIT; i++)
+            ;
+        CHECK(i < nrecs && recs[i].len == sizeof(edit_rec));
+        if (i < nrecs) {
+            edit_rec *r = (edit_rec *)(void *)recs[i].data;
+
+            CHECK(r->e.format == EDITS_FORMAT && r->e.optics[OMK_OPTICS_BLOOM] == 3);
+            r->e.format = 2;
+            r->e.optics[0] = 7;
+            r->e.optics[1] = 9;
+        }
+        store_write();
+    }
     CHECK(module_init(&fake, (omk_mod *)&fake) == 0);
     CHECK(count_of(T_LIST) == 1);
     if (early_want) {
@@ -631,7 +696,11 @@ static void run_again(const char *what)
         CHECK(count == count_of(T_OPEN) - 1 && opens_of(saved) == 2);
         CHECK(current == CHOSEN && !strcmp(presets[current].file, saved) && base_of == current);
         CHECK(presets[current].e.tone[0] == 3);            /* the stored edit is back, by the file's name and CRC */
+        CHECK(presets[current].e.optics[OMK_OPTICS_BLOOM] == (format2 ? 0 : 3) && !presets[current].e.optics[1]);
         CHECK(trace[first_of(T_LIST)].arg == (count << 8 | CHOSEN));
+        CHECK(optics_all_given(CHOSEN));    /* the stored strengths: the chosen preset's, the others 0 */
+        for (i = 0; i < count; i++)
+            CHECK(optics_of[i][OMK_OPTICS_BLOOM] == (i == CHOSEN && !format2 ? 3 : 0) && !optics_of[i][OMK_OPTICS_HALATION]);
         CHECK(active == 1 && pending == APPLY);
         CHECK(strstr(logtext, "its tables are on, before the presets are read"));
         CHECK(strstr(logtext, "edits of 1 presets restored") && strstr(logtext, "look restored, preset 6 '"));
@@ -641,6 +710,8 @@ static void run_again(const char *what)
         CHECK(pending == NOTHING && count_of(T_OPEN) == opens);    /* no file read for the first apply */
         CHECK(count_of(T_OVERRIDE) == 2 && !memcmp(blocks[0], blocks[1], ISPB_SIZE));   /* the same tables, edited */
         CHECK(count_of(T_EDITS) == 1 && last_edits.entry == CHOSEN && last_edits.tone[0] == 3);
+        CHECK(count_of(T_OPTICS) == count + 1 && optics_n[CHOSEN] == 2 &&   /* at the start and the first tick */
+              last_optics[OMK_OPTICS_BLOOM] == (format2 ? 0 : 3) && !last_optics[OMK_OPTICS_HALATION]);
         CHECK(strstr(logtext, "preset 6 '") && strstr(logtext, ") on, edited"));
         return;
     }

@@ -49,12 +49,14 @@ static const struct {
     {0x60051143, {0x5b, 0x38, 0x93, 0x96, 0x86, 0x42, 0x1c, 0x00}},   /* OlyEvWt */
     {0x60051078, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xba, 0x28, 0xc0}},   /* OlyEvSt */
     {0x6005123a, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xf8, 0x26, 0xc0}},   /* OlyEvCl */
+#ifdef OMK_DEBUG                            /* the functions of the restart job and of the reset */
     {0x60023796, {0xfa, 0xc8, 0x80, 0x00, 0xc5, 0x05, 0x00, 0xca}},   /* scheap_alloc */
     {0x6089e157, {0xfc, 0xa0, 0x18, 0x41, 0xe4, 0x61, 0xb0, 0x00}},   /* CameraCommon */
     {0x608591a7, {0x92, 0xfc, 0xce, 0xf0, 0xad, 0xb4, 0x60, 0x6a}},   /* HFW job constructor */
     {0x60858d8e, {0xfc, 0xa0, 0x6c, 0x20, 0xe4, 0x61, 0xb0, 0x00}},   /* HFW callback executor */
     {0x60858e51, {0x82, 0x43, 0x04, 0x97, 0xbf, 0x00, 0xc9, 0x05}},   /* HFW job post */
     {0x60058ae0, {0xfc, 0x81, 0xb0, 0x00, 0xf0, 0x8f, 0x80, 0x01}},   /* reset on request */
+#endif
 };
 
 const char *drv_name(void)
@@ -122,6 +124,7 @@ int drv_mem_region(u32 i, void **base, u32 *size)
     return 1;
 }
 
+#ifdef OMK_DEBUG
 /* Only the NMI handler writes task, it is the task number. Vector 0x60030020 updates sp, psw, pc of CPU 0 on every interrupt.
  * RAM is lost at power-off: the block is almost all ones with random flipped bits, so the value matters, not the difference from ffffffff */
 int drv_crash_read(int cpu, omk_crash *out)
@@ -138,6 +141,16 @@ int drv_crash_read(int cpu, omk_crash *out)
         out->regs[i] = src[8 + i];
     return out->task > 0 && out->task < 0x1000;
 }
+#endif
+
+#ifdef OMK_DEBUG
+/* A word of the processor's shared memory (0x8ff0...): the firmware reads and writes it with plain mov, as kernel.c
+ * reads the kernel pointers next to it. Nothing at start clears it (its writers are the restart paths only) */
+u32 drv_restart_cause(void)
+{
+    return *(const volatile u32 *)0x8ff000b0;
+}
+#endif
 
 /* Jump in firmware code through the uncached address: memory protection watches only 0x6....
  * Verified on the camera. The five bytes do not cross an instruction cache line, the first byte is written last */
@@ -276,10 +289,12 @@ static volatile u32 *other_cpu_calls(void)
     return (volatile u32 *)((u32)other_cpu_slot + UNCACHED);
 }
 
+#ifdef OMK_DEBUG                            /* for the log's counters */
 u32 drv_ev_other_cpu(u32 event)
 {
     return event < 16 ? other_cpu_calls()[event] : 0;
 }
+#endif
 
 /* From the trampoline. Response to the firmware: the original one if modules did not change allowed, otherwise 0 or PM_REJECTED */
 void drv_hook_pm(hook_regs *r)
@@ -312,6 +327,7 @@ void drv_hook_s1(void)
     ev_dispatch(OMK_EV_S1_API, 0, s1_orig, 0);
 }
 
+#ifdef OMK_DEBUG
 /* ------------------------------------------------------------------------------------------------------------------
  * Screen or viewfinder, for the power probe line of the log: video compositor channel 0, scale of OSD plane 2. On the camera
  * the screen has no scaling (0), the viewfinder has it (0x11, window 1024 x 768): .
@@ -323,6 +339,7 @@ static u32 vsc(u32 off)
 {
     return ((const volatile u32 *)VSC0)[off / 4];
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------------------------------
  * Power hooks. The sites' bytes are checked against the
@@ -397,50 +414,75 @@ static int ram_ptr(u32 p)
     return p >= 0x60000000 && p < 0x64000000 && !(p & 3);
 }
 
+/* K2, the application's state: +172 of the object reached from 0x61e497d8 -> +0xd8 -> +0x70 (a hypothesis from the
+ * emulator, every pointer checked); 0xffffffff - the path broken. RAM words through the cache, as the firmware's own
+ * readers on CPU 0 */
+static u32 app_state(void)
+{
+    u32 p = *(const volatile u32 *)0x61e497d8;
+
+    if (!ram_ptr(p))
+        return 0xffffffff;
+    p = *(const volatile u32 *)(p + 0xd8);
+    if (!ram_ptr(p))
+        return 0xffffffff;
+    p = *(const volatile u32 *)(p + 0x70);
+    if (!ram_ptr(p))
+        return 0xffffffff;
+    return *(const volatile u32 *)(p + 172);
+}
+
+/* Application states (K2) that last a moment in normal work: 0x5101 half-press, 0x0002 a transition; the UI hangs
+ * after a shot (core 0.90-0.93, the on-screen text) stayed in them. The input byte K4 (0xa26dea7c, uncached: raw input
+ * byte group 0) changes with the keys of group 0 (bit 1 cleared on half-press: a hypothesis) */
+#define APP_HALF_PRESS 0x5101
+#define APP_TRANSITION 0x0002
+
+/* Both builds: core's card writes wait while the camera is in a passing state (main.c's ui_hold, at every pass of the
+ * core task - the owner's decision 2026-11-27: a half-press is a critical operation of the camera, nothing of ours during
+ * it). Three RAM words of the chain and one byte - no register of the hardware */
+int drv_ui_state(u32 *app, u32 *keys)
+{
+    u32 a = app_state();
+
+    if (a == 0xffffffff)
+        return -1;
+    *app = a;
+    *keys = *(const volatile u8 *)0xa26dea7c;
+    return a == APP_HALF_PRESS ? DRV_UI_HALF : a == APP_TRANSITION ? DRV_UI_TRANSIENT : 0;
+}
+
+/* From here to the media busy flags: a debug build's - the probe words of the log and of the dumps, the keys and events of
+ * the test scenario, the restarts and the reset of the rescue and of the scenario without hands, the USB hold. A release
+ * build reads the lever's flag above, the passing state (drv_ui_state) and nothing more of the camera's state */
+#ifdef OMK_DEBUG
+
 /* For the log: K1 lever flag, K3 (0x61e42010) OlyHfwPower began power-off or sleep, K5 UI state word (0x6234f838, read at
  * its uncached alias 0xa234f838 - see GUI_STATE in pictprof.c; bytes: group, state; 0x0104 - black screen), K4 raw input byte group 0 (0xa26dea7c, uncached; bit 0 - lever in the emulator),
  * (0x62151ee8), K2 application state (+192 of the object reached from 0x61e497d8 -> +0xd8 -> +0x70 = object + 20;
  * a hypothesis from the emulator, every pointer checked; 0xffffffff - path broken). */
 u32 drv_power_probe(u32 *w, u32 max)
 {
-    u32 v[7], n, p;
+    u32 v[7], n;
 
     v[0] = *(const volatile u32 *)LEVER_OFF_FLAG;
     v[1] = *(const volatile u32 *)0x61e42010;
     v[2] = *(const volatile u32 *)0xa234f838;   /* past the cache, as every reader of the GUI state (pictprof.c) */
     v[3] = *(const volatile u8 *)0xa26dea7c;
     v[4] = *(const volatile u32 *)0x62151ee8;
-    v[5] = 0xffffffff;
-    p = *(const volatile u32 *)0x61e497d8;
-    if (ram_ptr(p)) {
-        p = *(const volatile u32 *)(p + 0xd8);
-        if (ram_ptr(p)) {
-            p = *(const volatile u32 *)(p + 0x70);
-            if (ram_ptr(p))
-                v[5] = *(const volatile u32 *)(p + 172);
-        }
-    }
-    v[6] = vsc(VSC_RSZ_OSD3) != 0;          /* 1 - the viewfinder: its plane is scaled, the screen's is not */
+    v[5] = app_state();
+    /* 1 - the viewfinder: its plane is scaled, the screen's is not. The only register here, read only when asked for (the
+     * log's probe line); the passing-state checks of every pass (drv_ui_probe) read RAM only */
+    v[6] = max > 6 ? vsc(VSC_RSZ_OSD3) != 0 : 0;
     for (n = 0; n < max && n < 7; n++)
         w[n] = v[n];
     return n;
 }
 
-/* Application states (K2) that last a moment in normal work: 0x5101 half-press, 0x0002 a transition; the UI hangs
- * after a shot (core 0.90-0.93, the on-screen text) stayed in them. The input byte K4 changes with the keys of group 0
- * (bit 1 cleared on half-press: a hypothesis) */
-#define APP_HALF_PRESS 0x5101
-#define APP_TRANSITION 0x0002
-
+/* The debug build's name of the same check (the dumps, the scenario, the rescue, the debug service) */
 int drv_ui_probe(u32 *app, u32 *keys)
 {
-    u32 w[6];
-
-    if (drv_power_probe(w, 6) < 6 || w[5] == 0xffffffff)
-        return -1;
-    *app = w[5];
-    *keys = w[3];
-    return w[5] == APP_HALF_PRESS ? DRV_UI_HALF : w[5] == APP_TRANSITION ? DRV_UI_TRANSIENT : 0;
+    return drv_ui_state(app, keys);
 }
 
 /* The test scenario's shutter button (core/shoot.c). Keys: API 0xD0002 (0x6032b57f -> 0x601310b8), the path of the
@@ -611,6 +653,8 @@ int drv_shutter(u32 key, int down, u32 path)
     return drv_key_api(0x2000100 + key, down ? 0 : 1) & 0xffff;
 }
 
+#endif
+
 /* Media busy flags: the camera's power code waits while (0x61e418f0) = 1 or (0x61e418f4) != 0
  * before sleep. A hypothesis that this is the camera's own card work (a picture being written); core's writes do not set
  * them. Read through the cache on CPU 0, like the firmware */
@@ -719,6 +763,7 @@ int drv_wait_state(void)
     return core_flag;
 }
 
+#ifdef OMK_DEBUG
 /* ------------------------------------------------------------------------------------------------------------------
  * Subprocessor clock: seconds at 0x98e00098, 1/1024 s in bits 5..14 of
  * 0x98e0009c; it keeps counting while the camera sleeps. The firmware checks the block id first: ((0x98e00000) >> 2) & 63 = 42.
@@ -742,3 +787,4 @@ int drv_rtc(u32 *sec, u32 *frac1024)
     }
     return -1;
 }
+#endif

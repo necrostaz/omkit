@@ -267,7 +267,7 @@ to the file. A line is formatted on the caller's stack; under the firmware lock 
 | Line | `  ms L who: text`, at most 192 bytes (longer lines are cut, `~` at the end) |
 | Levels | E, W, I, D; `log_level` in `[core]` (default info); `log = off` disables it. Info holds what changes state: start, modules, what the user chose, power, failures put right. Lines that repeat with use - one per picture, per dial step or per second in an editor - are debug (core 1.30) |
 | Ring | 32 KB; a line that does not fit is dropped whole and counted (`log: N lines lost`) |
-| Write | when the log has been quiet for 0.5 s, at least every 3 s; not while the camera writes the card, and never during power-off or sleep |
+| Write | when the log has been quiet for 0.5 s, at least every 3 s; not while the camera writes the card, half-presses (up to 6 s, and 0.5 s after it) or changes state (both build kinds: the application's state is read from memory once a pass, no register), never during power-off or sleep, and not while the power lever is off but the camera did not switch off (the battery may be taken out at any moment; the lines wait in memory) |
 | No card or folder | the file does not open: the next try after 1 s, then 2, 4 ... up to 60 s apart, not at every pass; a write that works, or the camera running again after a sleep or a power-off that did not happen, ends the pauses (`log: the card takes the log again, after N tries without it`). The lines wait in the ring meanwhile |
 | File | `LOG\CORE.LOG`, one for all power-ons: each start appends to it, `core` never removes or cuts it (delete it on a computer when it gets too long). Each power-on begins with an empty line and a header: `======== OMKit core <version> (<branch>@<commit>), <platform>, run <run id>, started <date and time> ========` (the build's branch and commit; the camera clock's date), then, when the modules are loaded, `modules: NAME 1.5, ...` with their versions. Older versions removed the file at each power-on, and `run_logs = on` wrote a file per power-on; that key is gone (ignored), old `XXXXXXXX.LOG` files are left as they are |
 | Open file | the file stays open between writes (each portion is written and flushed at once), because the first write after an open walks the file's cluster chain from its start - a cost that grows with the file; it is closed after 30 s without lines, at sleep and power-off, and before a file job of the debug service. When the camera mounts the card again (its PC mode over USB), it frees every open file without a write: `core` sees that by the file's identity and opens the log again (`log: ... opened again`), never closing a freed file - its slot may already be another file's. While the card is not mounted nothing is written |
@@ -345,6 +345,10 @@ A deep sleep (auto power-off) is a real power-off for `core`: the next wake is a
 The freezing of all tasks in a light sleep is also **from the firmware code**, observed in the emulator.
 
 ### 7.7. Diagnostics
+
+`core` is built in two kinds ([build.md](build.md#35-release-and-debug-builds)). A release build keeps the first item
+below and the stack warning; the crash records, the used stack depth, the task dump and the debug service are compiled
+into a **debug build only**, like every probe of the camera's state that the user's functions do not need.
 
 - **Boot count and unclean end.** The `CORE` store tells whether the last run ended with a power-off; if not, the log
   says so; the lines of the run that went down are just before, in the same `CORE.LOG`.

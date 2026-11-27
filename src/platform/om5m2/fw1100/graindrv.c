@@ -49,6 +49,8 @@
  *    2-3, Cr 4-5); byte 1 the source (0 memory, 1 the constant +120, 2 the generator), byte 2 the weight (2 the gain, 0 the
  *    gain x C, 1 the gain x (1 - C)) - read from the stock cases (31: generator weighted by its mask; 33, 18: lerp to a
  *    constant; 36: the texture in Y and the generator in Cb/Cr, +132 0x002A2824)
+ *    The optics layer's step (core 1.33, opticsdrv.c), when [optics] probe is on, goes into the list right before that
+ *    pass to the outputs.
  * Chroma (core 1.21): the generator in Cb and Cr of input B (+132 byte 1 0x28, byte 0 0x24 as case 36), its gain in the high
  *    half of +136 and in +140, a new seed +172 (bit 31 restarts it, as cases 32 and 34) a pass.
  *
@@ -153,6 +155,7 @@
                                                then 0x6038c50f, as the grain film's last step 0x60391313 does for 0x1010)
                                                with the callback 0x60391516, which does nothing. The ART planner's own
                                                last step after 0x6038cfa5 (P+28 not 0, 0x6038dfb6) */
+#define STEP_SF_OUT 0x603934ba              /* the Soft Focus pass to the outputs (the optics layer's chain, PAIR) */
 #define STEP_M_OUT 0x60391b8f               /* the same pass with the shading callback 0x60391d48: the stock last step
                                                of the monochrome list, from the job flag 0x80000 (0x6038e0a2) */
 #define LIST_DEV 1                          /* the list the planner built (ring detail) */
@@ -160,6 +163,7 @@
 #define LIST_MASK 4
 #define LIST_901 8
 #define LIST_OUT 16                         /* a step that writes the job's outputs follows the development 0x901 */
+#define LIST_PROBE 32                       /* the optics layer's step before it (opticsdrv.c) */
 #define TEX_STAGE 0x100
 #define MASK_STAGE 0x901
 #define TEX_MARK 0x80                       /* byte +4 of the parameters: 0x6038c0c1 gives 1 or 3, and the sizes do not
@@ -240,6 +244,8 @@ typedef struct {
      * slot now. The core task writes, W reads, under drv_lock */
     u32 active, ready, gain, filling;
     u32 route, chroma, tag;                 /* of new jobs; the core task writes, W reads under drv_lock */
+    u32 optics;                             /* 1 - with gain 0 the stills still go the mask route's list, without the
+                                               blend (DRV_GRAIN_LIST): the optics layer's step is in it (core task) */
     u32 seed;                               /* the generator's seed counter (A, any CPU: a lost step is harmless) */
     u32 freed[CPUS];                        /* H3: our textures released with the current tag */
     u32 t_job[CPUS], t_job_max[CPUS];       /* H3: the last and the longest job, W to H3, us */
@@ -282,6 +288,9 @@ void drv_tramp_grain_h2(void);
 void drv_tramp_grain_h3(void);
 void drv_tramp_grain_wl(void);
 void drv_tramp_grain_det(void);
+u32 drv_optics_list(u8 *h, u32 room, u32 *out);    /* opticsdrv.c: the optics layer's steps for a list (at most 3) */
+void drv_optics_blend(u8 *ctx, u32 kase);   /* opticsdrv.c: the layer's blend made additive (cases 11, 12) */
+void drv_optics_ended(u8 *h);               /* opticsdrv.c: our job ended (its substage counted) */
 u32 drv_fw_tex_build(u8 *p, const u16 *params);    /* thunks.s: 0x603a3bdb, the record or 0 */
 void drv_fw_tex_release(u8 *p, u32 rec);           /* thunks.s: 0x603a452a */
 
@@ -363,7 +372,11 @@ void drv_grain_set(u8 *ctx, u32 kase)
     u32 cpu, e, gn, row = 0, i, sel, ch, *dst;
     int k;
 
-    if (!t || !ctx || (kase & 0xff) != CASE_TEX)   /* the setup tests the low byte (0x6036fc65) */
+    if ((kase & 0xff) != CASE_TEX) {        /* the setup tests the low byte (0x6036fc65) */
+        drv_optics_blend(ctx, kase);        /* the optics layer's blend (Soft Focus' cases 11 and 12) */
+        return;
+    }
+    if (!t || !ctx)
         return;
     B = *(u8 **)(ctx + CTX_B);
     img = *(u8 **)(ctx + CTX_IMAGE);
@@ -518,7 +531,10 @@ static inline __attribute__((always_inline)) u32 tex_take(volatile tex_t *t, u8 
         route = t->route;
         chroma = t->chroma;
         tag = t->tag;
-        if (!t->ready || e >= DRV_GRAIN_GENS || !gain)
+        if (!gain && t->optics && route != DRV_GRAIN_GF)
+            route = DRV_GRAIN_LIST;         /* the optics layer alone: the mask route's list, no grain blended (the
+                                               camera, card129: a picture without grain) */
+        if (!t->ready || e >= DRV_GRAIN_GENS || (!gain && route != DRV_GRAIN_LIST))
             what = T_NOTREADY;
         else
             fill = 1;
@@ -615,8 +631,8 @@ static u32 tex_job(volatile tex_t *t, const u8 *h, u32 *cpu)
 
     if (*(const u32 *)(h + H_KEY) != t->key)
         return 0;
-    if (!t->gain || !drv_look_active())
-        return 0;                           /* not the look's still, or its strength is Off */
+    if ((!t->gain && !t->optics) || !drv_look_active())
+        return 0;                           /* not the look's still, or its strength is Off and no optics layer */
     *cpu = cpu_now();
     type = *(const u16 *)(h + H_TYPE);
     if (!type || type != t->type) {
@@ -653,6 +669,14 @@ u32 drv_grain_wl(u8 *h)
     return 1;
 }
 
+/* A step at entry k of the job's list; +4 and +8 are 0 (the creator zeroes the table, 0x603895ec, and writes them so) */
+static void put_step(u8 *h, u32 k, u32 fn)
+{
+    *(u32 *)(h + H_STEPS + 12 * k) = fn;
+    *(u32 *)(h + H_STEPS + 12 * k + 4) = 0;
+    *(u32 *)(h + H_STEPS + 12 * k + 8) = 0;
+}
+
 /* W after the ART planner: the job's key back, the list it built checked (in the ring entry W left open) */
 void drv_grain_wl_after(u8 *h)
 {
@@ -677,7 +701,8 @@ void drv_grain_wl_after(u8 *h)
             list |= LIST_MASK;
         if (*(const u32 *)(h + H_STEPS + 12 * k) == STEP_M901)
             list |= LIST_901;
-        if (*(const u32 *)(h + H_STEPS + 12 * k) == STEP_OUT || *(const u32 *)(h + H_STEPS + 12 * k) == STEP_M_OUT)
+        if (*(const u32 *)(h + H_STEPS + 12 * k) == STEP_OUT || *(const u32 *)(h + H_STEPS + 12 * k) == STEP_M_OUT ||
+            *(const u32 *)(h + H_STEPS + 12 * k) == STEP_SF_OUT)
             list |= LIST_OUT;
     }
     /* The monochrome list ends in the buffer 0x1000: both developments get their output from the step (0x6039f787 with
@@ -689,10 +714,19 @@ void drv_grain_wl_after(u8 *h)
      * of key 12 builds. Room for it and for the selector's step */
     if (t->live[i].route != DRV_GRAIN_GF && n && n + 2 <= STEPS && !(list & LIST_OUT) &&
         *(const u32 *)(h + H_STEPS + 12 * (n - 1)) == STEP_M901) {
-        *(u32 *)(h + H_STEPS + 12 * n) = STEP_OUT;      /* +4 and +8 are 0: the creator zeroes the table (0x603895ec) */
-        *(u32 *)(h + H_STEPS + 12 * n + 4) = 0;
-        *(u32 *)(h + H_STEPS + 12 * n + 8) = 0;
-        *(u16 *)(h + H_NSTEPS) = ++n;
+        /* The optics layer's steps (opticsdrv.c, [optics]) go in first, right after the development 0x901: its step
+         * waits for that pass and works on the buffer 0x1000 before the pass to the outputs reads it; for the layer
+         * (Bloom, Halation) the chain after it ends with a pass to the outputs of its own. Room for them too, and for
+         * the selector's step */
+        u32 st[3], m = drv_optics_list(h, STEPS - n - 1, st), j;
+
+        for (j = 0; j < m; j++)
+            put_step(h, n++, st[j]);
+        if (m)
+            list |= LIST_PROBE;
+        if (m < 2)
+            put_step(h, n++, STEP_OUT);     /* the probe's step alone (or none): the plain pass to the outputs */
+        *(u16 *)(h + H_NSTEPS) = n;
         list |= LIST_OUT;
     }
     r = &t->ring[t->live[i].ring & (TEX_RING - 1)];
@@ -810,6 +844,7 @@ void drv_grain_tex_clean(u8 *h)
     if (i == TEX_LIVE)
         return;
     cpu = cpu_now();
+    drv_optics_ended(h);                    /* the optics probe's count of the job (nothing without the probe) */
     {
         volatile u32 *d = &t->done[cpu][t->done_n[cpu] % DONE_RING].seq;
 
@@ -836,6 +871,21 @@ void drv_grain_tex_clean(u8 *h)
             t->t_job_max[cpu] = us;
     }
     t->live[i].h = 0;                       /* last */
+}
+
+/* The look's grain shot of our job h (its ring entry + 1), 0 - not one of our jobs now. Any CPU: the arena block only
+ * (opticsdrv.c's step, for its report) */
+u32 drv_grain_shot(u32 h)
+{
+    volatile tex_t *t = tex();
+    u32 i;
+
+    if (!t || !h)
+        return 0;
+    for (i = 0; i < TEX_LIVE; i++)
+        if (t->live[i].h == h)
+            return t->live[i].ring + 1;
+    return 0;
 }
 
 /* Core task: the arena block, then the hooks. W last: it is the one that makes our jobs, so it goes in only with S, A
@@ -922,12 +972,12 @@ static void tex_service(volatile tex_t *t)
 
     k = drv_alloc_mode();
     if (k != mode_seen) {
-        log_printf(OMK_LOG_INFO, "grain: allocator mode %u", k);
+        log_diag("grain: allocator mode %u", k);
         mode_seen = k;
     }
     if (t->direct != direct_seen) {
         direct_seen = t->direct;
-        log_printf(OMK_LOG_INFO, "grain: %u fills read every word from the tile (not on cpu 0, or the row buffer in use)",
+        log_diag("grain: %u fills read every word from the tile (not on cpu 0, or the row buffer in use)",
                    direct_seen);
     }
     if (t->same_h != same_seen || t->aged != aged_seen) {
@@ -948,7 +998,7 @@ static void tex_service(volatile tex_t *t)
             break;                          /* still being written: the next report */
         k = r->entry < DRV_GRAIN_GENS ? r->entry : 0;
         if (r->what == T_BUILT || r->what == T_SHARED)
-            log_printf(OMK_LOG_INFO, "grain: shot %u type %04x: mode %04x rawjpeg %u filetype %u, P+18/19/21 %u/%u/%u, "
+            log_diag("grain: shot %u type %04x: mode %04x rawjpeg %u filetype %u, P+18/19/21 %u/%u/%u, "
                        "slot %u (%s, gain %u, chroma %u), route %s, level %u, %s, list %s (%u steps), shift %u,%u, "
                        "builder %u us, fill %u us, texture %08x, out %08x", seen + 1, r->type, r->mode & 0xffff,
                        r->mode >> 16 & 0xff, r->mode >> 24, r->pf & 0xff, r->pf >> 8 & 0xff, r->pf >> 16 & 0xff, k + 1,
@@ -979,7 +1029,7 @@ static void tex_service(volatile tex_t *t)
             d = &t->done[cpu][done_seen[cpu] % DONE_RING].seq;
             if (d[0] != done_seen[cpu] + 1)
                 break;
-            log_printf(OMK_LOG_INFO, "grain: shot %u ended on cpu %u: %u steps, state %04x %04x %04x, W to H3 %u ms", d[1],
+            log_diag("grain: shot %u ended on cpu %u: %u steps, state %04x %04x %04x, W to H3 %u ms", d[1],
                        cpu, d[2], d[3], d[4], d[5], d[6] / 1000);
         }
     }
@@ -991,7 +1041,7 @@ static void tex_service(volatile tex_t *t)
         if (sum == sums[cpu])
             continue;
         sums[cpu] = sum;
-        log_printf(OMK_LOG_INFO, "grain: texture cpu %u: jobs %u (other types %u, not cpu 0 %u), built %u, shared %u, "
+        log_diag("grain: texture cpu %u: jobs %u (other types %u, not cpu 0 %u), built %u, shared %u, "
                    "failed %u, skipped %u; fills %u, errors %u; freed %u; case 1 given %u, set %u; detail block %u; job W to H3 "
                    "last %u ms, longest %u ms", cpu,
                    t->cnt[cpu][TC_JOBS], t->cnt[cpu][TC_TYPE], t->cnt[cpu][TC_CPU], t->cnt[cpu][TC_BUILT],
@@ -1000,7 +1050,7 @@ static void tex_service(volatile tex_t *t)
                    t->cnt[cpu][TC_DETAIL], t->t_job[cpu] / 1000, t->t_job_max[cpu] / 1000);
         for (i = 0; i < TG_OK; i++)
             if (t->skip[cpu][i])
-                log_printf(OMK_LOG_INFO, "grain: texture cpu %u: case 1 not given or set, %s: %u", cpu, gate[i],
+                log_diag("grain: texture cpu %u: case 1 not given or set, %s: %u", cpu, gate[i],
                            t->skip[cpu][i]);
     }
 }
@@ -1068,6 +1118,14 @@ void drv_grain_look_gain(u32 gain)
         t->gain = gain <= DRV_GRAIN_GAIN_MAX ? gain : DRV_GRAIN_GAIN_MAX;
 }
 
+void drv_grain_look_optics(u32 on)
+{
+    volatile tex_t *t = tex();
+
+    if (t)
+        t->optics = on != 0;
+}
+
 void drv_grain_route(u32 route, u32 chroma, u32 tag)
 {
     volatile tex_t *t = tex();
@@ -1082,6 +1140,7 @@ void drv_grain_route(u32 route, u32 chroma, u32 tag)
     drv_unlock(st);
 }
 
+#ifdef OMK_DEBUG                            /* the mask test's count of jobs */
 int drv_grain_route_state(u32 *freed, u32 *live)
 {
     volatile tex_t *t = tex();
@@ -1098,3 +1157,4 @@ int drv_grain_route_state(u32 *freed, u32 *live)
     *live = n;
     return 0;
 }
+#endif

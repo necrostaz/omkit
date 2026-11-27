@@ -352,10 +352,13 @@ int drv_power_pending(void)
 
 u32 host_k3;                                /* K3 of the power probe: the firmware's power-off or sleep began */
 
+u32 host_probes, host_rtc_reads;            /* reads of the camera's state words and of the subprocessor clock */
+
 u32 drv_power_probe(u32 *w, u32 max)
 {
     u32 n;
 
+    host_probes++;
     for (n = 0; n < max && n < 6; n++)
         w[n] = n == 0 ? (u32)host_power_pending : n == 1 ? host_k3 : 0;
     return n;
@@ -504,6 +507,7 @@ void drv_date(drv_date_t *d)
 
 int drv_rtc(u32 *sec, u32 *frac1024)
 {
+    host_rtc_reads++;
     if (!host_rtc_ok)
         return -1;
     *sec = host_rtc_sec;
@@ -759,6 +763,12 @@ int look_grain(omk_mod *m, u32 entry, s32 tile, u32 level)
     return -2;
 }
 
+int look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 count)
+{
+    (void)m, (void)entry, (void)strength, (void)count;
+    return -2;
+}
+
 void look_drop_module(omk_mod *m)
 {
     (void)m;
@@ -783,6 +793,165 @@ u32 grain_list(struct omk_mod *m, char (*files)[13], u32 max)
     return 0;
 }
 
+/* The optics probe's driver (platform opticsdrv.c) for core/optics.c: the test sets the counts drv_optics_service gives;
+ * drv_optics_arm calls host_opt_on_arm (when set) at the moment the driver would get the arming */
+int host_prev_ended = 1;                    /* core_prev_ended (main.c is not in the host build) */
+u32 host_opt_level, host_opt_arms;
+drv_optics_info host_opt;
+void (*host_opt_on_arm)(void);
+
+int core_prev_ended(void)
+{
+    return host_prev_ended;
+}
+
+u32 host_opt_installs;                      /* drv_optics_install calls */
+
+int drv_optics_install(u32 level)
+{
+    host_opt_installs++;
+    host_opt_level = level;
+    return 0;
+}
+
+void drv_optics_arm(void)
+{
+    host_opt_arms++;
+    host_opt.armed = 1;
+    if (host_opt_on_arm)
+        host_opt_on_arm();
+}
+
+void drv_optics_service(drv_optics_info *st)
+{
+    *st = host_opt;
+}
+
+u32 host_opt_sub = 99, host_opt_crumb[DRV_OPTICS_CRUMB];
+
+void drv_optics_sub(u32 sub)
+{
+    host_opt_sub = sub;
+}
+
+u32 host_opt_loop, host_opt_sleep;
+
+void drv_optics_loop(u32 n, u32 sleep_ms)
+{
+    host_opt_loop = n;
+    host_opt_sleep = sleep_ms;
+}
+
+int drv_optics_crumb(u32 boot, u32 *old)
+{
+    u32 i;
+
+    for (i = 0; i < DRV_OPTICS_CRUMB; i++)
+        old[i] = host_opt_crumb[i];
+    host_opt_crumb[0] = 0;
+    host_opt_crumb[1] = boot;
+    return old[0] == 0x4f435242u;
+}
+
+void drv_optics_beat(u32 ms)
+{
+    host_opt_crumb[2] = ms;
+}
+
+const char *drv_optics_sub_name(u32 sub)
+{
+    static const char *const name[DRV_OPTICS_SUBS] = {"N", "A0", "A", "B", "C1", "C2", "C3", "W0", "W1", "W2", "D", "E", "F", "full",
+                                                      "L0", "L1", "L2", "L3", "L4"};
+
+    return sub < DRV_OPTICS_SUBS ? name[sub] : "?";
+}
+
+const char *drv_optics_phase(u32 phase)
+{
+    return phase == 7 ? "250 ms busy" : "a phase";
+}
+
+u32 drv_restart_cause(void)
+{
+    return 0;
+}
+
+int host_opt_worker_rc;                     /* what drv_optics_worker answers */
+u32 host_opt_workers;                       /* its calls */
+
+int drv_optics_worker(u32 *tid)
+{
+    host_opt_workers++;
+    *tid = host_opt_worker_rc ? 0 : 0x77;
+    return host_opt_worker_rc;
+}
+
+/* The optics layer: the settings kept for the test to look at */
+drv_optics_layer_cfg host_opt_layer;
+int host_opt_layer_rc;
+
+int drv_optics_layer(const drv_optics_layer_cfg *c)
+{
+    host_opt_layer = *c;
+    return host_opt_layer_rc;
+}
+
+/* The further sets and the set of each press */
+drv_optics_layer_cfg host_opt_sets[DRV_OPTICS_SETS + 1];
+u32 host_opt_nsets, host_opt_set;
+
+int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c)
+{
+    if (!k || k > DRV_OPTICS_SETS)
+        return 1;
+    host_opt_sets[k] = *c;
+    if (k > host_opt_nsets)
+        host_opt_nsets = k;
+    return 0;
+}
+
+void drv_optics_set(u32 k)
+{
+    host_opt_set = k;
+}
+
+/* The strengths: the look's (look_optics_now, what the test sets) and what the driver got; the rows wanted */
+u8 host_look_str[2];
+int host_look_str_on;
+u32 host_opt_str = 0xffffffffu, host_opt_strs;
+int host_look_rows;
+
+int look_optics_now(u8 *out)
+{
+    out[0] = host_look_str_on ? host_look_str[0] : 0;
+    out[1] = host_look_str_on ? host_look_str[1] : 0;
+    return host_look_str_on;
+}
+
+void drv_optics_strength(u32 bloom, u32 halation, u32 mono, u32 white)
+{
+    host_opt_str = bloom | halation << 8 | mono << 16 | white << 24;
+    host_opt_strs++;
+}
+
+void drv_look_rows(int on)
+{
+    host_look_rows = on;
+}
+
+u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf)
+{
+    *wsize = 0;
+    *wbuf = 0;
+    return host_opt_layer.width ? (216 * W + 50 * host_opt_layer.width) / (100 * host_opt_layer.width) : 0;
+}
+
+int drv_optics_worker_test(u32 *us, u32 *work, u32 *state)
+{
+    *us = *work = *state = 0;
+    return -1;
+}
+
 /* ---- the debug service (core/debug.c) ---- */
 u8 host_keep[0x20080] __attribute__((aligned(16)));    /* the memory that outlives a reset: kept between "power-ons" */
 u32 host_keep_size = sizeof(host_keep);
@@ -796,8 +965,8 @@ u32 host_ptp_in_n;
 u8 host_mem[4096];                          /* stands for RAM at 0xa0001000 */
 drv_task host_tasks[4];
 u32 host_ntasks;
-u32 host_app = 0x5100;
-int host_ui = 0;
+u32 host_app = 0x5100;                      /* what drv_ui_probe gives as the app state, unless half-pressed */
+int host_ui_state;                          /* what drv_ui_probe answers: 0 a lasting state, DRV_UI_HALF ... */
 
 int drv_keep_area(void **base, u32 *size)
 {
@@ -896,11 +1065,26 @@ int drv_obj_read(u32 kind, u32 id, drv_obj *o)
 }
 
 /* Weak: the scenario's test (test_shoot.c) has its own model of the camera's half-press state */
+u32 host_keys;                              /* the raw input byte of drv_ui_probe */
+
 __attribute__((weak)) int drv_ui_probe(u32 *app, u32 *keys)
 {
-    *app = host_app;
-    *keys = 0;
-    return host_ui;
+    host_probes++;
+    *app = host_ui_state == DRV_UI_HALF ? 0x5101 : host_app;
+    *keys = host_keys;
+    return host_ui_state;
+}
+
+/* The same answer from RAM words (both builds: the hold of card writes in a half-press); counted apart from the debug
+ * build's probes */
+u32 host_ui_reads;
+
+__attribute__((weak)) int drv_ui_state(u32 *app, u32 *keys)
+{
+    host_ui_reads++;
+    *app = host_ui_state == DRV_UI_HALF ? 0x5101 : host_app;
+    *keys = host_keys;
+    return host_ui_state;
 }
 
 /* The restart request: counted */

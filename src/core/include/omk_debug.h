@@ -1,6 +1,7 @@
 /* The debug service (core/debug.c, core 1.40): a log and state snapshots in RAM that outlives a reset, read over USB
  * with vendor operations of PTP; optionally no card writes by core, and files of the OMKit folder written over USB.
- * Off unless [debug] enabled = on. */
+ * Off unless [debug] enabled = on. A debug build only: a release build has no debug service at all, and core_card_ok
+ * is always 1 there. */
 #ifndef OMK_DEBUG_H
 #define OMK_DEBUG_H
 
@@ -46,11 +47,38 @@ enum {                                      /* HELLO's p4 */
 #define DBG_SNAP_HEAD 36
 
 /* core */
+#ifndef OMK_DEBUG
+#define dbg_setup(run) ((void)0)
+#define dbg_start() ((void)0)
+#define dbg_service(now) ((void)0)
+#define dbg_tick(tick) (tick)
+#define dbg_ended() ((void)0)
+#define core_card_ok() 1
+#define dbg_event(what, arg) ((void)0)
+#define dbg_where(where) ((void)0)
+#define dbg_mem_dump(why) ((void)0)
+#else
 void dbg_setup(const char *run);            /* after the config, before the log's first line */
 void dbg_start(void);                       /* after the log and the store: buffers, the run before, PTP */
 void dbg_service(u32 now);                  /* core loop, every pass while the camera runs */
 u32 dbg_tick(u32 tick);                     /* the core loop's next wait: shorter while a window or a job is on */
 void dbg_ended(void);                       /* the run reached the end of a power-off */
 int core_card_ok(void);                     /* 0 - core writes nothing to the card ([debug] card_writes = off) */
+/* A mark, a snapshot of the watched tasks and the window of snapshots after it (core task; nothing while the service is
+ * off): for another service's moments worth a look after a reset */
+void dbg_event(const char *what, const char *arg);
+/* Where the core task is (DBG_W_*): before every service of its loop, in a card write, at each snapshot's task - one
+ * word of the bank header past the cache (DH_SPARE: where << 24 | ms & 0xffffff). A core task that stops (card159: its
+ * heartbeat stopped 4 s before the worker task's) leaves the place in RAM, read at the next start and over USB */
+enum {
+    DBG_W_NONE, DBG_W_WAIT, DBG_W_POWER, DBG_W_PROF, DBG_W_SHOOT, DBG_W_STORE, DBG_W_MEM, DBG_W_STACK, DBG_W_EV,
+    DBG_W_LOOK, DBG_W_ISP, DBG_W_GRAIN, DBG_W_OPTICS, DBG_W_MODULES, DBG_W_TASKDUMP, DBG_W_DEBUG, DBG_W_LOG,
+    DBG_W_CARD_BEGIN, DBG_W_CARD_END, DBG_W_SNAPSHOT,  /* a card write by core began, ended; a snapshot */
+    DBG_W_TASK = 0x40                       /* + n: a snapshot reads its n-th watched task */
+};
+void dbg_where(u32 where);
+/* [debug] stuck_mem's words into the log now (core task; nothing without the key): why - the reason in the log line */
+void dbg_mem_dump(const char *why);
+#endif
 
 #endif

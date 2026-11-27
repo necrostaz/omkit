@@ -31,6 +31,7 @@
 #include "omk_drv.h"
 #include "omk_core.h"
 #include "omk_log.h"
+#include "rowsw.h"
 
 #define NATURAL 1                           /* setting 111 value of Natural as the UI object reads and writes it */
 #define NATURAL_RAW 2                       /* the same as the raw settings read (drv_setting_read) returns it, and in S;
@@ -239,6 +240,11 @@ typedef struct {
     s32 g_old_sat[12];
     u32 g_wr, g_hold;                       /* written since the last commit: bits 0..11 the cells 928 + k, bit 12 the
                                                cursor; the view's last step (drv_ticks | 1), 0 - none */
+    /* The optics rows (API 20, after the grain item): the strengths shown - the module's of the entry shown, a step's at
+     * once (the rows' writes, GUI task); the module's replace a step's only on a new entry or when its hold is over */
+    u32 o_val[OMK_OPTICS_ROWS];
+    u32 o_known, o_stale;                   /* the module's values came for the entry shown; a dial chose another entry */
+    u32 o_hold;                             /* the view's last step (drv_ticks | 1), 0 - none */
 } look_ed_t;
 #define ED_ALIGNED(f) typedef char ed_##f##_is_word_aligned[__builtin_offsetof(look_ed_t, f) % 4 ? -1 : 1]
 ED_ALIGNED(curve);
@@ -278,6 +284,14 @@ typedef struct {
     u32 exif_seq, exif_len, exif_put;
     u8 exif[EXIF_TEXT];
     look_ed_t ed;                           /* the look's editors (core task and GUI task, CPU 0, under drv_lock) */
+    u32 row_item;                           /* the cursor's row memory 2148 while it is on an optics row: the row's item
+                                               (the UI reads it back), the strip 111 stored in its place; 0 - none */
+    u32 rows_ok;                            /* the optics rows were installed whole (written by the core task) */
+    /* The optics rows' strengths of every entry as the module gave them last (look_optics, any entry) or a row's step
+     * made them, + 1; 0 - not given (the list is given once, at the module's start). A dial's step onto an entry shows
+     * its strengths at once: the GUI draws the column in that step, and nothing draws it again when the module's values
+     * come (no redraw can be asked from the core task) */
+    u8 o_ent[OMK_LOOK_MAX][OMK_OPTICS_ROWS];
 } shared_t;
 
 #define UNCACHED DRV_UNCACHED
@@ -311,6 +325,8 @@ static int look_installed;
 #define ID_CC_VIVID 616                     /* dial; "sub" in the emulator) and the vividness (the front dial; "main" in
                                                the emulator; a dial test on the camera) */
 static int look_changed_ui(volatile shared_t *sh, u32 on);
+static int rows_service(int first);
+static void sign_list_fix(void);
 static int look_column_put(void);
 static u32 look_icons_put(void);
 static void look_item_picture(u32 on);
@@ -471,6 +487,23 @@ void drv_ui_after_write(void)
 }
 
 static void look_ed_read(volatile shared_t *sh, u32 id, u32 ret, u32 *where);
+static int row_of_id(volatile shared_t *sh, u32 id);
+static int row_shown(volatile shared_t *sh);
+static int row_ready(void);
+#define ID_ITEM_NOW 2148                    /* the picture mode screen's item under the cursor: 111 the strip, 5029 the item */
+#define ITEM_BLOOM 5372                     /* the optics rows' items (the look's column only) */
+#define ITEM_HALATION 5370
+#define ROW_SET 0x7e00                      /* the rows' virtual settings ROW_SET + row (OMK_OPTICS_*): their slider children's
+                                               ids; no setting of the firmware (thunks.s answers count and values for them) */
+
+#ifdef OMK_EMU
+/* Emulator build: every answer of an optics row to the UI, for a trace of its entry (d0 the id, d1 the value) */
+void drv_emu_row_read(u32 id, u32 v);
+void __attribute__((noinline)) drv_emu_row_read(u32 id, u32 v)
+{
+    __asm__ volatile("" : : "r"(id), "r"(v) : "memory");
+}
+#endif
 
 /* After the UI read method: d0 id, d1 where, the caller's return address. While a profile is active and 111 is really
  * Natural, the UI sees the profile */
@@ -478,13 +511,27 @@ void drv_ui_read_fix(u32 id, u32 *where, u32 ret)
 {
     volatile shared_t *sh = shared();
     u32 p, n;
+    int r;
 
     if (!sh)
         return;
+    if ((r = row_of_id(sh, id)) != 0) {     /* an optics row's virtual setting, or its item on the screen (read as 111 by
+                                               drv_ui_read_id): the row's strength */
+        *where = sh->ed.o_val[r - 1];
+#ifdef OMK_EMU
+        drv_emu_row_read(id, *where);
+#endif
+        return;
+    }
     if (drv_cpu())
         sh->other_cpu++;
     if (sh->look) {                         /* the film look: the slot's mode and the virtual dial cells */
-        if (id == ID_COLORTONE) {
+        if (id == ID_ITEM_NOW) {
+            /* the row memory: the strip stored in place of an optics row's item (drv_ui_write_fix), the row given back
+             * while the column has the rows - otherwise the strip, which every column has */
+            if (sh->row_item && *where == ID_COLORTONE && !drv_cpu() && row_shown(sh))
+                *where = sh->row_item;
+        } else if (id == ID_COLORTONE) {
             if (*where != NATURAL) {        /* stored mode changed without us: the look is off */
                 look_changed_ui(sh, 0);
                 return;
@@ -533,7 +580,15 @@ u32 drv_ui_write_fix(u32 id, u32 value)
         return p && (id == ID_COLORTONE || id == ID_RECENT_SCP) ? NATURAL : value;
     if (drv_cpu())
         sh->other_cpu++;
-    if (id == ID_COLORTONE) {
+    if (id == ID_ITEM_NOW) {                /* the row memory: an optics row's item is not a stock one (it must never be
+                                               stored - the camera without OMKit would open the screen on it): the strip
+                                               is stored, the row kept here and given back to the UI's reads */
+        if (sh->look && (value == ITEM_BLOOM || value == ITEM_HALATION)) {
+            sh->row_item = value;
+            return ID_COLORTONE;
+        }
+        sh->row_item = 0;
+    } else if (id == ID_COLORTONE) {
         sh->writes++;
         if (sh->look_slot && value == sh->look_slot - 1) {   /* the slot: the film look, Natural stored */
             if (sh->prof)
@@ -623,12 +678,14 @@ int drv_exif_text(const char *t)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 u32 drv_exif_count(void)
 {
     volatile shared_t *sh = shared();
 
     return sh ? sh->exif_put : 0;
 }
+#endif
 
 /* Shooting parameter reader, before its last two fields (any task, maybe another CPU) */
 void drv_take_filter(u8 *s)
@@ -1147,6 +1204,7 @@ void drv_prof_stats(drv_prof_info *st)
 #define LV_SLOT_LAST 0xa26e5766
 #define LV_SLOT_ACTIVE 0xa26e5768
 #define LV_SLOTS 0xa26e57b4
+#ifdef OMK_DEBUG                            /* the live view context, for the log */
 #define LV_SLOT_SIZE 988
 #define LV_SLOT_COUNT 5
 
@@ -1181,6 +1239,7 @@ int drv_prof_lv_read(drv_lv_view *v)
     v->tone[2] = a[794];
     return 0;
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------------------------------
  * Profile icons. The picture table of the UI: word 1 of record 0 of resource block 0x0101,
@@ -1713,6 +1772,8 @@ static u32 tables_service(void)
         n++;
     if (editor_set && editor_put() > 0)
         n++;
+    if (look_installed && rows_service(0) > 0)
+        n++;
     for (slot = 0; slot < MF_SLOTS; slot++)
         if (mf_code[slot] && *mem_word(mf_entry[slot]) == mf_stock[slot]) {
             put_word(mf_entry[slot], (u32)mf_handler[slot]);
@@ -1843,6 +1904,10 @@ u32 drv_ui_read_id(u32 id, u32 ret)
     volatile shared_t *sh;
     u32 p, k, mono, c;
 
+    sh = shared();
+    if (sh && row_of_id(sh, id & 0xffff))   /* an optics row's virtual setting, or its item on the screen: read as 111
+                                               (a setting the firmware has), answered by drv_ui_read_fix */
+        return (id & 0xffff0000u) | ID_COLORTONE;
     if (ret < EDITOR_CODE_LO || ret >= EDITOR_CODE_HI) {
         sh = shared();
         if (sh && (p = sh->prof) && (c = tone_cell_of(id & 0xffff, p)) && (hs_screen() || scp_screen()))
@@ -1906,8 +1971,9 @@ u32 drv_ui_read_id(u32 id, u32 ret)
 #define IMG_LOOK_GRAIN 4239                 /* stub numbers (free next to the dial labels, 4237..4253): the grain item's */
 #define IMG_LOOK_TYPE 4240                  /* picture (item 5374 takes it through IMG_ED_VIVID) and its dial labels */
 #define IMG_LOOK_STRENGTH 4241
+#define IMG_LOOK_BLOOM 4242                 /* stub numbers (free next to the dial labels): the optics rows' signs */
+#define IMG_LOOK_HALATION 4243
 #define MODE_CC 21                          /* Color Creator, the UI's picture mode */
-#define ID_ITEM_NOW 2148                    /* the picture mode screen's item under the cursor: 111 the strip, 5029 the item */
 #define ITEM_CC_ID 5029
 
 typedef struct {
@@ -1938,8 +2004,10 @@ static const look_slot_t look_slots[] = {
 
 /* Picture sizes (the largest width; the strip, large and item pictures exactly as wide) */
 /* the dial labels (PREV, NEXT, TYPE, STRENGTH) at most 56 wide: the stock widgets, which show every label at one place */
-static const u8 look_w[OMK_LOOK_PICTURES] = {66, 80, LABEL_W, PANEL_W, SHOOT_W, 66, 56, 56, 66, 66, 56, 56};
-static const u8 look_h[OMK_LOOK_PICTURES] = {50, 60, LABEL_H, PANEL_H, SHOOT_H, 50, 24, 24, 50, 50, 24, 24};
+/* the optics rows' signs (BLOOM, HALATION) 46 x 46: the left column's slider signs (S 11424) and their place {4, 67 + 60k,
+ * 46, 46} */
+static const u8 look_w[OMK_LOOK_PICTURES] = {66, 80, LABEL_W, PANEL_W, SHOOT_W, 66, 56, 56, 66, 66, 56, 56, 46, 46};
+static const u8 look_h[OMK_LOOK_PICTURES] = {50, 60, LABEL_H, PANEL_H, SHOOT_H, 50, 24, 24, 50, 50, 24, 24, 46, 46};
 
 static const look_slot_t *look_at;
 static u32 look_obj[OMK_LOOK_PICTURES], look_cap[OMK_LOOK_PICTURES], look_native[OMK_LOOK_PICTURES];
@@ -1996,7 +2064,7 @@ static u32 look_number(u32 k)
     return k == LOOK_PIC_ITEM ? IMG_CC_ITEM : k == OMK_LOOK_PIC_PREV ? IMG_LOOK_PREV : k == OMK_LOOK_PIC_NEXT ? IMG_LOOK_NEXT :
            k == OMK_LOOK_PIC_LEVEL ? IMG_LOOK_LEVEL : k == OMK_LOOK_PIC_GRAIN ? IMG_LOOK_GRAIN :
            k == OMK_LOOK_PIC_TYPE ? IMG_LOOK_TYPE : k == OMK_LOOK_PIC_STRENGTH ? IMG_LOOK_STRENGTH :
-           look_at->pic[k];
+           k == OMK_LOOK_PIC_BLOOM ? IMG_LOOK_BLOOM : k == OMK_LOOK_PIC_HALATION ? IMG_LOOK_HALATION : look_at->pic[k];
 }
 
 /* The column function's entry of key (mode + 1): its index, -1 none */
@@ -2068,6 +2136,7 @@ static u32 look_icons_put(void)
     }
     before = t[IMG_CC_ITEM];
     look_item_picture(sh && sh->look);      /* and item 5374's picture */
+    sign_list_fix();                        /* the optics rows' signs follow their pictures */
     if (look_text_put() > 0)
         n++;
     return n + (t[IMG_CC_ITEM] != before);
@@ -2105,7 +2174,8 @@ int drv_look_picture(u32 pic, u32 w, u32 h, const u8 *pixels)
 {
     volatile u32 *t = (volatile u32 *)IMG_TABLE;
     u32 num, now, exact = pic == OMK_LOOK_PIC_MODE || pic == OMK_LOOK_PIC_LARGE || pic == LOOK_PIC_ITEM ||
-                          pic == OMK_LOOK_PIC_LEVEL || pic == OMK_LOOK_PIC_GRAIN;
+                          pic == OMK_LOOK_PIC_LEVEL || pic == OMK_LOOK_PIC_GRAIN || pic == OMK_LOOK_PIC_BLOOM ||
+                          pic == OMK_LOOK_PIC_HALATION;
     u32 stub = pic == OMK_LOOK_PIC_PREV || pic == OMK_LOOK_PIC_NEXT || pic == OMK_LOOK_PIC_LEVEL || pic >= OMK_LOOK_PIC_GRAIN;
 
     if (!look_at || pic >= OMK_LOOK_PICTURES || !w || w > look_w[pic] || h != look_h[pic] || (exact && w != look_w[pic]))
@@ -2156,6 +2226,20 @@ static int look_changed_ui(volatile shared_t *sh, u32 on)
     return 0;
 }
 
+/* Another entry shown (under drv_lock): the optics rows show its strengths kept from the module (o_ent) at once; they stay
+ * stale - no step taken - until the module gives them for this entry (drv_look_optics), as its events must reach the
+ * entry the module has chosen */
+static void row_entry(volatile shared_t *sh)
+{
+    volatile u8 *c = sh->o_ent[sh->look_index];
+    u32 r;
+
+    sh->ed.o_stale = 1;
+    for (r = 0; r < OMK_OPTICS_ROWS; r++)
+        if (c[r])
+            sh->ed.o_val[r] = c[r] - 1u;
+}
+
 /* A dial step on the look's item: the next or the previous entry, published for the drawing at once */
 static void look_step(volatile shared_t *sh, s32 d)
 {
@@ -2166,6 +2250,7 @@ static void look_step(volatile shared_t *sh, s32 d)
         sh->look_pick++;
         sh->ed.stale = 1;                   /* the editors' values are the entry's before until the module's next */
         sh->ed.g_stale = 1;
+        row_entry(sh);
         drv_edp_look(sh->look_names, sh->look_index, n);
     }
     drv_unlock(st);
@@ -2190,12 +2275,20 @@ static int look_ed_write(volatile shared_t *sh, u32 id, u32 kind, u32 value);
  * 0 -> 29 wrapping); the step kinds 1 and 2 are taken as forward and back (hypothesis: as the SCP's dial on 111).
  * Both dials alike: the value up - the next preset, down - the previous (on the camera: right forward, left back on
  * both; in the emulator sub -1 and main +1 - the next, the way sub -1 moves the strip right) */
+static void row_write(volatile shared_t *sh, u32 r, u32 kind, u32 value);
+
 u32 drv_ui_swallow(u32 id, u32 kind, u32 value)
 {
     volatile shared_t *sh = shared();
     u32 k;
     s32 d;
 
+    if ((id & 0xffff) >= ROW_SET && (id & 0xffff) < ROW_SET + OMK_OPTICS_ROWS) {   /* an optics row's virtual setting:
+                                                                                     never a firmware write */
+        if (sh && !drv_cpu())
+            row_write(sh, (id & 0xffff) - ROW_SET, kind, value);
+        return 1;
+    }
     if (!sh || !sh->look)
         return 0;
     id &= 0xffff;
@@ -2251,13 +2344,16 @@ u32 drv_ui_swallow(u32 id, u32 kind, u32 value)
     }
     if (d)
         look_step(sh, d);
+#ifdef OMK_DEBUG                            /* the dial trace, for the log */
     k = sh->dial_head % DIAL_TRACE;
     sh->dial_t[k] = drv_ticks();
     sh->dial_w[k] = (kind & 15) << 28 | (id == ID_CC_VIVID) << 24 | ((u32)d & 0xff) << 16 | (value & 0xffff);
     sh->dial_head++;
+#endif
     return 1;
 }
 
+#ifdef OMK_DEBUG
 /* The dial trace: up to max entries from *from on into t[], w[] (older than DIAL_TRACE back are lost: *lost); *from moves
  * past them. Returns how many */
 u32 drv_look_trace(u32 *from, u32 *lost, u32 *t, u32 *w, u32 max)
@@ -2280,6 +2376,7 @@ u32 drv_look_trace(u32 *from, u32 *lost, u32 *t, u32 *w, u32 max)
     *from = i;
     return n;
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------------------------------
  * The look's editors (API 16): the tone curve, Color/Vivid of a colour preset, Color/Level of a black-and-white one.
@@ -2342,28 +2439,50 @@ u32 drv_look_trace(u32 *from, u32 *lost, u32 *t, u32 *w, u32 max)
 /* Filter value (Color/Level, 0 none, 1 Ye, 2 Or, 3 R, 4 G, 5 GY, 6 M, 7 B, 8 C) by its place on the ring (editor.c) */
 static const u8 filter_at[FILTERS] = {0, 1, 2, 3, 6, 7, 8, 4, 5};
 
-static const u32 look_col_plain[3] = {2, ID_COLORTONE, ITEM_CC_ID};
-static const u32 look_col_both[5] = {4, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_CURVE, ITEM_ED_VIVID};   /* the curve first */
-static const u32 look_col_tone[4] = {3, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_CURVE};
-static const u32 look_col_colour[4] = {3, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_VIVID};
-/* the grain item is item 5374 itself, last (only while Color/Vivid and Color/Level are not shown) */
+/* The look's columns {count, items}: the look's item, then the curve (bit 0), item 5374 (bit 1: Color/Vivid, Color/Level
+ * or the grain item - only while Color/Vivid and Color/Level are not shown) and the optics rows Bloom, Halation (bit 2;
+ * six items: two pages of the column) */
+static const u32 look_cols[8][7] = {
+    {2, ID_COLORTONE, ITEM_CC_ID},
+    {3, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_CURVE},
+    {3, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_VIVID},
+    {4, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_CURVE, ITEM_ED_VIVID},
+    {4, ID_COLORTONE, ITEM_CC_ID, ITEM_BLOOM, ITEM_HALATION},
+    {5, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_CURVE, ITEM_BLOOM, ITEM_HALATION},
+    {5, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_VIVID, ITEM_BLOOM, ITEM_HALATION},
+    {6, ID_COLORTONE, ITEM_CC_ID, ITEM_ED_CURVE, ITEM_ED_VIVID, ITEM_BLOOM, ITEM_HALATION},
+};
+
+/* The groups the column shows: the module's, or until its first values the curve, the grain item when core has tiles and
+ * the optics rows when the module has given their values (an older module never does) */
+static u32 look_groups(volatile shared_t *sh)
+{
+    return sh->ed.known ? sh->ed.groups : 1u << OMK_EDIT_TONE | (sh->ed.g_count ? 1u << OMK_EDIT_GRAIN : 0) |
+                                              (sh->ed.o_known ? 1u << OMK_EDIT_OPTICS : 0);
+}
+
+/* The optics rows are in the column: the look is active, the module shows them and everything of them is in place (the
+ * firmware may have unpacked its data again since: the core loop puts it back, the column waits for it). GUI task */
+static int row_shown(volatile shared_t *sh)
+{
+    return sh->look && look_groups(sh) >> OMK_EDIT_OPTICS & 1 && row_ready();
+}
 
 /* The column function, GUI task (thunks.s): {count, items} */
 u32 drv_look_column(void)
 {
     volatile shared_t *sh = shared();
-    u32 g, c;
+    u32 g, k;
 
     if (!sh || !sh->look)
-        return (u32)look_col_plain;
-    /* until the module's first values: the curve, and the grain item when core has tiles */
-    g = sh->ed.known ? sh->ed.groups : 1u << OMK_EDIT_TONE | (sh->ed.g_count ? 1u << OMK_EDIT_GRAIN : 0);
-    c = g & (1u << OMK_EDIT_VIVID | 1u << OMK_EDIT_LEVEL | 1u << OMK_EDIT_GRAIN);
-    if (g >> OMK_EDIT_GRAIN & 1 && !sh->ed.g_count)
-        c &= ~(1u << OMK_EDIT_GRAIN);
-    if (g >> OMK_EDIT_TONE & 1)
-        return c ? (u32)look_col_both : (u32)look_col_tone;
-    return c ? (u32)look_col_colour : (u32)look_col_plain;
+        return (u32)look_cols[0];
+    g = look_groups(sh);
+    k = g >> OMK_EDIT_TONE & 1;
+    if (g & (1u << OMK_EDIT_VIVID | 1u << OMK_EDIT_LEVEL) || (g >> OMK_EDIT_GRAIN & 1 && sh->ed.g_count))
+        k |= 2;
+    if (row_shown(sh))
+        k |= 4;
+    return (u32)look_cols[k];
 }
 
 static int ed_screen(void)
@@ -2930,7 +3049,8 @@ int drv_look_edits(const struct omk_look_edits *m)
 
     if (!sh || !look_installed)
         return -2;
-    if (!m || m->groups & ~(((1u << OMK_EDIT_GROUPS) - 1) | 1u << OMK_EDIT_GRAIN) || m->filter > 8 || m->level < 1 || m->level > 3)
+    if (!m || m->groups & ~(((1u << OMK_EDIT_GROUPS) - 1) | 1u << OMK_EDIT_GRAIN | 1u << OMK_EDIT_OPTICS) || m->filter > 8 ||
+        m->level < 1 || m->level > 3)
         return -1;
     for (i = 0; i < 3; i++)
         if (m->tone[i] < -7 || m->tone[i] > 7)
@@ -3127,6 +3247,8 @@ u32 drv_look_edit_take(u32 *ev, u32 max, u32 *lost)
             e->hold_t[id] = 0;
     if (e->g_hold && drv_ticks_since(e->g_hold) >= G_HOLD_US)
         e->g_hold = 0;
+    if (e->o_hold && drv_ticks_since(e->o_hold) >= ED_HOLD_US)
+        e->o_hold = 0;
     if ((e->wr_sat || e->wr_tone) && !e->stale && drv_ticks_since(e->wr_t) >= ED_LATE_US)
         ed_commit(e);                       /* writes no item redraw took (the native code's action ended elsewhere) */
     if (e->g_wr && !e->g_stale && drv_ticks_since(e->wr_t) >= ED_LATE_US)
@@ -3138,6 +3260,385 @@ u32 drv_look_edit_take(u32 *ev, u32 max, u32 *lost)
     drv_unlock(st);
     return n;
 }
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * The look's optics rows (API 20): Bloom (item 5372) and Halation (item 5370) after the grain item, two slider rows of the
+ * strengths 0..OMK_OPTICS_MAX - the second page of the column. They are rows of the firmware's own kind (as sharpness 7):
+ * its title, number, bar, cursor and dials. Items 5370 and 5372 are ids no stock list has, with an empty case in every
+ * switch of the column (only 7..5377 are looked up there). Nothing of a stock list is extended: our descriptors and cases
+ * sit next to the stock ones and are reached by hooks in RAM (E148 1.100, static analysis and the emulator):
+ *  - the item descriptors 0x611b50f8 (17 x 40 B: +0 the id, +16 the title {u16 4, u16 string, u32 0x611b46ac}, +26 the
+ *    left cell's sign) are searched with a count of 17 at 0x60e49d6f (the redraw) and 0x60e4a1a4 (the left column): the
+ *    hooks 0x60e49d6b and 0x60e4a1a2 find ours first (drv_row_find1, drv_row_find2);
+ *  - the column's switches {item - 6, target} (32 or 16 entries, index & (n - 1), linear probing, key 0 empty): our keys
+ *    go into free entries (target first, then the key; one entry always left free) with item 7's targets in the row
+ *    actions 0x611a0618/0718/0818/0918, 0x611b7aa8 and the left cell 0x611b7b28, our child factory cases in 0x611a0a98
+ *    (a kind-0 child on the virtual setting ROW_SET + row) and our redraw case in 0x611b79a8 (drv_row_bar);
+ *  - the settings object's methods +24 count, +28 value by index, +36 selectable answer the virtual settings (method words,
+ *    the protected range: written past the cache); its +8 read of them is sent to 111 and answered by drv_ui_read_fix,
+ *    the +0/+4 writes are swallowed (drv_ui_swallow -> row_write);
+ *  - the slider child's setup: the stop at the ends (0x60e2c46a, as the stock ids of the table 0x611979ac get it), the
+ *    list top-down and +152 = 1 (0x60e2c637, as the ids of 0x61197b8a and 0x60e3159f give the stock sliders) - without
+ *    them 5 -> 0 wraps and the dials step backwards;
+ *  - the left cell's number takes item 5376's -5..+5 tables (0x60e4b043, 0x60e4b0b4: there the beq is said again with
+ *    absolute jumps); its sign is the choice +26 - 1 of the slot's picture list: the five slots' layout records point at
+ *    our list (the stock three, then Bloom's and Halation's sign), five choices - a picture widget takes at most 8;
+ *  - the long OK (0x903e) of the column: hook 0x60e3ca64 resets the row (drv_row_reset) and has its child read its value
+ *    again (0x60e2c539), otherwise its next step starts from the old one;
+ *  - the titles: the string getter 0x60d52ed5 answers ROW_STR + row (hook 0x60d52edb), one string for every language.
+ * The code hooks run in the GUI task, CPU 0 (the string getter: any caller, it only compares). Our tables are constants
+ * of the core image read there; what changes is in the arena (the look's state, the sign list). Installed with the look;
+ * the core loop puts back what the firmware's unpacking of sections 6/7 (sleep, language) took, and the column has the
+ * rows only while everything is in place (row_ready, GUI task) */
+#define ROW_STR 0x7f00                      /* the rows' title strings ROW_STR + row (thunks.s) */
+#define ROW_SIGN 4                          /* descriptor +26 of row 0 (row 1: + 1): the choice +26 - 1 of the sign list */
+#define BAR_W 4248                          /* the bar widget in the panel (0x60e4a995): +6 u16 the dot's x, +16 the "-"
+                                               sign's state, +19 the "+" sign's (4 grey) */
+#define BAR_STEP 100                        /* the dot: centre - 250 + 100 v over the +-2 bar's length (stock: centre + 125 v
+                                               for -2..2) */
+#define PANEL_ITEM 4456                     /* u16: the item under the cursor (0x60e4a972) */
+#define RESET_HINT 4286                     /* "Reset OK Hold" (the panel's 4278 + 8, as the editors' trampolines set it) */
+#define SIGN_LIST 0x610c3b64                /* the left column's 5 slots' sign lists, 56 bytes apart: {0xffff, 7, 7, picture}
+                                               x 3 - S 11424, Contrast 11425, Saturation 11426 */
+#define SIGN_LIST_STEP 56
+#define SIGN_REC 0x610c4ab0                 /* the slots' layout records, 88 bytes apart: +0 the list's start, +4 its end, the
+                                               byte at -3 the count of choices (3) */
+#define SIGN_REC_STEP 88
+#define SIGN_SLOTS 5
+#define SIGN_STOCK 3
+#define SIGN_N (SIGN_STOCK + OMK_OPTICS_ROWS)
+#define IMG_SIGN_S 11424                    /* the stock "S": a row's sign while the module has not given its own */
+#define ROW_HOOKS 8
+#define ROW_TABS 8
+extern void drv_row_find1(void), drv_row_find2(void), drv_row_fac0(void), drv_row_fac1(void), drv_row_bar(void);
+extern void drv_row_hold(void), drv_row_stop(void), drv_row_order(void), drv_row_sign(void), drv_row_digit(void);
+extern void drv_row_str(void), drv_ui_count(void), drv_ui_byidx(void), drv_ui_selectable(void);
+
+static const u16 row_item[OMK_OPTICS_ROWS] = {ITEM_BLOOM, ITEM_HALATION};
+static const u32 row_title[OMK_OPTICS_ROWS][2] = {{4u | (u32)ROW_STR << 16, 0x611b46ac},
+                                                  {4u | (u32)(ROW_STR + 1) << 16, 0x611b46ac}};
+/* As item 5376's descriptor 0x611b5378: the id, the title, the sign; drv_row_find1/2 read them (GUI task) */
+const u32 drv_row_desc[OMK_OPTICS_ROWS][10] = {
+    {ITEM_BLOOM, 0, 0, 0, (u32)row_title[0], 0, (u32)ROW_SIGN << 16, 0, 0, 0},
+    {ITEM_HALATION, 0, 0, 0, (u32)row_title[1], 0, (u32)(ROW_SIGN + 1) << 16, 0, 0, 0}};
+/* The titles, UTF-16LE (drv_row_str: 24 bytes apart), the same in every language */
+const u16 drv_row_text[OMK_OPTICS_ROWS][12] = {{'B', 'l', 'o', 'o', 'm', 0}, {'H', 'a', 'l', 'a', 't', 'i', 'o', 'n', 0}};
+static const u32 row_tabs[ROW_TABS][2] = {{0x611a0618, 32}, {0x611a0718, 32}, {0x611a0818, 32}, {0x611a0918, 32},
+                                          {0x611a0a98, 32}, {0x611b79a8, 32}, {0x611b7aa8, 16}, {0x611b7b28, 32}};
+#define TAB_FACTORY 4                       /* row_tabs: the child factory's switch, the redraw's */
+#define TAB_REDRAW 5
+static const u32 row_vt[3][3] = {{24, 0x608ef279, (u32)drv_ui_count}, {28, 0x608ef4a1, (u32)drv_ui_byidx},
+                                 {36, 0x608eee71, (u32)drv_ui_selectable}};
+static const struct {
+    u32 site;
+    u8 before[5];
+    void (*f)(void);
+} row_hooks[ROW_HOOKS] = {
+    {0x60e49d6b, {0xf1, 0xec, 0xf0, 0x68, 0xfc}, drv_row_find1},     /* mov d3,a0; movhu (a0),d2; mov 0x611b50f8,a0 */
+    {0x60e4a1a2, {0x1f, 0x04, 0xfc, 0xdf, 0xf8}, drv_row_find2},     /* exthu d3; clr d1; mov 0x611b50f8,a3 */
+    {0x60e3ca64, {0x1c, 0xfa, 0xc8, 0xa5, 0x13}, drv_row_hold},      /* exthu d0; cmp 5029,d0 */
+    {0x60e2c46a, {0x00, 0x90, 0x74, 0xf1, 0x7c}, drv_row_stop},      /* clr d0; mov 116,a0; add a3,a0 */
+    {0x60e2c637, {0x5c, 0x10, 0xf0, 0x60, 0xfa}, drv_row_order},     /* mov (16,sp),a0; movhu (a0),d0; cmp 469,d0 */
+    {0x60e4b043, {0xfa, 0xc8, 0x00, 0x15, 0xc8}, drv_row_sign},      /* cmp 5376,d0; beq 0x60e4b07b */
+    {0x60e4b0b4, {0xfa, 0xc8, 0x00, 0x15, 0xc8}, drv_row_digit},     /* cmp 5376,d0; beq 0x60e4b0ec */
+    {0x60d52edb, {0x14, 0x54, 0xfc, 0xdc, 0x30}, drv_row_str}};      /* extbu d0; asl2 d0; mov 0x61e53d30,a0 */
+static u32 *sign_list;                      /* arena: SIGN_N choices of 4 words; 0 - not made */
+
+/* row + 1 for a row's virtual setting, or for its item read on the picture mode screen with the look on; 0 */
+static int row_of_id(volatile shared_t *sh, u32 id)
+{
+    const volatile u8 *g = (const volatile u8 *)GUI_STATE;
+    u32 r;
+
+    if (id >= ROW_SET && id < ROW_SET + OMK_OPTICS_ROWS)
+        return (int)(id - ROW_SET + 1);
+    for (r = 0; r < OMK_OPTICS_ROWS; r++)
+        if (id == row_item[r])
+            return sh->look && g[0] == 0x04 && g[1] == 0x18 ? (int)r + 1 : 0;
+    return 0;
+}
+
+/* The row of an item, -1 none */
+static int row_of_item(u32 item)
+{
+    u32 r;
+
+    for (r = 0; r < OMK_OPTICS_ROWS; r++)
+        if (item == row_item[r])
+            return (int)r;
+    return -1;
+}
+
+/* The target of key in switch i, 0 - absent. The switches are section 7 data (0x611a..., 0x611b...), outside the
+ * protected range: read and written through the cache (rowsw.h), as the GUI on CPU 0 reads them */
+static u32 sw_target(u32 i, u32 key)
+{
+    volatile u32 *tab = (volatile u32 *)row_tabs[i][0];
+    u32 e = sw_find(tab, row_tabs[i][1], key);
+
+    return e ? tab[2 * (e - 1) + 1] : 0;
+}
+
+/* Our jmp at site (as drv_code_jump writes it), read past the cache */
+static int jump_is(u32 site, void (*f)(void))
+{
+    volatile const u8 *p = (volatile const u8 *)(site + UNCACHED);
+    u32 rel = (u32)p[1] | (u32)p[2] << 8 | (u32)p[3] << 16 | (u32)p[4] << 24;
+
+    return p[0] == 0xdc && rel == (u32)f - site;
+}
+
+/* Our target in switch i for row r: our factory and redraw cases; item 7's (a slider row's) elsewhere */
+static u32 row_target(u32 i, u32 r, u32 item7)
+{
+    if (i == TAB_FACTORY)
+        return r ? (u32)drv_row_fac1 : (u32)drv_row_fac0;
+    if (i == TAB_REDRAW)
+        return (u32)drv_row_bar;
+    return item7;
+}
+
+/* Everything the rows need is in place: the method words, the hooks and the switch entries (GUI task: the column has the
+ * rows only then; about 100 reads, at the column's build and at the reads of the row memory) */
+static int row_ready(void)
+{
+    volatile shared_t *sh = shared();
+    u32 i, r, t;
+
+    if (!sh || !sh->rows_ok)
+        return 0;
+    for (i = 0; i < 3; i++)
+        if (*mem_word(UI_VT + row_vt[i][0]) != row_vt[i][2])
+            return 0;
+    for (i = 0; i < ROW_HOOKS; i++)
+        if (!jump_is(row_hooks[i].site, row_hooks[i].f))
+            return 0;
+    for (r = 0; r < OMK_OPTICS_ROWS; r++)
+        for (i = 0; i < ROW_TABS; i++) {
+            t = sw_target(i, row_item[r] - 6u);
+            if (!t || ((i == TAB_FACTORY || i == TAB_REDRAW) && t != row_target(i, r, 0)))
+                return 0;
+        }
+    return 1;
+}
+
+/* The rows' signs in our list: the module's picture where it is in the table, the stock "S" otherwise (core task) */
+static void sign_list_fix(void)
+{
+    static const u16 num[OMK_OPTICS_ROWS] = {IMG_LOOK_BLOOM, IMG_LOOK_HALATION};
+    static const u8 pic[OMK_OPTICS_ROWS] = {OMK_LOOK_PIC_BLOOM, OMK_LOOK_PIC_HALATION};
+    volatile u32 *t = (volatile u32 *)IMG_TABLE, *l = (volatile u32 *)sign_list;
+    u32 r, want;
+
+    if (!l || !table_ok())
+        return;
+    for (r = 0; r < OMK_OPTICS_ROWS; r++) {
+        want = look_obj[pic[r]] && t[num[r]] == look_obj[pic[r]] ? num[r] : IMG_SIGN_S;
+        if (l[4 * (SIGN_STOCK + r) + 3] != want)
+            l[4 * (SIGN_STOCK + r) + 3] = want;
+    }
+}
+
+/* The five slots' layout records at our list of SIGN_N choices (core task): the list made once from the stock one; a
+ * record is changed only from the stock values, its three words at once (under drv_lock: the GUI never sees a mix).
+ * Records put, -1 the stock list or a record is not as known (left alone; the rows show the camera's "S" there) */
+static int sign_list_put(void)
+{
+    volatile u32 *l;
+    u32 k, rec, stock, st, n = 0;
+    int bad = 0;
+
+    if (!sign_list) {
+        for (k = 0; k < 4 * SIGN_STOCK; k++)
+            if (*word(SIGN_LIST + 4 * k) != (k % 4 == 3 ? IMG_SIGN_S + k / 4 : k % 4 ? 7u : 0xffffu))
+                return -1;
+        l = mem_alloc(16 * SIGN_N);
+        if (!l)
+            return -1;
+        for (k = 0; k < 4 * SIGN_N; k++)
+            l[k] = k < 4 * SIGN_STOCK ? *word(SIGN_LIST + 4 * k) : k % 4 == 3 ? IMG_SIGN_S : k % 4 ? 7u : 0xffffu;
+        sign_list = (u32 *)l;
+        sign_list_fix();
+    }
+    for (k = 0; k < SIGN_SLOTS; k++) {
+        rec = SIGN_REC + SIGN_REC_STEP * k;
+        stock = SIGN_LIST + SIGN_LIST_STEP * k;
+        if (*word(rec) == (u32)sign_list && *word(rec + 4) == (u32)sign_list + 16 * SIGN_N &&
+            *(volatile u8 *)(rec - 3) == SIGN_N)
+            continue;
+        if (*word(rec) != stock || *word(rec + 4) != stock + 16 * SIGN_STOCK || *(volatile u8 *)(rec - 3) != SIGN_STOCK) {
+            bad = 1;
+            continue;
+        }
+        st = drv_lock();
+        *word(rec) = (u32)sign_list;        /* section 7 data, outside the protected range: through the cache */
+        *word(rec + 4) = (u32)sign_list + 16 * SIGN_N;
+        *(volatile u8 *)(rec - 3) = SIGN_N;
+        drv_unlock(st);
+        n++;
+    }
+    return bad ? -1 : (int)n;
+}
+
+/* Install, or put back what the firmware took (core task). 0, or bits of what failed: 1 << 0..2 a method word, 8 << k
+ * hook k, 0x10000 << i a switch */
+static u32 row_install(void)
+{
+    u32 i, r, t, e, bad = 0, st;
+
+    for (i = 0; i < ROW_TABS; i++)
+        if (row_tabs[i][0] < GUARD_HI)
+            return 0x10000u << i;           /* never: the switches are written through the cache (rowsw.h) */
+    for (i = 0; i < 3; i++) {
+        e = *mem_word(UI_VT + row_vt[i][0]);
+        if (e == row_vt[i][1])
+            put_word(UI_VT + row_vt[i][0], row_vt[i][2]);
+        else if (e != row_vt[i][2])
+            bad |= 1u << i;                 /* someone else's method: left alone */
+    }
+    for (i = 0; i < ROW_HOOKS; i++)
+        if (!jump_is(row_hooks[i].site, row_hooks[i].f) &&
+            drv_code_jump(row_hooks[i].site, row_hooks[i].before, (void *)row_hooks[i].f))
+            bad |= 8u << i;
+    st = drv_lock();
+    for (r = 0; r < OMK_OPTICS_ROWS; r++)
+        for (i = 0; i < ROW_TABS; i++) {
+            t = row_target(i, r, sw_target(i, 1));      /* item 7's case */
+            if (!t || sw_put((volatile u32 *)row_tabs[i][0], row_tabs[i][1], row_item[r] - 6u, t) < 0)
+                bad |= 0x10000u << i;
+        }
+    drv_unlock(st);
+    evict_cache();                          /* the method words: CPU 0's cached view */
+    return bad;
+}
+
+/* Core task: the rows with the look (first), then at every service whatever the firmware's unpacking took put back.
+ * 1 - something put back */
+static int rows_service(int first)
+{
+    volatile shared_t *sh = shared();
+    u32 bad;
+    int s;
+
+    if (!sh || (!first && !sh->rows_ok))
+        return 0;                           /* never in place: not tried again at every loop */
+    s = sign_list_put();
+    if (first && s < 0)
+        log_printf(OMK_LOG_WARN, "look: the left column's sign lists not as expected, the optics rows show the camera's S");
+    if (!first && row_ready())
+        return s > 0;
+    bad = row_install();
+    if (bad) {
+        sh->rows_ok = 0;
+        log_printf(OMK_LOG_WARN, "look: optics rows not %s (%x): the column has none", first ? "installed" : "put back", bad);
+        return 0;
+    }
+    sh->rows_ok = 1;
+    if (first)
+        log_printf(OMK_LOG_INFO, "look: optics rows in place: Bloom %u, Halation %u", ITEM_BLOOM, ITEM_HALATION);
+    return !first;
+}
+
+/* An optics row's bar, after the stock slider handler drew value 0 of an unknown item (GUI task, drv_row_bar): the +-2
+ * bar this screen shows (panel +134 = 1, +256 = 0), the dot at 0..OMK_OPTICS_MAX over its whole length, "-" grey at 0 and
+ * "+" at the top (the generic path 0x60e4aa91..0x60e4ab1e), the "Reset OK Hold" hint when not 0 */
+void drv_row_draw(u32 panel)
+{
+    volatile shared_t *sh = shared();
+    u8 *p = (u8 *)panel, *w = p + BAR_W;
+    int r = row_of_item(*(u16 *)(p + PANEL_ITEM));
+    u32 v = sh && r >= 0 ? sh->ed.o_val[r] : 0;
+    u16 centre = *(u16 *)(w + 6);           /* 304, or 344 (0x60f15a33() == 1) */
+
+    *(u16 *)(w + 6) = (u16)(centre - 250 + BAR_STEP * v);
+    w[16] = v == 0 ? 4 : 0;
+    w[19] = v == OMK_OPTICS_MAX ? 4 : 0;
+    p[RESET_HINT] = v != 0;
+}
+
+/* A step of row r from its slider child (drv_ui_swallow, GUI task): kind 0 the value (the child's index 0..5), 1 and 2 a
+ * step up and down. The view at once, an event to the module */
+static void row_write(volatile shared_t *sh, u32 r, u32 kind, u32 value)
+{
+    volatile look_ed_t *e = &sh->ed;
+    u32 st = drv_lock(), ev = 0;
+    s32 v = (s32)e->o_val[r];
+
+    if (!e->o_known || e->o_stale) {        /* the values are not the shown entry's yet: nothing to edit */
+        ed_odd(e, ROW_SET + r, kind, value);
+        drv_unlock(st);
+        return;
+    }
+    v = kind == 0 ? (s32)(s16)value : kind == 1 ? v + 1 : kind == 2 ? v - 1 : v;
+    v = clamp_s(v, 0, OMK_OPTICS_MAX);
+    if ((u32)v != e->o_val[r]) {
+        e->o_val[r] = (u32)v;
+        sh->o_ent[sh->look_index][r] = (u8)(v + 1);  /* the entry's, should a dial leave it and come back first */
+        ev = (u32)ed_push(e, OMK_EDIT_EVENT(OMK_EDIT_OPTICS, r, v));
+    }
+    e->o_hold = drv_ticks() | 1;
+    drv_unlock(st);
+    if (ev)
+        drv_wake();
+}
+
+/* The long OK on an optics row (drv_row_hold, GUI task; d0 the item): the row back to 0. 1 - the column's answer */
+u32 drv_row_reset(u32 item)
+{
+    volatile shared_t *sh = shared();
+    int r = row_of_item(item);
+
+    if (sh && r >= 0 && !drv_cpu())
+        row_write(sh, (u32)r, 0, 0);
+    return 1;
+}
+
+static int rows_wanted;                     /* core: the optics layer is on (drv_look_rows), core task only */
+
+void drv_look_rows(int on)
+{
+    rows_wanted = on;
+}
+
+/* The module's strengths of entry (core task): kept for the entry (o_ent), shown unless another entry is shown, or a step
+ * is newer (its hold) */
+int drv_look_optics(u32 entry, const u8 *v)
+{
+    volatile shared_t *sh = shared();
+    volatile look_ed_t *e;
+    u32 st, i, k;
+
+    if (!rows_wanted)
+        return -3;                          /* no optics layer: the rows are not installed */
+    if (!sh || !look_installed || entry >= OMK_LOOK_MAX)
+        return -2;
+    for (i = 0; i < OMK_OPTICS_ROWS; i++)
+        if (v[i] > OMK_OPTICS_MAX)
+            return -1;
+    e = &sh->ed;
+    st = drv_lock();
+    i = sh->look_index;
+#ifdef OMK_EMU                              /* emulator build: the UI entry a test sets (drv_emu_look_ui) */
+    if (((volatile u32 *)((u32)drv_emu_look_ui + UNCACHED))[0])
+        i = ((volatile u32 *)((u32)drv_emu_look_ui + UNCACHED))[0] - 1;
+#endif
+    for (k = 0; k < OMK_OPTICS_ROWS; k++)
+        sh->o_ent[entry][k] = (u8)(v[k] + 1);
+    if (entry != i) {
+        drv_unlock(st);
+        return 0;
+    }
+    if (e->o_stale || !e->o_known || !e->o_hold || drv_ticks_since(e->o_hold) >= ED_HOLD_US) {
+        for (i = 0; i < OMK_OPTICS_ROWS; i++)
+            e->o_val[i] = v[i];
+        e->o_hold = 0;
+    }
+    e->o_known = 1;
+    e->o_stale = 0;
+    drv_unlock(st);
+    return sh->rows_ok ? 0 : -2;
+}
+
 int drv_look_install(int cache_inv, const char *name)
 {
     volatile shared_t *sh;
@@ -3159,6 +3660,9 @@ int drv_look_install(int cache_inv, const char *name)
     if (look_column_put() < 0)              /* checked before anything goes in: the slot's column must be the one we know */
         return 4;
     install_editor();
+    if (rows_wanted)
+        rows_service(1);                    /* the optics rows, with the optics layer only: not needed for the look itself -
+                                               without them the column has none */
     sh = shared();
     sh->cc_last[0] = hue_base();
     sh->cc_last[1] = 0;
@@ -3227,6 +3731,7 @@ int drv_look_list(const char *const *names, u32 count, u32 current)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 /* The test scenario (core/shoot.c), core task: the look's entry chosen as the user chooses it in the picture mode screen.
  * The look on: OMK_LOOK_ON with the entry for the owner at core's next loop (look_changed_ui, as the UI's own choice);
  * already on: the entry as a dial step (look_pick, OMK_LOOK_ENTRY); off: OMK_LOOK_OFF */
@@ -3256,6 +3761,7 @@ int drv_look_choose(int on, u32 index)
             sh->ed.stale = 1;               /* the editors' values are the entry's before until the module's next */
             sh->ed.g_stale = 1;
         }
+        row_entry(sh);
         drv_edp_look(sh->look_names, index, sh->look_count);
     }
     drv_unlock(st);
@@ -3286,6 +3792,7 @@ int drv_look_find(const char *name)
     }
     return -1;
 }
+#endif
 
 /* An entry's cassette drawing (a CANI section core has checked): copied into a new arena block (the renderer may still
  * read the old one: not freed) and published in the table. 0, -1 bad index, -2 no memory */
