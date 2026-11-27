@@ -289,6 +289,7 @@ static void test_proto(void)
         CHECK(!strncmp((char *)host_ptp_out, want, sizeof(want) - 1));
     }
     CHECK(strstr((char *)host_ptp_out, "\nrestart=no\nshoot=idle\n") != 0);
+    CHECK(strstr((char *)host_ptp_out, "\nkind=debug\n") != 0);          /* the build's kind */
 
     /* the log reaches the ring; the snapshots name the watched tasks; the core task's write of the log is marked */
     log_printf(OMK_LOG_INFO, "hello ring");

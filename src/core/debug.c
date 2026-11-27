@@ -891,7 +891,7 @@ static u32 info(void)
     at = info_num(info_str(at, "\nshoot_total="), si.total);
     at = info_num(info_str(at, "\nshoot_step="), si.state == SHOOT_RUNNING ? si.step + 1 : 0);
     at = info_num(info_str(at, "\nshoot_steps="), si.steps);
-    return info_str(at, "\n");
+    return info_str(at, "\nkind=" OMK_BUILD "\n");   /* the build's kind: this service is a debug build's */
 }
 
 static void h_cmd(const drv_ptp_msg *q, drv_ptp_msg *r)
