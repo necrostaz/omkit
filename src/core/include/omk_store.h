@@ -20,6 +20,8 @@ void store_save_all(void);
 void store_retry_now(void);             /* the card may be back: failing saves are tried again without their pause */
 void store_save_now(omk_store *s);      /* service task only: write this store now if it has changes */
 void store_info(omk_store *s, u32 *keys, u32 *used, u32 *seq);
+#ifdef OMK_DEBUG
 void store_card(int on);                /* 0 - nothing is written to the card from now on: changes stay in memory */
+#endif
 
 #endif

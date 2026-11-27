@@ -1,20 +1,40 @@
 # OMKit build (Linux or WSL; docs/build.md):
 #   make -C OMKit          core             -> OMKit/build/CORE.BIN
 #   make -C OMKit card     the card bundle  -> OMKit/build/card/OMKIT/
-#   make -C OMKit test     host tests, data checks, the apps' tests
+#   make -C OMKit test     host tests of both build kinds, the image check, data checks, the apps' tests
 #   make -C OMKit clean    removes OUT
+# BUILD=release (the default) or BUILD=debug picks the build's kind (docs/build.md, "Release and debug builds"):
+#   release - what the user needs and nothing else: what is published and what goes on a card for use;
+#   debug   - also everything for development (the debug service over USB, task dumps, probes of the camera's state,
+#             test scenarios, the log's debug level): compiled with OMK_DEBUG, into OMKit/build/debug.
+# The default is release, so that a build nobody asked a kind for is never the one with the development code.
 # OUT=<dir> builds elsewhere (relative to this folder, or absolute); TC=<prefix>/bin/mn10300-elf- takes a toolchain
 # installed elsewhere than ~/opt/mn10300 (toolchain/build-toolchain.sh).
 PLATFORM := om5m2/fw1100
+BUILD ?= release
+ifeq ($(filter release debug,$(BUILD)),)
+$(error BUILD=$(BUILD): release or debug)
+endif
+ifeq ($(BUILD),debug)
+OUT ?= build/debug
+KIND_CFLAGS := -DOMK_DEBUG
+KIND_ASFLAGS := --defsym OMK_DEBUG=1
+else
 OUT ?= build
+KIND_CFLAGS :=
+KIND_ASFLAGS :=
+endif
 TC := $(HOME)/opt/mn10300/bin/mn10300-elf-
 PYTHON ?= python3
 
 # -fno-strict-aliasing: the code reads records, headers and firmware memory through pointers of other types (u8 buffers
 # as u16/u32 words, structures over arena blocks), as embedded code usually does; the type-based alias rule must not
 # let the optimizer reorder such reads and writes
-CFLAGS := -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-strict-aliasing -nostdlib -Wall -Wextra -Isrc/core/include -Isrc/sdk/include $(EXTRA)
-OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o taskdump.o dring.o debug.o shoot.o handsfree.o drv.o pictprof.o editor.o import.o ptp.o ispdrv.o graindrv.o kernel.o thunks.o)
+CFLAGS := -Os -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-strict-aliasing -nostdlib -Wall -Wextra -Isrc/core/include -Isrc/sdk/include $(KIND_CFLAGS) $(EXTRA)
+# The parts of a debug build alone: the task dump, the debug service with its RAM ring, the test scenario and its run
+# without hands. The other files keep their debug parts under #ifdef OMK_DEBUG
+DEBUG_OBJS := taskdump.o dring.o debug.o shoot.o handsfree.o
+OBJS := $(addprefix $(OUT)/,main.o clock.o mem.o cfg.o log.o store.o util.o module.o event.o api.o power.o prof.o look.o isp.o grain.o $(if $(filter debug,$(BUILD)),$(DEBUG_OBJS)) drv.o pictprof.o editor.o import.o ptp.o ispdrv.o graindrv.o kernel.o thunks.o)
 LD_SCRIPTS := src/core/core.ld src/platform/$(PLATFORM)/fw.ld
 
 all: $(OUT)/CORE.BIN
@@ -36,6 +56,15 @@ $(BUILD_STAMP): FORCE
 
 $(OUT)/main.o $(OUT)/debug.o $(OUT)/handsfree.o: $(BUILD_STAMP)
 $(OUT)/main.o $(OUT)/debug.o $(OUT)/handsfree.o: CFLAGS += -DCORE_BUILD='"$(BUILD_ID)"'
+
+# The kind the objects of OUT were built as: another kind into the same folder compiles everything again
+KIND_STAMP := $(OUT)/build.kind
+
+$(KIND_STAMP): FORCE
+	@mkdir -p $(OUT)
+	@echo '$(BUILD)' | cmp -s - $@ || echo '$(BUILD)' > $@
+
+$(OBJS): $(KIND_STAMP)
 
 # The MN10300 toolchain must be there before anything is compiled for the camera
 toolchain-check:
@@ -82,7 +111,7 @@ $(OUT)/kernel.o: src/platform/$(PLATFORM)/kernel.c src/core/include/*.h src/sdk/
 
 $(OUT)/thunks.o: src/platform/$(PLATFORM)/thunks.s
 	@mkdir -p $(OUT)
-	$(TC)as $< -o $@
+	$(TC)as $(KIND_ASFLAGS) $< -o $@
 
 $(OUT)/core.elf: $(OBJS) $(LD_SCRIPTS)
 	$(TC)ld -T src/platform/$(PLATFORM)/fw.ld -T src/core/core.ld $(OBJS) -o $@ -Map $(OUT)/core.map
@@ -107,8 +136,9 @@ card: $(OUT)/CORE.BIN
 	rm -rf $(CARD)
 	mkdir -p $(CARD)/MODULES
 	cp $(OUT)/CORE.BIN $(CARD)/
-	for mv in $(RELEASE_MODULES); do m=$${mv%%:*}; $(MAKE) -C src/modules MOD=$$m VERSION=$${mv#*:} OUT=$(abspath $(CARD))/../build RES_OVER= && 		cp $(CARD)/../build/$$(echo $$m | tr a-z A-Z).OMM $(CARD)/MODULES/ || exit 1; done
+	for mv in $(RELEASE_MODULES); do m=$${mv%%:*}; $(MAKE) -C src/modules MOD=$$m VERSION=$${mv#*:} BUILD=$(BUILD) OUT=$(abspath $(CARD))/../build RES_OVER= && 		cp $(CARD)/../build/$$(echo $$m | tr a-z A-Z).OMM $(CARD)/MODULES/ || exit 1; done
 	rm -rf $(CARD)/../build
+	$(PYTHON) tools/buildcheck.py --kind $(BUILD) --map $(OUT)/core.map $(CARD)/CORE.BIN $(CARD)/MODULES/*.OMM
 	$(PYTHON) tools/grainset.py copy $(CARD)/GRAIN
 	$(PYTHON) tools/presetset.py copy $(CARD)/FILMLOOK
 	$(PYTHON) tools/cardini.py write $(CARD)/OMKIT.INI $(RELEASE_MODULES)
@@ -117,13 +147,15 @@ card: $(OUT)/CORE.BIN
 # Tests (docs/build.md, "Tests"). Host tests: parts of core and of the modules built with the host compiler against the
 # stub driver tests/host/host_drv.c and run by tests/host/run.sh; the module loader test takes a real HELLO.OMM, built
 # into <OUT>/test/modules with the MN10300 toolchain (skipped without it), as do the tests of tools/mkmod.py
-# (tests/test_mkmod.py). Then the data sets and the committed pictures are checked and the apps' tests run; a check
-# that needs numpy (or numpy and Pillow) is skipped without them, with a message.
+# (tests/test_mkmod.py). `make test` runs the host tests for both build kinds (the debug kind's own - the debug service,
+# the test scenario, the rescue - only there) and checks the camera images of both kinds (tools/buildcheck.py: a release
+# image has no symbol or text of the debug build). Then the data sets and the committed pictures are checked and the
+# apps' tests run; a check that needs numpy (or numpy and Pillow) is skipped without them, with a message.
 HOST_CC ?= gcc
 TEST := $(OUT)/test
-HOST_CFLAGS := -std=gnu99 -Wall -Wextra -Werror
+HOST_CFLAGS := -std=gnu99 -Wall -Wextra -Werror $(KIND_CFLAGS)
 HOST_INC := -Isrc/core/include -Isrc/sdk/include -Itests/host
-HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c dring.c debug.c shoot.c handsfree.c)
+HOST_CORE := $(addprefix src/core/,clock.c mem.c cfg.c log.c store.c util.c power.c prof.c isp.c $(if $(filter debug,$(BUILD)),dring.c debug.c shoot.c handsfree.c))
 HOST_DEPS := src/core/include/*.h src/sdk/include/*.h tests/host/host_drv.h tests/host/host_drv.c
 HAVE_TC = $(shell command -v $(TC)gcc 2>/dev/null)
 HAVE_NUMPY = $(shell $(PYTHON) -c "import numpy" 2>/dev/null && echo yes)
@@ -170,11 +202,30 @@ $(TEST)/test_edtrig: src/platform/$(PLATFORM)/edtrig.h tests/host/test_edtrig.c 
 
 # HELLO.OMM and hello.elf for the loader and mkmod tests, when the MN10300 toolchain is there
 test-hello:
-	$(if $(HAVE_TC),@$(MAKE) -s -C src/modules MOD=hello OUT=$(abspath $(TEST))/modules >/dev/null)
+	$(if $(HAVE_TC),@$(MAKE) -s -C src/modules MOD=hello BUILD=$(BUILD) OUT=$(abspath $(TEST))/modules >/dev/null)
 
-test-host: $(TEST)/test_core $(TEST)/test_shoot $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook            $(TEST)/test_texfill $(TEST)/test_edtrig $(TEST)/test_debug test-hello
-	@echo "host tests:"
-	@sh tests/host/run.sh $(TEST) $(HOST_CC) $(if $(HAVE_TC),$(abspath $(TEST))/modules $(TC) "$(PYTHON)")
+HOST_TESTS := $(TEST)/test_core $(TEST)/test_mod $(TEST)/test_ispb $(TEST)/test_ispfile $(TEST)/test_filmlook \
+              $(TEST)/test_texfill $(TEST)/test_edtrig $(if $(filter debug,$(BUILD)),$(TEST)/test_shoot $(TEST)/test_debug)
+
+# One kind's host tests (BUILD)
+test-host: $(HOST_TESTS) test-hello
+	@echo "host tests ($(BUILD) build):"
+	@sh tests/host/run.sh $(TEST) $(HOST_CC) $(BUILD) $(if $(HAVE_TC),$(abspath $(TEST))/modules $(TC) "$(PYTHON)")
+
+# The camera image and the bundled modules of one kind (BUILD), built with the MN10300 toolchain into <OUT>/test/image and
+# checked by tools/buildcheck.py: the kind named in the image, and in a release image no symbol and no text of the debug
+# build. Skipped without the toolchain
+test-image:
+	$(if $(HAVE_TC),@$(MAKE) -s BUILD=$(BUILD) OUT=$(TEST)/image BUILD_ID=test >/dev/null && \
+		for mv in $(RELEASE_MODULES); do $(MAKE) -s -C src/modules MOD=$${mv%%:*} VERSION=$${mv#*:} BUILD=$(BUILD) OUT=$(abspath $(TEST))/image/modules RES_OVER= >/dev/null || exit 1; done && \
+		echo "camera image ($(BUILD) build):" && \
+		$(PYTHON) tools/buildcheck.py --kind $(BUILD) --map $(TEST)/image/core.map $(TEST)/image/CORE.BIN $(TEST)/image/modules/*.OMM, \
+		@echo "  skip  the camera image check ($(BUILD) build): no MN10300 toolchain")
+
+# Both kinds, each into its own folder
+test-kinds:
+	@$(MAKE) --no-print-directory BUILD=release OUT=$(OUT)/kinds/release test-host test-image
+	@$(MAKE) --no-print-directory BUILD=debug OUT=$(OUT)/kinds/debug test-host test-image
 
 test-tools: test-hello
 	@echo "tools/mkmod.py:"
@@ -191,7 +242,7 @@ test-apps:
 	@echo "apps:"
 	$(if $(HAVE_PIL),$(PYTHON) -m unittest discover -s apps -t apps,@echo "  skip  the apps' tests: numpy and Pillow are not installed for $(PYTHON) (apps/requirements.txt)")
 
-test: test-host test-tools test-data test-apps
+test: test-kinds test-tools test-data test-apps
 	@echo "make test: all passed"
 
 clean:
@@ -199,4 +250,4 @@ clean:
 
 FORCE:
 
-.PHONY: all clean card toolchain-check test test-hello test-host test-tools test-data test-apps FORCE
+.PHONY: all clean card toolchain-check test test-hello test-host test-image test-kinds test-tools test-data test-apps FORCE

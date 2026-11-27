@@ -1,6 +1,6 @@
 /* The test scenario (core/shoot.c): a series of pictures without the user, each step with its preset, from [shoot] in
  * OMKIT.INI or a command (the debug service). The shutter button is pressed by the button's own firmware path; the presets
- * are chosen as the user chooses them in the picture mode screen. Core task only. */
+ * are chosen as the user chooses them in the picture mode screen. Core task only. A debug build only. */
 #ifndef OMK_SHOOT_H
 #define OMK_SHOOT_H
 
@@ -20,6 +20,12 @@ typedef struct {
     const char *why;                        /* ended: how ("done", "stopped", the failure); "" otherwise */
 } shoot_info;
 
+#ifndef OMK_DEBUG
+#define shoot_once() 0
+#define shoot_setup(now) ((void)0)
+#define shoot_service(now, most) (most)
+#define shoot_power_lost() ((void)0)
+#else
 /* core_main early: OMKIT\SHOOT.RUN read (its keys over OMKIT.INI's) and removed; 1 - a scenario from it is due */
 int shoot_once(void);
 /* core_main after the modules: reads [shoot]; starts it if run = boot, or once from OMKIT\SHOOT.RUN (removed first) */
@@ -36,5 +42,6 @@ void shoot_power_lost(void);                /* power-off or sleep began: keys re
 
 /* For the host tests: parse a steps string, 0 or -1 */
 int shoot_parse(const char *steps);
+#endif
 
 #endif

@@ -5,7 +5,10 @@
  * Read only, no locks, nothing is called in the firmware. The words of this CPU's kernel are read through the cache, as the
  * kernel itself writes them; the words of CPUs 1 and 2 through the uncached alias: their write-back data caches are not
  * shared, so a word written there a moment ago may still be old in memory (DRV_TF_UNSTABLE marks a task whose words changed
- * between two reads). Every pointer is range-checked before it is followed: a read outside memory restarts the camera. */
+ * between two reads). Every pointer is range-checked before it is followed: a read outside memory restarts the camera.
+ *
+ * A release build has drv_task_current alone (the event manager names the caller's task with it); the walk of the tasks
+ * and objects is the task dump's, a debug build's. */
 #include "omk_drv.h"
 
 /* Kernel control blocks: (KCB_PTRS)[cpu], set by each CPU at start (get_tid 0x600317b4 reads it). They are static data of the
@@ -106,10 +109,12 @@ static u32 rd16(u32 cpu, u32 a)
     return *(const volatile u16 *)at(cpu, a);
 }
 
+#ifdef OMK_DEBUG
 static u32 rd8(u32 cpu, u32 a)
 {
     return *(const volatile u8 *)at(cpu, a);
 }
+#endif
 
 static u32 kcb_of(u32 cpu)
 {
@@ -121,6 +126,7 @@ static u32 kcb_of(u32 cpu)
     return k == kcb_expected[cpu] ? k : 0;
 }
 
+#ifdef OMK_DEBUG
 /* Max count and the pointer array of one kind of cpu's objects; 0 - none */
 static u32 table(u32 cpu, u32 off, u32 lim, u32 *max)
 {
@@ -290,6 +296,7 @@ int drv_task_read(u32 cpu, u32 slot, drv_task *t)
     stack_scan(cpu, t);
     return 1;
 }
+#endif
 
 int drv_task_current(u32 cpu)
 {
@@ -304,6 +311,7 @@ int drv_task_current(u32 cpu)
     return kptr(p) ? (int)rd16(cpu, p + TCB_ID) : -1;
 }
 
+#ifdef OMK_DEBUG
 int drv_obj_read(u32 kind, u32 id, drv_obj *o)
 {
     u32 cpu, p;
@@ -348,3 +356,4 @@ int drv_mutex_read(u32 cpu, u32 i, drv_obj *o)
         return 0;
     return drv_obj_read(DRV_TW_MTX, id, o) ? 0 : 1;
 }
+#endif

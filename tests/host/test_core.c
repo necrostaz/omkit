@@ -20,6 +20,14 @@ static int failed;
         }                                                                       \
     } while (0)
 
+/* A check of something only a debug build has (a line of the debug level, the rescue, the clock correction): the programs
+ * are built and run for both kinds (OMKit/Makefile, BUILD) */
+#ifdef OMK_DEBUG
+#define CHECK_DEBUG(x) CHECK(x)
+#else
+#define CHECK_DEBUG(x) ((void)0)
+#endif
+
 static long file_size(const char *name)
 {
     char p[512];
@@ -671,7 +679,8 @@ static void test_mem(void)
     CHECK(t && strstr(t, " W memory: PROFILES 4 more failures, last 20000 bytes"));
     CHECK(t && strstr(t, " W memory: arena 100% used, 0 bytes free, largest 0"));
     CHECK(t && strstr(t, " I firmware heap 16384: 1 of 4 blocks free, 0 of them ours in use"));
-    CHECK(t && strstr(t, " D memory: PROFILES used 65504 peak 68576 allocs 5 fails 5 firmware heap 0"));
+    CHECK_DEBUG(t && strstr(t, " D memory: PROFILES used 65504 peak 68576 allocs 5 fails 5 firmware heap 0"));
+    CHECK(t && (LOG_MAX == OMK_LOG_DEBUG || !strstr(t, " D ")));   /* a release build writes no line of the debug level */
     free(t);
     mem_free(big);
     mem_free(filler);
@@ -756,7 +765,11 @@ static void test_power(void)
         CHECK(host_wakes == wakes + 2);
         m0 = omk_ms();
         CHECK(power_service(now = now_after(250)) == 1);
-        CHECK(omk_ms() - m0 >= 3 * 1073742 && omk_ms() - m0 < 3 * 1073742 + 1000);
+        /* the correction by the subprocessor clock is a debug build's; a release build does not read that clock */
+        CHECK_DEBUG(omk_ms() - m0 >= 3 * 1073742 && omk_ms() - m0 < 3 * 1073742 + 1000);
+#ifndef OMK_DEBUG
+        CHECK(omk_ms() - m0 < 1000 && host_rtc_reads == 0);
+#endif
         /* a short sleep with the clock set forward by the user meanwhile: no whole turns, nothing added */
         power_hook(POWER_HOOK_SLEEP, 0);
         CHECK(power_service(now = now_after(250)) == 0);
@@ -797,12 +810,15 @@ static void test_power(void)
 
     log_flush();
     t = read_file("LOG/CORE.LOG", &len);
-    CHECK(t && strstr(t, "power: 1 of 1 hooks installed"));
+    CHECK_DEBUG(t && strstr(t, "power: 1 of 1 hooks installed"));
     CHECK(t && strstr(t, "power: power-off already under way at start, modules wait"));
     CHECK(t && strstr(t, "power-off: power lever before core started, "));
     CHECK(t && strstr(t, "power: lever flag still set, ignored until it clears"));
     CHECK(t && strstr(t, "power-off: power lever flag (polled), "));
-    CHECK(t && strstr(t, "power probe: lever 1, "));
+    CHECK_DEBUG(t && strstr(t, "power probe: lever 1, "));
+#ifndef OMK_DEBUG
+    CHECK(t && !strstr(t, "power probe") && host_probes == 0);   /* a release build never reads the probe words */
+#endif
     CHECK(t && strstr(t, "power-off: power lever, "));
     CHECK(t && strstr(t, "power: card off, core ready, waited 0 ms"));
     CHECK(t && strstr(t, "power-off did not happen, running again"));
@@ -818,7 +834,8 @@ static void test_power(void)
 /* The lever off without a power-off (the camera stuck, the firmware never powers off): no card writes while it stays off,
  * whatever the log and store services are asked; writes again when it is on. A stuck application (a half-press state,
  * the shutter released): after 8 s the last save, the power-off job twice, then the watchdog; a held half-press is no
- * hang and gets no rescue */
+ * hang and gets no rescue. The rescue is a debug build's: a release build holds the writes and reads nothing but the
+ * lever's flag - no probe of the application's state, no job, no reset */
 static void test_lever(void)
 {
     omk_store *s;
@@ -885,6 +902,7 @@ static void test_lever(void)
     CHECK(host_hfw_posts == 0);
     for (i = 0; i < 8 && !host_hfw_posts; i++)
         power_service(now = now_after(250));
+#ifdef OMK_DEBUG
     CHECK(host_hfw_posts == 1 && host_resets == 0 && !power_card_ok());
     posts = host_hfw_posts;
     for (i = 0; i < 12; i++)                                /* no power-off hook: posted again after 1 s, then the reset */
@@ -897,14 +915,66 @@ static void test_lever(void)
     CHECK(t && strstr(t, "power: rescue: the power-off job posted (0), try 2 of 2"));
     CHECK(t && strstr(t, "power: rescue: the power-off job did not run: reset by the watchdog (cause 4f4d4b50)"));
     free(t);
+#else
+    (void)posts;
+    for (i = 0; i < 80; i++)                                /* 20 s more: the hold stays, nothing else happens */
+        power_service(now = now_after(250));
+    CHECK(host_hfw_posts == 0 && host_resets == 0 && host_probes == 0);
+    CHECK(power_running() && !power_card_ok());
+    host_power_pending = 0;
+    CHECK(power_service(now = now_after(250)) == 1 && power_card_ok());
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &len1);
+    CHECK(t && !strstr(t, "rescue") && !strstr(t, "stuck"));
+    free(t);
+#endif
     CHECK(file_size("STORE/TEST.STA") == 512);
+}
+
+/* The build's kind: the log's highest level, the lines of the debug level, the sample OMKIT.INI and the sections of the
+ * debug build */
+static void test_kind(void)
+{
+    long n;
+    char *t;
+
+    CHECK(cfg_load() == 0);                                 /* no file: the sample is written */
+    t = read_file("OMKIT.INI", &n);
+    CHECK(t && !strstr(t, "[debug]") && !strstr(t, "[shoot]") && !strstr(t, "taskdump") && !strstr(t, "power_rescue"));
+    CHECK(t && !strstr(t, "mask_test") && !strstr(t, "core_events") && !strstr(t, "fw_cache_inv"));
+#ifdef OMK_DEBUG
+    CHECK(!strcmp(OMK_BUILD, "debug") && LOG_MAX == OMK_LOG_DEBUG);
+    CHECK(t && strstr(t, "; error | warn | info | debug - how much detail"));
+    CHECK(!cfg_debug_section("debug") && !cfg_debug_section("shoot") && !cfg_debug_section("core"));
+#else
+    CHECK(!strcmp(OMK_BUILD, "release") && LOG_MAX == OMK_LOG_INFO);
+    CHECK(t && strstr(t, "; error | warn | info - how much detail") && !strstr(t, "debug"));
+    CHECK(cfg_debug_section("debug") && cfg_debug_section("SHOOT") && !cfg_debug_section("core") &&
+          !cfg_debug_section("modules") && !cfg_debug_section("grain"));
+#endif
+    free(t);
+    log_setup(1, OMK_LOG_DEBUG);                            /* log_level = debug asked for */
+    CHECK(log_level() == LOG_MAX);
+    log_printf(OMK_LOG_DEBUG, "a line of the debug level %u", 1u);
+    log_printf(OMK_LOG_INFO, "a line of the info level");
+    log_printf(n ? OMK_LOG_DEBUG : OMK_LOG_INFO, "a level known at run time");
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &n);
+    CHECK(t && strstr(t, " I a line of the info level"));
+    CHECK_DEBUG(t && strstr(t, " D a line of the debug level 1") && strstr(t, " D a level known at run time"));
+#ifndef OMK_DEBUG
+    CHECK(t && !strstr(t, "a line of the debug level") && !strstr(t, "a level known at run time"));
+#endif
+    free(t);
 }
 
 int main(int argc, char **argv)
 {
     host_dir = argc > 1 ? argv[1] : ".";
     mem_init();
-    if (argc > 2 && !strcmp(argv[2], "cfg"))
+    if (argc > 2 && !strcmp(argv[2], "kind"))
+        test_kind();
+    else if (argc > 2 && !strcmp(argv[2], "cfg"))
         test_cfg_parse();
     else if (argc > 2 && !strcmp(argv[2], "mem"))
         test_mem();

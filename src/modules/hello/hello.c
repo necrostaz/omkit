@@ -160,6 +160,7 @@ int module_init(const omk_api *a, omk_mod *m)
         return 1;
     api = a;
     self = m;
+    OMK_MODULE_KIND(api, self);
     st = store = api->store_open(self, 64);
     if (st) {
         api->store_get(st, KEY_OFFS, &offs, sizeof(offs));

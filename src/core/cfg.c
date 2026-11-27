@@ -14,7 +14,11 @@ static const char cfg_template[] =
     "[core]\r\n"
     "; on | off - whether to write the log OMKIT\\LOG\\CORE.LOG on the card\r\n"
     "log = on\r\n"
+#ifdef OMK_DEBUG
     "; error | warn | info | debug - how much detail\r\n"
+#else
+    "; error | warn | info - how much detail\r\n"
+#endif
     "log_level = info\r\n"
     "; on - if the arena runs out of space, take small module buffers (up to 16K) from the firmware heap.\r\n"
     "; Requires fw_heap_limit. The heap is shared with shooting: enable only if the arena is too small for modules\r\n"
@@ -36,12 +40,16 @@ static const char cfg_template[] =
     "; Line order is load order. Module settings are in its own section [NAME]\r\n"
     "; for example: CREATPRF = on\r\n";
 
-static char text[CFG_MAX + 1], once_text[CFG_ONCE_MAX + 1];
+static char text[CFG_MAX + 1];
 static struct {
     const char *section, *key, *value;
 } entries[CFG_ENTRIES];
-static u32 count, bad, first_bad, once_from;
+static u32 count, bad, first_bad;
+#ifdef OMK_DEBUG                            /* the one-shot file (the test scenario's SHOOT.RUN) */
+static char once_text[CFG_ONCE_MAX + 1];
+static u32 once_from;
 static int once_on;
+#endif
 
 static int is_space(char c)
 {
@@ -153,6 +161,7 @@ int cfg_load(void)
     return 1;
 }
 
+#ifdef OMK_DEBUG
 /* The one-shot file: read once after OMKIT.INI, its keys are added after the others - the last value wins */
 int cfg_once(const char *name, const char *section, u32 *wrong)
 {
@@ -189,6 +198,7 @@ const char *cfg_once_str(const char *section, const char *key)
             return entries[i].value;
     return 0;
 }
+#endif
 
 const char *cfg_str(const char *section, const char *key, const char *def)
 {
@@ -270,6 +280,25 @@ int cfg_bool(const char *section, const char *key, int def)
     if (str_ieq(s, "off") || str_ieq(s, "no") || str_ieq(s, "false") || str_ieq(s, "0"))
         return 0;
     return def;
+}
+
+/* The sections only a debug build reads. A release build names their keys in one warning and reads none of them (the
+ * debug build's keys of the other sections are simply not known to it: "[core] KEY unknown"); a debug build reads them,
+ * so the answer there is 0 */
+int cfg_debug_section(const char *section)
+{
+#ifdef OMK_DEBUG
+    (void)section;
+    return 0;
+#else
+    static const char *const sections[] = {"debug", "shoot"};
+    u32 i;
+
+    for (i = 0; i < sizeof(sections) / sizeof(sections[0]); i++)
+        if (str_ieq(section, sections[i]))
+            return 1;
+    return 0;
+#endif
 }
 
 u32 cfg_count(void)

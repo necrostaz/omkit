@@ -263,6 +263,7 @@ static void load_one(const char *key)
     mem_free(m->disk);                      /* from now on res_read reads the module file */
     m->disk = 0;
     log_checkpoint("module %s: module_init returned %d in %u ms", name, rc, omk_ms() - t0);
+    (void)t0;                               /* a release build has no checkpoints */
     if (rc) {
         m->state = MOD_FAILED;
         log_printf(OMK_LOG_ERROR, "module %s: module_init returned %d, unloaded", name, rc);

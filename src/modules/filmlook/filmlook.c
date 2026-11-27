@@ -223,7 +223,7 @@ static int add(const char *file)
     if (arts_on && cani && !api->look_art(self, count, cani, cani_n))   /* the entry's number is its place in the list */
         arts++;
     count++;
-    api->log(self, OMK_LOG_DEBUG, "preset %u: %s '%s', %u bytes, CRC %08x", count, p->file, p->title, n, p->crc);
+    OMK_LOG_D(api, self, "preset %u: %s '%s', %u bytes, CRC %08x", count, p->file, p->title, n, p->crc);
     return 1;
 }
 
@@ -807,8 +807,10 @@ static void load_pictures(void)
         failed += r < 0;
     }
     api->free(self, px);
-    api->log(self, failed ? OMK_LOG_WARN : OMK_LOG_DEBUG, "%u pictures set, %u not in the module file, %u failed", set, missing,
-             failed);
+    if (failed)
+        api->log(self, OMK_LOG_WARN, "%u pictures set, %u not in the module file, %u failed", set, missing, failed);
+    else
+        OMK_LOG_D(api, self, "%u pictures set, %u not in the module file, %u failed", set, missing, failed);
 }
 
 /* The order: the store and the two services first (their hooks go in at isp_scope and look_enable), so that a look that
@@ -825,6 +827,7 @@ int module_init(const omk_api *a, omk_mod *m)
         return 1;
     api = a;
     self = m;
+    OMK_MODULE_KIND(api, self);
     presets = api->alloc(self, OMK_LOOK_MAX * sizeof(preset));
     if (!presets)
         return 2;

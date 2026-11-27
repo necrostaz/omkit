@@ -1,6 +1,7 @@
 /* The debug service (core/debug.c, core 1.40): a log and state snapshots in RAM that outlives a reset, read over USB
  * with vendor operations of PTP; optionally no card writes by core, and files of the OMKit folder written over USB.
- * Off unless [debug] enabled = on. */
+ * Off unless [debug] enabled = on. A debug build only: a release build has no debug service at all, and core_card_ok
+ * is always 1 there. */
 #ifndef OMK_DEBUG_H
 #define OMK_DEBUG_H
 
@@ -46,11 +47,20 @@ enum {                                      /* HELLO's p4 */
 #define DBG_SNAP_HEAD 36
 
 /* core */
+#ifndef OMK_DEBUG
+#define dbg_setup(run) ((void)0)
+#define dbg_start() ((void)0)
+#define dbg_service(now) ((void)0)
+#define dbg_tick(tick) (tick)
+#define dbg_ended() ((void)0)
+#define core_card_ok() 1
+#else
 void dbg_setup(const char *run);            /* after the config, before the log's first line */
 void dbg_start(void);                       /* after the log and the store: buffers, the run before, PTP */
 void dbg_service(u32 now);                  /* core loop, every pass while the camera runs */
 u32 dbg_tick(u32 tick);                     /* the core loop's next wait: shorter while a window or a job is on */
 void dbg_ended(void);                       /* the run reached the end of a power-off */
 int core_card_ok(void);                     /* 0 - core writes nothing to the card ([debug] card_writes = off) */
+#endif
 
 #endif

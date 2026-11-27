@@ -7,12 +7,23 @@
 #include "omk_look.h"
 #include "omk_prof.h"
 
+/* [core] fw_cache_inv: the firmware's own cache invalidation in the hooks of the picture mode screen instead of the read
+ * eviction - not tried on the camera, a debug build's key; a release build always evicts by reading */
+#ifdef OMK_DEBUG
+#define FW_CACHE_INV cfg_bool("core", "fw_cache_inv", 0)
+#else
+#define FW_CACHE_INV 0
+#endif
+
 static omk_mod *owner;
 static omk_look_fn owner_fn;
 static void *owner_ctx;
 static drv_look_info seen;
+#ifdef OMK_DEBUG
 static u32 trace_at;                        /* the dial trace: the next entry to log */
-static u32 upkeep_ms, warned, seen_takes;
+static u32 seen_takes;
+#endif
+static u32 upkeep_ms, warned;
 static int edits_rc, grain_rc;
 
 int look_enable(omk_mod *m, const char *slot, omk_look_fn fn, void *ctx)
@@ -27,7 +38,7 @@ int look_enable(omk_mod *m, const char *slot, omk_look_fn fn, void *ctx)
         slot = "";
     log_printf(OMK_LOG_INFO, "look: installing hooks, slot %s", slot);
     log_flush();
-    rc = drv_look_install(cfg_bool("core", "fw_cache_inv", 0), slot);
+    rc = drv_look_install(FW_CACHE_INV, slot);
     if (rc == -1) {
         log_printf(OMK_LOG_ERROR, "look: no slot '%s' here; slots: %s", slot, drv_look_slots());
         return -1;
@@ -281,6 +292,7 @@ void look_service(u32 now)
         }
     }
     drv_look_stats(&s);
+#ifdef OMK_DEBUG
     {
         drv_prof_info p;
 
@@ -291,6 +303,7 @@ void look_service(u32 now)
                        s.index + 1, s.count, drv_exif_count());
         }
     }
+#endif
     run = owner_fn && owner->state == MOD_RUNNING;
     if (s.seq != seen.seq) {                /* the user chose the look or left it */
         log_printf(OMK_LOG_INFO, "look: the user turned it %s (entry %u of %u)", s.ui_on ? "on" : "off", s.index, s.count);
@@ -299,6 +312,7 @@ void look_service(u32 now)
         if (run)
             owner_fn(s.ui_on ? OMK_LOOK_ON : OMK_LOOK_OFF, s.ui_on ? s.index : 0, owner_ctx);
     }
+#ifdef OMK_DEBUG
     for (;;) {                              /* every dial write since the last loop, with its time */
         u32 t[8], w[8], n, i, lost;
 
@@ -314,6 +328,7 @@ void look_service(u32 now)
     }
     if (s.swallowed != seen.swallowed && s.pick == seen.pick && s.dial_last >> 21 & 1)
         log_printf(OMK_LOG_DEBUG, "look: dial 615 hue wrote %u, not a step (%u dial writes)", s.dial_last & 0xffff, s.swallowed);
+#endif
     seen.swallowed = s.swallowed;
     for (;;) {                              /* the editors' changes, oldest first */
         u32 ev[8], n, i, lost;

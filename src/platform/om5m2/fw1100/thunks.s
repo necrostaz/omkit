@@ -1,6 +1,7 @@
 # Thunks to OM-5 Mark II 1.1 firmware functions. GCC: the first two words in d0, d1, the rest at (12,sp), (16,sp).
 # Firmware: pointers in a0, a1, integers in d0, d1; registers and frame are encoded in the call instruction and must match the function's ret.
 # call writes the return address to (sp), so the thunk reserves its own slot. The addresses are in fw.ld.
+# OMK_DEBUG (--defsym, a debug build): the thunks of the debug build alone are under .ifdef OMK_DEBUG.
 	.text
 	.global	_drv_findfirst, _drv_findnext, _drv_findclose
 	.global	_drv_fopen_long
@@ -246,6 +247,7 @@ _drv_setting_read:
 	add	4,sp
 	rets
 
+	.ifdef	OMK_DEBUG				# the test scenario's keys and events, the restart job, the reset, the USB hold
 # API 0xD0002 (0x6032b57f): d0 the key's application event, d1 state (0 pressed, 1 released) -> d0 the API's answer (u16).
 # Its callers use call ...,[d2,d3],16 (0x602f4b4a, 0x6085b565); it ends with ret [d2,d3],16
 _drv_key_api:
@@ -349,6 +351,7 @@ _drv_tramp_usb:
 	add	8,sp
 	.byte	0x82,0x3c,0x20,0x08,0x6c	# displaced: mov d0,d2; mov sp,a0; add 8,a0; mov d3,(a0)
 	jmp	usb_back
+	.endif
 
 _drv_lock:
 	clr	d0
@@ -1358,6 +1361,7 @@ _drv_tramp_ptp_reg:
 	mov	0x970c,d0
 	jmp	imp_reg_back
 
+	.ifdef	OMK_DEBUG				# the C operations of the debug service
 # A C operation, called by the dispatcher 0x614c050f with calls (a2): a0 the request, a1 the response, the return
 # address at (sp) and in mdr. drv_ptp_call(request, response) with every register kept (the dispatcher reads d2, d3
 # after the call), then rets - as the optics step's entry, which the camera runs
@@ -1370,6 +1374,7 @@ _drv_ptp_entry:
 	add	12,sp
 	movm	(sp),[d2,d3,a2,a3,other]
 	rets
+	.endif
 
 # 0x614c0156(d0 code, d1 phase, a0 handler, a1 flag) -> d0 (u16). C: code, phase, handler, flag
 _drv_ptp_reg_fw:
@@ -1380,6 +1385,7 @@ _drv_ptp_reg_fw:
 	add	4,sp
 	rets
 
+	.ifdef	OMK_DEBUG				# the data phases and the rename of the debug service
 # Data to the computer 0x614c02d6(d0 piece, d1 total, a0 buffer) -> d0 (u16) 1 sent, as 0x614b9c84 calls it
 _drv_ptp_send_fw:
 	mov	(12,sp),a0
@@ -1412,3 +1418,4 @@ _drv_rename:
 	call	f_rename,[d2,d3,a2,a3],36
 	add	4,sp
 	rets
+	.endif

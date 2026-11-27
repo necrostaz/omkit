@@ -47,7 +47,10 @@ static volatile u32 busy[OMK_EV_COUNT], fires[OMK_EV_COUNT], nested[OMK_EV_COUNT
  * handlers run (-1 - the driver could not tell). contended[e]: calls from another task meanwhile (see ev_dispatch) */
 static volatile int owner[OMK_EV_COUNT];
 static volatile u32 contended[OMK_EV_COUNT];
-static u32 logged_fires[OMK_EV_COUNT], logged_skips[OMK_EV_COUNT], logged_contended[OMK_EV_COUNT], next_stats;
+static u32 logged_contended[OMK_EV_COUNT], next_stats;
+#ifdef OMK_DEBUG
+static u32 logged_fires[OMK_EV_COUNT], logged_skips[OMK_EV_COUNT];
+#endif
 
 static struct {
     omk_mod *mod;
@@ -332,6 +335,7 @@ void ev_service(u32 now)
         return;
     next_stats = now + STATS_MS;
     for (e = 1; e < OMK_EV_COUNT; e++) {
+#ifdef OMK_DEBUG
         u32 other = drv_ev_other_cpu(e);
 
         if (installed[e] && (fires[e] != logged_fires[e] || other + nested[e] != logged_skips[e])) {
@@ -340,6 +344,7 @@ void ev_service(u32 now)
             log_printf(OMK_LOG_DEBUG, "event %s: %u calls, %u without handlers on another cpu, %u nested", defs[e].name, fires[e],
                        other, nested[e]);
         }
+#endif
         if (contended[e] != logged_contended[e]) {
             logged_contended[e] = contended[e];
             log_printf(OMK_LOG_WARN, "event %s: %u calls came from another task while the handlers were running, "

@@ -110,10 +110,12 @@ static omk_file *api_file_open(omk_mod *m, const char *name, const char *mode)
         log_printf(OMK_LOG_INFO, "%s: file_open(%s, w): no card writes now (the power lever is off)", m->name, n);
         return 0;
     }
+#ifdef OMK_DEBUG
     if (mode[0] == 'w' && !core_card_ok()) {
         log_printf(OMK_LOG_INFO, "%s: file_open(%s, w): no card writes ([debug] card_writes = off)", m->name, n);
         return 0;
     }
+#endif
     mod_dir(m);
     if (omk_path(path, m->name, n)) {
         log_printf(OMK_LOG_WARN, "%s: file_open(%s): the path is longer than %u", m->name, n, OMK_PATH_MAX - 1);
