@@ -21,6 +21,7 @@
  * of another size, files of an older core): once per card and slot file. */
 #include "omk_core.h"
 #include "omk_log.h"
+#include "omk_power.h"
 #include "omk_store.h"
 
 #define STORE_MAX 8
@@ -434,7 +435,7 @@ void store_service(u32 now)
 {
     u32 i;
 
-    if (!card)
+    if (!card || !power_card_ok())          /* the lever off without a power-off: the battery may go at any moment */
         return;
     for (i = 0; i < nstores; i++)
         if (stores[i].mem && stores[i].dirty &&

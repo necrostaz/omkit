@@ -22,6 +22,7 @@
  * the running state (sleep, power-off: log_close from power.c), before the debug service's file jobs, and on an error. */
 #include "omk_core.h"
 #include "omk_log.h"
+#include "omk_power.h"
 
 #define LOG_NAME "CORE.LOG"
 #define RING_SIZE 32768                     /* a power of two */
@@ -221,7 +222,7 @@ void log_checkpoint(const char *fmt, ...)
     va_start(ap, fmt);
     log_vprintf(OMK_LOG_DEBUG, fmt, ap);
     va_end(ap);
-    if (level >= OMK_LOG_DEBUG)
+    if (level >= OMK_LOG_DEBUG && power_card_ok())   /* not with the lever off: the battery may go */
         log_flush();
 }
 
@@ -404,6 +405,8 @@ u32 log_room(void)
 
 void log_service(u32 now)
 {
+    if (!power_card_ok())                   /* the lever off without a power-off: the lines wait in the ring */
+        return;
     if (log_fp && !dirty && now - last_write >= LOG_HOLD_MS)
         log_close();
     if (!dirty || (retry_ms && now - last_flush < retry_ms))   /* nothing new, or the card did not take the last try */

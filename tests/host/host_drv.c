@@ -896,10 +896,12 @@ int drv_obj_read(u32 kind, u32 id, drv_obj *o)
 }
 
 /* Weak: the scenario's test (test_shoot.c) has its own model of the camera's half-press state */
+u32 host_keys;                              /* the raw input byte of drv_ui_probe */
+
 __attribute__((weak)) int drv_ui_probe(u32 *app, u32 *keys)
 {
     *app = host_app;
-    *keys = 0;
+    *keys = host_keys;
     return host_ui;
 }
 
