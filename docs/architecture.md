@@ -346,6 +346,10 @@ The freezing of all tasks in a light sleep is also **from the firmware code**, o
 
 ### 7.7. Diagnostics
 
+`core` is built in two kinds ([build.md](build.md#35-release-and-debug-builds)). A release build keeps the first item
+below and the stack warning; the crash records, the used stack depth, the task dump and the debug service are compiled
+into a **debug build only**, like every probe of the camera's state that the user's functions do not need.
+
 - **Boot count and unclean end.** The `CORE` store tells whether the last run ended with a power-off; if not, the log
   says so; the lines of the run that went down are just before, in the same `CORE.LOG`.
 - **Crash records.** At start, `core` logs the reset records the firmware's NMI handler left (task, cause, registers),

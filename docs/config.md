@@ -4,6 +4,13 @@
 reads (core 1.27), what it does, its default and its range, and the rules of the file itself. The settings of a module
 are on that module's page (section 7).
 
+**Build kinds.** `core` is built as a release or as a debug build ([build.md](build.md#35-release-and-debug-builds));
+releases and their cards are release builds. The keys, values and sections marked **debug build only** below exist only
+in a debug build. A release build does not read them: a key of `[core]` gets the usual warning `config: [core] KEY
+unknown`, `log_level = debug` gets `config: log_level = debug is only in a debug build, using info`, and the sections
+`[debug]` and `[shoot]` get one line for all their keys - `config: N keys are only in a debug build and are not read (the
+first: [debug] enabled)`. Nothing else happens.
+
 ## 1. Where the file comes from
 
 - `core` reads `OMKIT\OMKIT.INI` once, at power-on. A change takes effect at the next power-on.
@@ -56,13 +63,13 @@ was:
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
 | `log` | switch | `on` | | `off` - nothing is logged and no log file is written. The log `OMKIT\LOG\CORE.LOG` holds the power-ons one after another, each from a header line; `core` never removes it - delete it on a computer when it gets too long. (`run_logs`, a file per power-on, is gone; the key is ignored) |
-| `log_level` | text | `info` | `error`, `warn`, `info`, `debug`, `off` | how much detail goes to the log. `info`: start, modules, what the user chose, power states, warnings and errors - a few lines a session; `debug` adds the lines that repeat with use (one per picture, per dial step, per second in an editor; counters) and also writes a few boot lines to the card at once, so a crash during start leaves a trace. An unknown value: `info`, with the warning `config: log_level '...' unknown, using info` |
+| `log_level` | text | `info` | `error`, `warn`, `info`, `off`; `debug` - debug build only | how much detail goes to the log. `info`: start, modules, what the user chose, power states, warnings and errors - a few lines a session; `debug` adds the lines that repeat with use (one per picture, per dial step, per second in an editor; counters) and also writes a few boot lines to the card at once, so a crash during start leaves a trace. An unknown value: `info`, with the warning `config: log_level '...' unknown, using info` |
 | `fw_heap` | switch | `off` | | `on` - when the module memory (the arena) is full, small module buffers may come from the camera's firmware heap, up to `fw_heap_limit` in total. The heap is shared with shooting and the menus: turn it on only if a module reports that it is out of memory. Needs `fw_heap_limit`, otherwise it stays off with a warning. Code and resources never go there, and `core` always leaves at least a quarter of each heap class to the camera |
 | `fw_heap_limit` | size | `256K` in the sample, none without it | | the most the modules may take from the firmware heap. Not a size: a warning, and `fw_heap` stays off |
-| `core_events` | switch | `on` | | how the `core` task waits between its passes: `on` - on an event flag that the power-off and sleep hooks set, so it reacts at once; `off` - a plain 250 ms sleep. A diagnostic switch |
-| `power_rescue` | switch | `on` | | not in the sample. When the power lever is off but the camera does not switch off because it is stuck in a half-press or a transition (the shutter released, nothing being written, 8 s), `core` saves the log and the stores once and asks the firmware for its own power-off with a restart; the camera then starts with the lever off and switches off. If that power-off does not begin, the watchdog resets the camera. `off` - the camera stays on until the battery is taken out. Whatever this key, `core` writes nothing to the card while the lever is off and the camera still runs |
+| `core_events` | switch | `on` | | **debug build only** (a release build always waits on the event flag). How the `core` task waits between its passes: `on` - on an event flag that the power-off and sleep hooks set, so it reacts at once; `off` - a plain 250 ms sleep. A diagnostic switch |
+| `power_rescue` | switch | `on` | | **debug build only** (a release build keeps card writes off while the lever is off and does nothing else). Not in the sample. When the power lever is off but the camera does not switch off because it is stuck in a half-press or a transition (the shutter released, nothing being written, 8 s), `core` saves the log and the stores once and asks the firmware for its own power-off with a restart; the camera then starts with the lever off and switches off. If that power-off does not begin, the watchdog resets the camera. `off` - the camera stays on until the battery is taken out. Whatever this key, `core` writes nothing to the card while the lever is off and the camera still runs |
 
-The `[core]` keys below are **diagnostics**, not in the sample:
+The `[core]` keys below are **diagnostics, debug build only**, not in the sample:
 
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
@@ -108,7 +115,8 @@ takes the grain service at power-on - for FILMLOOK, when its grain is on and `OM
 | `mask` | text | `film` | `film`, `flat`, `off` | how the grain's strength follows the tone of the picture: `film` - weaker in the shadows and highlights, as on film (about half of the mid-tone grain in the deep shadows, a little more in the highlights); `flat` - the same in every tone; `off` - the same in every tone by an older route of the camera, the fallback if `film` or `flat` give trouble. An unknown value: `film`, with a warning |
 | `chroma` | number | `0` | 0..1024 | colour grain: noise in the colour of colour presets, weighted like the grain. 0 - none. Never on a black-and-white preset (the rule: [formats/isp.md](formats/isp.md#51-black-and-white-blocks)). At 100 the colour deviation is about 4 levels. There is no menu item for it |
 
-The keys below are **diagnostics**, not in the sample:
+The keys below are **diagnostics, debug build only**, not in the sample (a release build takes `film` for `mask =
+step` or `list`, with a warning, and does not read the others):
 
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
@@ -121,7 +129,7 @@ The keys below are **diagnostics**, not in the sample:
 A number out of range is replaced by the default with the warning `grain: KEY = N out of LO..HI, DEF taken`. How the mask
 and the colour grain work in the camera: [platform/om5m2/grain.md](platform/om5m2/grain.md).
 
-### 5.1. `[debug]`
+### 5.1. `[debug]` (debug build only)
 
 The debug service of `core` 1.40 for developers: a log in RAM that survives a reset, read over USB in the MTP mode,
 optionally no card writes by `core` and file updates over USB. **Off by default**, not in the sample and not in a
@@ -159,7 +167,7 @@ These are for developers and troubleshooting; the bundled modules need neither.
 [core]
 ; on | off - whether to write the log OMKIT\LOG\CORE.LOG on the card
 log = on
-; error | warn | info | debug - how much detail
+; error | warn | info - how much detail
 log_level = info
 ; on - if the arena runs out of space, take small module buffers (up to 16K) from the firmware heap.
 ; Requires fw_heap_limit. The heap is shared with shooting: enable only if the arena is too small for modules
@@ -182,6 +190,8 @@ enabled = on
 ; for example: CREATPRF = on
 ```
 
+(A debug build's sample differs in one comment: `; error | warn | info | debug - how much detail`.)
+
 In the `OMKIT.INI` of a release and of the card bundle, the `[modules]` section goes on with the bundled modules, in
 the order of `RELEASE_MODULES` in `OMKit/Makefile` (the load order):
 
@@ -193,12 +203,13 @@ FILMLOOK = on
 
 ## 9. A complete example
 
-Both bundled modules, the film look in the place of i-Enhance, a little colour grain, a log with more detail:
+Both bundled modules, the film look in the place of i-Enhance, a little colour grain, a log with warnings and errors
+only:
 
 ```ini
 [core]
 log = on
-log_level = debug
+log_level = warn
 
 [grain]
 mask = film
@@ -218,7 +229,7 @@ name = Film Look
 grain_tile = CLASS400
 ```
 
-## 10. `[shoot]`: the test scenario
+## 10. `[shoot]`: the test scenario (debug build only)
 
 A series of pictures without the user, for testing presets: `core` presses the shutter button itself - by the button's
 own path in the camera, half-press first, then the full press - and before each step chooses a preset the way the user

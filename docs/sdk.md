@@ -79,7 +79,7 @@ can be built for).
 
 | Function | L | Meaning |
 |---|---|---|
-| `void log(omk_mod *m, int level, const char *fmt, ...)` | 3 | One log line `ms L NAME: text`. `level`: `OMK_LOG_ERROR` 1, `OMK_LOG_WARN` 2, `OMK_LOG_INFO` 3, `OMK_LOG_DEBUG` 4; lines above `log_level` of `[core]` are dropped at once (cheap) |
+| `void log(omk_mod *m, int level, const char *fmt, ...)` | 3 | One log line `ms L NAME: text`. `level`: `OMK_LOG_ERROR` 1, `OMK_LOG_WARN` 2, `OMK_LOG_INFO` 3, `OMK_LOG_DEBUG` 4; lines above `log_level` of `[core]` are dropped at once (cheap). A release build of `core` keeps no line of the debug level; write a module's debug lines as `OMK_LOG_D(api, self, "text %u", n)` - the macro of `omk_api.h` compiles them into the module's debug build only (`make BUILD=debug`), and `OMK_MODULE_KIND(api, self)` at the start of `module_init` marks a debug build of the module for `tools/buildcheck.py` |
 
 - Format: `%s %c %d %u %x %X`, a width with an optional zero (`%08x`, `%5u`). No `%l`, `%p`, floating point or precision;
   any other character after `%` is printed as is.
@@ -297,7 +297,7 @@ place, drawn with `tools/dial_label.py`, a shorter word where one does not fit:
 |---|---|---|
 | `int isp_scope(omk_mod *m, u32 scope)` | 13 | which jobs get the tables: `OMK_ISP_LIVE` (live view, also what the camera meters and focuses on) and/or `OMK_ISP_STILLS` (the default). Call before `isp_override` |
 | `int isp_override(omk_mod *m, const void *block, u32 size)` | 13 | publishes the platform's ISP block (the `ISPB` section of an `.isp` file, [formats/isp.md](formats/isp.md), layout in `omk_ispb.h`); copied, may be freed after the call. `block` 0 - back to the camera's own tables |
-| `int isp_census(omk_mod *m, int on)` | 13 | 1 - log the jobs of the colour path at debug level; 0 - stop |
+| `int isp_census(omk_mod *m, int on)` | 13 | 1 - log the jobs of the colour path at debug level; 0 - stop. A debug build of `core` only: a release build returns -1 |
 
 - The first module to call any of the three owns the service; that first call must come from `module_init` (the hooks
   go in then).
