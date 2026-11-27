@@ -177,7 +177,7 @@ options. Module sources build with `-Wall -Wextra -Werror`; `core` with
 | | `BUILD=release` (the default) | `BUILD=debug` |
 |---|---|---|
 | for | everyone: what is published, what goes on a card for use | development: test sessions over USB, looking for a fault |
-| has | what the user needs: the modules' functions, the short log on the card (start, modules, what the user chose, power states, warnings and errors), the hold of card writes at a power-off and while the power lever is off | all of the release build, and: the debug service over USB with its RAM log ([debug.md](debug.md)), the task dump, the rescue of a camera stuck with the lever off, the probes of the camera's state (the `power probe` line, the application state, the live view context), the hooks' and editors' counters, the log's `debug` level and boot checkpoints, the test scenario `[shoot]` with `SHOOT.RUN` and the run without hands, the grain mask test, the emulator probes (`EXTRA=-DOMK_EMU`) |
+| has | what the user needs: the modules' functions, the short log on the card (start, modules, what the user chose, power states, warnings and errors), the hold of card writes at a power-off, while the power lever is off and during a half-press | all of the release build, and: the debug service over USB with its RAM log ([debug.md](debug.md)), the task dump, the rescue of a camera stuck with the lever off, the probes of the camera's state (the `power probe` line, the application state, the live view context), the hooks' and editors' counters, the log's `debug` level and boot checkpoints, the test scenario `[shoot]` with `SHOOT.RUN` and the run without hands, the grain mask test, the emulator probes (`EXTRA=-DOMK_EMU`) |
 | compiled with | - | `-DOMK_DEBUG` (C), `--defsym OMK_DEBUG=1` (assembly) |
 | output | `OMKit/build/` | `OMKit/build/debug/` |
 | first line of the log | `======== OMKit core 1.45 release (...` | `======== OMKit core 1.45 debug (...` |
@@ -189,7 +189,8 @@ options. Module sources build with `-Wall -Wextra -Werror`; `core` with
 - A release build reads no setting of the debug kind ([config.md](config.md) marks them "debug build only"), and the
   sample `OMKIT.INI` it writes names none of them.
 - A release build reads of the camera's state only what its functions need: the power lever's flag, the card's busy
-  and mounted flags, the setting cells of the picture mode screen, the task that calls an event hook. It reads no
+  and mounted flags, the application's state (a few words of memory once a pass: its card writes wait during a half-press
+  or a change of state), the setting cells of the picture mode screen, the task that calls an event hook. It reads no
   hardware register besides the tick counter.
 - A module has the same two kinds: its lines of the debug level are written with `OMK_LOG_D(api, self, ...)`
   ([sdk.md](sdk.md)) and exist only in its debug build. Either kind of a module loads into either kind of `core`.
