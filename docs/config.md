@@ -9,7 +9,7 @@ releases and their cards are release builds. The keys, values and sections marke
 in a debug build. A release build does not read them: a key of `[core]` gets the usual warning `config: [core] KEY
 unknown`, `log_level = debug` gets `config: log_level = debug is only in a debug build, using info`, and the sections
 `[debug]` and `[shoot]` get one line for all their keys - `config: N keys are only in a debug build and are not read (the
-first: [debug] enabled)`. Nothing else happens.
+first: [debug] enabled)`; `[optics.A]`..`[optics.F]` count as such sections. Nothing else happens.
 
 ## 1. Where the file comes from
 
@@ -139,6 +139,50 @@ release's `OMKIT.INI`. With `enabled = on`, anyone who connects the camera by US
 `write`, `ring_level`, `tasks`, `window_ms`, `window_every`, `stuck_ms`), the security notes and the computer's tool:
 [debug.md](debug.md). An unknown key in `[debug]` gets the warning `config: [debug] KEY unknown`.
 
+### 5.2. `[optics]`
+
+Bloom and Halation on the stills of the film look: a glow around bright places (a diffusion filter) and the red glow of
+film around lamps. `core` makes them; a look module (FILMLOOK) lets the user choose the strength of each per preset - the
+rows Bloom and Halation in the look's column, 0 (off) to 5. A still whose preset has both at 0 is made as without the
+layer. **On by default**: without an `[optics]` section the values below are taken - the field-tested set, the one the
+sample spells out (section 8).
+
+| Key | Type | Default | Range | Effect |
+|---|---|---|---|---|
+| `layer` | switch | `on` | | `off` - no Bloom and Halation at all: nothing is installed, and the look's column has no Bloom and Halation rows |
+| `bloom_threshold`, `halation_threshold` | number | `180`, `240` | 0..254 | the code of the picture's brightness where the glow starts |
+| `bloom_sigma`, `halation_sigma` | number | `90`, `45` | 0..1000 | the glow's size: the Gaussian's sigma in pixels of the picture (a sigma below the layer's smallest, about 35, comes out as that, with a warning) |
+| `bloom_sigma2`, `bloom_mix`, `halation_sigma2`, `halation_mix` | number | `0` | 0..1000, 0..100 | a second Gaussian and its weight in percent |
+| `bloom_gain`, `halation_gain` | number | `110`, `220` | 0..5000 | the light added at strength 5 at 100 % of the steps, percent of the source |
+| `bloom_steps`, `halation_steps` | five numbers | `20, 32, 50, 71, 100` and `10, 19, 34, 80, 140` | 0..200 each | the strengths 1..5 in percent of the gain. Not five numbers: a warning, the default |
+| `bloom_dark`, `halation_dark` | number | `80`, `100` | 0..100 | percent less of the glow on places that are bright themselves |
+| `bloom_tail`, `bloom_tail_sigma` | number | `50`, `400` | 0..90, 0..1000 | Bloom's long tail: the percent of its light in a wide Gaussian of that sigma |
+| `bloom_haze` | number | `0` | 0..25 | percent of all the light (not only above the threshold) in the tail: shadows lift, contrast falls. With a tail only |
+| `bloom_toe`, `bloom_max`, `halation_toe`, `halation_max` | number | `0`, `38`, `3`, `60` | 0..50 (toe), 0..200 (max) | the strength's curve after the blur, percent of white: the toe takes a weak glow away, the ceiling holds a strong one (0 - none) |
+| `bloom_colour` | number | `300` | 0..400 | Bloom's colour: percent of the colour of its sources (0 - neutral) |
+| `halation_cb`, `halation_cr` | number | `-24`, `42` | -200..200 | the halation's colour where it is strong (orange), percent |
+| `halation_edge_cb`, `halation_edge_cr`, `halation_edge_code` | number | `-40`, `75`, `70` | -200..200, 0..255 | its colour at the weak edge (red) and the code of the halation from which the strong colour holds (0 - one colour) |
+| `halation_core` | switch as 0/1 | `1` | 0..1 | 1 - a lamp's core stays white |
+| `emission`, `bloom_emission`, `halation_emission` | number | `16`, `4`, `32` | 0..64 | the source: a blown pixel stands for this many whites (0 - only the excess over the threshold). Bloom with few whites glows from bright surfaces too, the halation keeps to lamps. `emission`, when given, is the default of the two |
+| `halation_first` | 0/1 | `1` | 0..1 | 1 - the halation takes its colour from the place's own light, Bloom is added after it |
+| `day_mean`, `day_share` | two numbers each | `95, 125` and `6, 14` | 0..255, 0..100 | a day scene: the picture's mean code from..to, or the percent of it at code 200 and above from..to |
+| `day_bloom`, `day_halation` | number | `100`, `100` | 0..100 | percent of the gains on a day scene (100 - the same by day and by night) |
+| `white` | text | `auto` | `auto`, `table`, `layer`, `off`, 160..255 | the look's white, the scale of the codes: `auto` - the code the look's tables give a blown pixel, else found in the picture; `off` - the codes as they are |
+| `jobs` | text | `first` | `first`, `both` | of a RAW+JPEG press: `first` - only the JPEG gets the layer; `both` - the preview in the ORF too |
+
+A number out of range is taken at the nearest end, with a warning. Each still of the look with a strength above 0 gets
+one line in the log: `optics: job N: Bloom B, Halation H, white W, day D%; the worker T ms, the step waited T ms`.
+
+The keys below are **debug build only** (development of the layer; a release build takes the field-tested values and
+reports them once: `config: [optics]: N keys are not a release build's and are not read (the first: KEY)`):
+
+| Key | Default | Effect |
+|---|---|---|
+| `route`, `layer_width`, `layer_bytes`, `gamma`, `read`, `read_cached`, `layer_cached` | `pair`, `324`, `012`, `220`, `1`, `1`, `1` | how the layer is carried through the camera's image pipeline and read |
+| `bloom`, `halation` | - | 0..5: a test's strengths in place of the preset's rows |
+| `schedule`, sections `[optics.A]`..`[optics.F]` | - | a list of test stages and sets of the keys above, one a press |
+| `probe`, `bisect`, `bisect_from`, `run`, `worker_test`, `bench` | - | the probe of the pipeline's step, its bisection over power-ons, a test of the worker task, a CPU bench in every job. With `probe` above 0 and no `layer` key the layer is off |
+
 ## 6. Keys `core` reads in every module's section
 
 A module's section is named after the module: `[CREATPRF]`, `[FILMLOOK]`. Besides the module's own keys, `core` reads two
@@ -182,6 +226,61 @@ fw_heap_limit = 256K
 mask = film
 ; colour grain on colour presets, 0..1024 (0 - none; never on black and white presets)
 chroma = 0
+
+[optics]
+; Bloom and Halation on the film look's stills. The strength of each is the preset's Bloom and Halation row
+; in the look's column: 0 - off, 1..5. off here - no Bloom and Halation at all
+layer = on
+; The values below are the defaults. The glow starts at the code *_threshold of the picture (0..254);
+; *_sigma - its size in pixels of the picture; *_gain - the light added at strength 5, percent
+; Bloom: a diffusion filter. bloom_tail percent of its light in a long tail of bloom_tail_sigma pixels;
+; bloom_dark - percent less on bright places; bloom_max - at most this percent of white;
+; bloom_colour - percent of the colour of its sources (0 - neutral)
+bloom_threshold = 180
+bloom_sigma = 90
+bloom_gain = 110
+bloom_dark = 80
+bloom_tail = 50
+bloom_tail_sigma = 400
+bloom_haze = 0
+bloom_toe = 0
+bloom_max = 38
+bloom_colour = 300
+; Halation: the red glow around lamps. halation_cb, halation_cr - its colour where it is strong,
+; halation_edge_cb, halation_edge_cr - at its weak edge, the strong colour from the code halation_edge_code;
+; halation_core = 1 - a lamp's core stays white; halation_toe, halation_max - percent of white
+halation_threshold = 240
+halation_sigma = 45
+halation_gain = 220
+halation_dark = 100
+halation_cb = -24
+halation_cr = 42
+halation_edge_cb = -40
+halation_edge_cr = 75
+halation_edge_code = 70
+halation_core = 1
+halation_toe = 3
+halation_max = 60
+; The source: a blown pixel stands for this many whites (0 - only the excess over the threshold);
+; emission - for both when given, else each its own
+emission = 16
+bloom_emission = 4
+halation_emission = 32
+; 1 - the halation takes its colour before Bloom is added
+halation_first = 1
+; The strengths 1..5 in percent of the gains
+bloom_steps = 20, 32, 50, 71, 100
+halation_steps = 10, 19, 34, 80, 140
+; A day scene (the picture's mean code from..to, or the percent of it at code 200 from..to) may take
+; day_bloom and day_halation percent of the gains; 100 - the same by day and by night
+day_mean = 95, 125
+day_share = 6, 14
+day_bloom = 100
+day_halation = 100
+; auto - the codes on the scale of the look's white; off - as they are; 160..255 - a fixed white
+white = auto
+; first - of a RAW+JPEG press only the JPEG gets the layer; both - the preview in the ORF too
+jobs = first
 
 [modules]
 ; off - do not load any modules

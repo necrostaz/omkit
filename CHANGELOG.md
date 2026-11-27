@@ -8,6 +8,10 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Bloom and Halation are on by default.** Without an `[optics]` section `core` takes the field-tested values, and the
+  sample `OMKIT.INI` spells them out; `layer = off` turns the layer off
+  ([docs/config.md](docs/config.md#52-optics)). A release build writes one line a still (`optics: job N: Bloom B,
+  Halation H, ...`); the layer's probe, bisection, schedule, test strengths and bench are in the debug build only.
 - **Release and debug builds.** `core` and the modules are built in two kinds, chosen by `make BUILD=release` (the
   default) or `BUILD=debug`. A release build has only what the user needs: the debug service over USB, the task dump,
   the test scenario, the probes of the camera's state, the log's `debug` level and the rescue of a stuck camera are
