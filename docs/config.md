@@ -143,15 +143,17 @@ release's `OMKIT.INI`. With `enabled = on`, anyone who connects the camera by US
 
 Bloom and Halation on the stills of the film look: a glow around bright places (a diffusion filter) and the red glow of
 film around lamps. `core` makes them; a look module (FILMLOOK) lets the user choose the strength of each per preset - the
-rows Bloom and Halation in the look's column, 0 (off) to 5. A still whose preset has both at 0 is made as without the
-layer. **On by default**: without an `[optics]` section the values below are taken - the field-tested set, the one the
-sample spells out (section 8).
+rows Bloom and Halation in the look's column, 0 (off) to 5 ([modules/filmlook/optics.md](modules/filmlook/optics.md)). A
+still whose preset has both at 0 is made as without the layer. The section is read at power-on. **On by default**:
+without an `[optics]` section the values below are taken - the field-tested set, the one the sample spells out (section
+8). What each key does to the picture and when to change it: [modules/filmlook/optics.md section
+6](modules/filmlook/optics.md#6-settings-optics).
 
 | Key | Type | Default | Range | Effect |
 |---|---|---|---|---|
 | `layer` | switch | `on` | | `off` - no Bloom and Halation at all: nothing is installed, and the look's column has no Bloom and Halation rows |
 | `bloom_threshold`, `halation_threshold` | number | `180`, `240` | 0..254 | the code of the picture's brightness where the glow starts |
-| `bloom_sigma`, `halation_sigma` | number | `90`, `45` | 0..1000 | the glow's size: the Gaussian's sigma in pixels of the picture (a sigma below the layer's smallest, about 35, comes out as that, with a warning) |
+| `bloom_sigma`, `halation_sigma` | number | `90`, `45` | 0..1000 | the glow's size: the Gaussian's sigma in pixels of the picture (a sigma below the layer's smallest, about 35, comes out as that, with a warning; one above about 510 comes out as about 510) |
 | `bloom_sigma2`, `bloom_mix`, `halation_sigma2`, `halation_mix` | number | `0` | 0..1000, 0..100 | a second Gaussian and its weight in percent |
 | `bloom_gain`, `halation_gain` | number | `110`, `220` | 0..5000 | the light added at strength 5 at 100 % of the steps, percent of the source |
 | `bloom_steps`, `halation_steps` | five numbers | `20, 32, 50, 71, 100` and `10, 19, 34, 80, 140` | 0..200 each | the strengths 1..5 in percent of the gain. Not five numbers: a warning, the default |
@@ -170,8 +172,9 @@ sample spells out (section 8).
 | `white` | text | `auto` | `auto`, `table`, `layer`, `off`, 160..255 | the look's white, the scale of the codes: `auto` - the code the look's tables give a blown pixel, else found in the picture; `off` - the codes as they are |
 | `jobs` | text | `first` | `first`, `both` | of a RAW+JPEG press: `first` - only the JPEG gets the layer; `both` - the preview in the ORF too |
 
-A number out of range is taken at the nearest end, with a warning. Each still of the look with a strength above 0 gets
-one line in the log: `optics: job N: Bloom B, Halation H, white W, day D%; the worker T ms, the step waited T ms`.
+A number out of range is taken at the nearest end, with the warning `optics: KEY = N out of LO..HI, D taken`. Each
+still of the look with a strength above 0 gets one line in the log: `optics: job N: Bloom B, Halation H, white W, day
+D%; the worker T ms, the step waited T ms`, or a warning when the still went without the layer.
 
 The keys below are **debug build only** (development of the layer; a release build takes the field-tested values and
 reports them once: `config: [optics]: N keys are not a release build's and are not read (the first: KEY)`):
@@ -199,7 +202,7 @@ These are for developers and troubleshooting; the bundled modules need neither.
 
 | Section | Module | Keys |
 |---|---|---|
-| `[FILMLOOK]` | film looks in a picture mode slot | `slot`, `name`, `presets`, `scope`, `art`, `enable_edits`, `save_preset_edits`, `grain`, `grain_tile`, `exif`: [modules/filmlook/README.md](modules/filmlook/README.md#5-settings) |
+| `[FILMLOOK]` | film looks in a picture mode slot | `slot`, `name`, `presets`, `scope`, `art`, `enable_edits`, `save_preset_edits`, `grain`, `grain_tile`, `optics`, `exif`: [modules/filmlook/README.md](modules/filmlook/README.md#5-settings) |
 | `[CREATPRF]` | colour and monochrome profiles | `mono_filters`: [modules/creatprf/README.md](modules/creatprf/README.md#4-settings) |
 | `[HELLO]` | the example module for developers | `greeting`, `hide`, `fail`: [modules/hello/README.md](modules/hello/README.md) |
 
