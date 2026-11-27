@@ -2,12 +2,12 @@
 
 Two optical effects for the stills of the film look, set per preset in the look's column of the picture mode screen:
 
-- **Bloom** - the soft glow of a diffusion filter (a "mist" filter such as a Black Pro-Mist) in front of the lens:
+- **Bloom** - the soft glow of a diffusion filter in front of the lens:
   bright parts of the picture glow into the darker ones around them, with a long and faint tail, in the colour of their
   light.
-- **Halation** - the halo of a colour film without an anti-halation layer (motion picture film used in a still camera,
-  such as CineStill 800T): light that went through the film is reflected back from its base and exposes the red layer
-  again around the brightest points. Lamps, flames and street lights get a red edge that turns orange where it is
+- **Halation** - the halo of a colour film without an anti-halation layer (for example motion picture film used in a
+  still camera): light that went through the film is reflected back from its base and exposes the red layer again
+  around the brightest points. Lamps, flames and street lights get a red edge that turns orange where it is
   strong; the lamp's own core stays white.
 
 Both are made by OMKit's `core` (its optics layer) on the look's stills; FILMLOOK gives the user the two rows to set

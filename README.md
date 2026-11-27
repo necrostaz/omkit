@@ -107,8 +107,7 @@ on.
 The bundled FILMLOOK presets carry film names (Kodak Portra, Ektar, Kodachrome, Tri-X, Vision3, Fujifilm Superia,
 Eterna, Ilford HP5 and others). They describe the character of the look a preset imitates with the camera's own colour
 tables; they are not the manufacturers' products, and their use implies no connection with or approval by the
-trademark owners. The documentation names a diffusion filter (Tiffen Pro-Mist) and a film (CineStill) only to describe
-the effects Bloom and Halation imitate.
+trademark owners.
 
 ## License
 
