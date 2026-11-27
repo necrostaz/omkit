@@ -64,6 +64,10 @@ are read only there:
 
 ### Changed
 
+- **Updating copies `OMKIT.INI` too.** A new release's `OMKIT.INI` may have new settings (this one: the `[optics]`
+  section) and may no longer have old ones, so the card's own file is no longer kept: if you changed settings, save
+  your `OMKIT.INI` first, copy the release's one with the other files, then make your changes again in it, with care,
+  at the matching places ([install guide](https://github.com/necrostaz/omkit/blob/main/docs/platform/om5m2/fw1100/install.md#6-updating-omkit)).
 - **Versions: core 1.46 (module API 20), CREATPRF 1.6, FILMLOOK 1.13.** Both modules need the `core` of this release:
   update `CORE.BIN` and the files of `MODULES` together (on the core of 0.1.0 they are not loaded - `needs a newer core
   API` in the log - and the camera works without them).

@@ -76,8 +76,9 @@ In short, for a supported camera and firmware:
    camera), and charge its battery.
 2. Download the OMKit release ZIP for your camera and firmware ([releases](https://github.com/necrostaz/omkit/releases)), and extract it.
 3. **Already installed OMKit before** (and no official firmware since)? The camera keeps its loader patch: skip the firmware tool and the flashing, just
-   update the `OMKIT` folder on the card from the new release (keep your own `OMKIT.INI` to keep your settings) - and
-   you are done.
+   update the files of the `OMKIT` folder on the card from the new release, `OMKIT.INI` too (if you changed settings,
+   save your file first and make your changes again in the new one: it may have new settings and no longer have old
+   ones) - and you are done.
 4. Run the release's firmware tool (a double-click launcher for Windows and macOS, a shell script for Linux; it needs Python). The tool
    downloads the official firmware from the manufacturer, checks it, applies OMKit's loader patch on your computer and
    checks the result. OMKit itself never contains or distributes firmware.

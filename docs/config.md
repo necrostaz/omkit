@@ -23,8 +23,9 @@ first: [debug] enabled)`; `[optics.A]`..`[optics.F]` count as such sections. Not
 - **The sample `core` writes loads no modules.** Its `[modules]` section only says `enabled = on`; a module runs only
   after a line `NAME = on` is added for it (section 4). So deleting the file goes back to the defaults of `core` but
   turns the modules off; copy the release's `OMKIT.INI` back instead to return to the release's defaults.
-- Updating OMKit with a newer release keeps your own `OMKIT.INI` (the install guide of the platform, for example
-  [platform/om5m2/fw1100/install.md](platform/om5m2/fw1100/install.md#6-updating-omkit)).
+- Updating OMKit with a newer release replaces `OMKIT.INI` with the release's one: if you changed settings, save your
+  file first and make your changes again in the new one, at the matching places (the install guide of the platform,
+  for example [platform/om5m2/fw1100/install.md](platform/om5m2/fw1100/install.md#6-updating-omkit)).
 
 The first lines of each power-on in `OMKIT\LOG\CORE.LOG` (after its header line `======== OMKit core ...`) say which case it
 was:

@@ -78,9 +78,9 @@ rules: the sample's CR LF line ends, at most `CFG_MAX` (8192) bytes and `CFG_ENT
 would not understand, every module on. The file is generated rather than kept in the tree so that it can never drift
 from `core`'s sample; it is made by `make card` rather than by the builder so that a card built for testing is the
 release's card. `core` itself is unchanged: it still writes its own sample, which loads no module, only when the card
-has no `OMKIT.INI`. A user who updates keeps their own `OMKIT.INI` (the install guide, "Updating OMKit"): when a release
-adds a module, its section in `CHANGELOG.md` must say so and give the line to add (the install guides send updating
-users there).
+has no `OMKIT.INI`. A user who updates copies the release's `OMKIT.INI` too and makes their own changes again in it (the
+install guide, "Updating OMKit"): when a release adds, changes or removes settings or modules, its section in
+`CHANGELOG.md` must say so (the install guides send updating users there).
 
 ### 3.1. The changelog and the GitHub release
 
@@ -96,7 +96,7 @@ read in the ZIP and on GitHub, where a link into `docs/` would lead nowhere. To 
 4. Publish a GitHub release with the tag `v<version>`, the title `OMKit <version>`, the ZIP and its `.sha256` as
    files, and the text of `OMKit-<version>-<platform>-<firmware>.notes.md`: that version's section of the changelog -
    only what changed since the previous release - followed by the component versions, the install pointer (for an
-   update: no flashing, copy the `OMKIT` files but `OMKIT.INI`) and the ZIP's SHA-256.
+   update: no flashing, copy the `OMKIT` files, `OMKIT.INI` too, and make one's own settings again in it) and the ZIP's SHA-256.
 
 The builder refuses a release whose version has no dated section, is not the newest one, or that leaves changes under
 Unreleased; it also checks the form of the whole file (the title, the headings, the groups, unique versions, real

@@ -174,11 +174,12 @@ folder change. This holds as long as the camera still has the patch: OMKit start
 official firmware has been installed since (that removes the patch; then follow sections 3-5 with a release made for the
 camera's firmware).
 
-1. Read the new release's section in `CHANGELOG.md`. It says when an update needs more than the steps below (for
-   example a new module to add to `OMKIT.INI`).
-2. Switch the camera off, take the card out and put it in the computer.
-3. Copy the new release's files into the card's `OMKIT` folder, replacing the files of the same name - **everything
-   except `OMKIT.INI`**:
+1. Read the new release's section in `CHANGELOG.md`. It says when an update needs more than the steps below, and
+   which settings of `OMKIT.INI` are new, changed or gone.
+2. Switch the camera off, take the card out and put it in the computer. If you changed settings in the card's
+   `OMKIT\OMKIT.INI`, save a copy of it on the computer.
+3. Copy the new release's files into the card's `OMKIT` folder, replacing the files of the same name - **`OMKIT.INI`
+   too**:
 
    | From the release's `OMKIT` folder | To the card |
    |---|---|
@@ -186,18 +187,20 @@ camera's firmware).
    | the files in `MODULES\` | `OMKIT\MODULES\` |
    | the files in `FILMLOOK\` | `OMKIT\FILMLOOK\` |
    | the files in `GRAIN\` | `OMKIT\GRAIN\` |
-   | `OMKIT.INI` | **not copied**: your own `OMKIT.INI` keeps your settings |
+   | `OMKIT.INI` | `OMKIT\OMKIT.INI` (the release's settings; your changes go back in at step 4) |
 
    Copy the files inside the folders rather than the folders themselves: on macOS, Finder replaces a whole folder of the
    same name (with your own presets in it) unless you hold Option and choose Merge.
-4. Put the card back and switch the camera on. `OMKIT\LOG\CORE.LOG` now begins with the new `core` version, and the
+4. If you had changed settings, make your changes again in the new `OMKIT.INI`, with care, at the matching places:
+   a new `OMKIT.INI` may have new settings (and modules turned on) and may no longer have old ones, so copying your old
+   file over the new one could turn off what the release adds. Compare the two files if in doubt.
+5. Put the card back and switch the camera on. `OMKIT\LOG\CORE.LOG` now begins with the new `core` version, and the
    module lines show the new module versions.
 
 What stays on the card:
 
-- **Your settings**: `OMKIT\OMKIT.INI` as you left it. If you never changed it, copying the release's one does no harm.
-  If the release notes say the new `OMKIT.INI` is needed (for example a new module), copy it and make your changes in
-  it again, or add the lines the notes give to your own file.
+- **Your settings** do not stay: the release's `OMKIT.INI` replaces the card's one, and your changes go back in from the
+  copy you saved (steps 2-4).
 - **Your presets**: your own `.ISP` files in `OMKIT\FILMLOOK\` stay. The bundled presets are replaced by the new
   release's: a preset whose file did not change keeps the edits made in the camera, a changed one starts without them. A
   bundled preset that the new release no longer has (or has under another name) stays until you delete it. Deleting

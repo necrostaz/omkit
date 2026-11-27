@@ -275,7 +275,7 @@ def github_notes(info: dict, digest: str) -> str:
 ---
 
 - **Versions:** core {info['core']}, {mods}.
-- **Install:** extract the ZIP and follow `INSTALL.txt`. Already installed OMKit? No flashing again: update the `OMKIT` folder on the card and keep your `OMKIT.INI` (`INSTALL.txt`, part B).
+- **Install:** extract the ZIP and follow `INSTALL.txt`. Already installed OMKit? No flashing again: update the files of the `OMKIT` folder on the card, `OMKIT.INI` too, then make your own settings again in it (`INSTALL.txt`, part B).
 - **All changes:** `CHANGELOG.md` in the ZIP.
 - **ZIP SHA-256:** `{digest}`
 """
@@ -296,7 +296,8 @@ Install guide: `INSTALL.txt`. Changes: `CHANGELOG.md`. Checksums of every file: 
 The card folder `OMKIT/` holds `CORE.BIN`, the modules above in `MODULES/`, {info['grain_tiles']} grain tiles in
 `GRAIN/`, {info['presets']} FILMLOOK presets in `FILMLOOK/` and the settings file `OMKIT.INI`, in which the modules above
 are on. Updating an earlier OMKit release for this firmware needs no firmware tool and no firmware update: copy these
-files into the card's `OMKIT` folder, all but `OMKIT.INI`, to keep your settings (`INSTALL.txt`, part B).
+files into the card's `OMKIT` folder, `OMKIT.INI` too: it may have new settings and no longer have old ones, so
+save your own `OMKIT.INI` first and make your changes again in the new one (`INSTALL.txt`, part B).
 
 `firmware_tool/` makes the update files from the official firmware {info['firmware_version']}
 (`{info['official_name']}`, SHA-256 `{info['official_sha256']}`). The patched file it writes must have the SHA-256

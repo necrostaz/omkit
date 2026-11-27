@@ -66,13 +66,19 @@ B. COPY OR UPDATE OMKit ON THE CARD
  Updating (OMKit is on the card already):
  1. Read this release's section in CHANGELOG.md first: it says if the
     update needs more than copying files.
- 2. Copy the FILES inside this release's OMKIT folders onto the card's
-    OMKIT folders, replacing old ones:
-      OMKIT/CORE.BIN, OMKIT/MODULES/*, OMKIT/FILMLOOK/*, OMKIT/GRAIN/*
-    Do NOT copy OMKIT.INI - your own file keeps your settings.
+ 2. If you changed settings in the card's OMKIT.INI, save a copy of it
+    on your computer first.
+ 3. Copy the FILES inside this release's OMKIT folders onto the card's
+    OMKIT folders, replacing old ones, OMKIT.INI too:
+      OMKIT/CORE.BIN, OMKIT/OMKIT.INI, OMKIT/MODULES/*,
+      OMKIT/FILMLOOK/*, OMKIT/GRAIN/*
     (On macOS copy the files, not the folders: replacing a folder would
     delete your own presets.)
- 3. Put the card in the camera and switch it on.
+    A new OMKIT.INI may have new settings and may no longer have old
+    ones. If you had changed settings, make your changes again in the
+    new file, with care, at the matching places (CHANGELOG.md says what
+    changed). Do not copy your old file over the new one.
+ 4. Put the card in the camera and switch it on.
 
  Your own presets (.ISP) in OMKIT/FILMLOOK stay; delete the bundled ones
  you do not want.
