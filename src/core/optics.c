@@ -179,6 +179,8 @@
 #define OPT_HAL_CORE 1                      /* a lamp's core white */
 #define OPT_DAY_BLOOM 100                   /* the day weighs nothing down */
 #define OPT_DAY_HAL 100
+#define OPT_SIGMA_LAYER_MAX 32              /* optlayer.h's OL_SIGMA_MAX, layer pixels: the Gaussian's largest sigma (with the
+                                               transport's ~35 px: sqrt(512^2 + 35^2) ~ 513 px at width 324) */
 /* The transport's switches, a debug build's keys: the field's values */
 #define OPT_LAYER_WIDTH 324
 #define OPT_LAYER_ORDER (0u | 1u << 8 | 2u << 16)   /* layer_bytes = 012: Y, Cb, Cr */
@@ -774,10 +776,20 @@ static int layer_cfg(drv_optics_layer_cfg *c, const char *schedule)
     for (i = 0; i < 4; i++) {
         u32 v = i == 0 ? c->sb & 0xffff : i == 1 ? c->sb >> 16 : i == 2 ? c->sh & 0xffff : c->sh >> 16;
 
+#ifdef OMK_DEBUG
         if (v && v < fl && (i < 2 ? sb : sh))
             log_printf(OMK_LOG_WARN, "optics: %s sigma %u px is below the layer's smallest (~%u px at width %u): it comes "
                        "out ~%u px; a wider layer (layer_width) narrows it - ~%u px at %u", i < 2 ? "Bloom" : "Halation",
                        v, fl, c->width, fl, (216 * 5184 + 50 * 400) / (100 * 400), 400);
+#else                                       /* layer_width is a debug build's key: no hint at it */
+        if (v && v < fl && (i < 2 ? sb : sh))
+            log_printf(OMK_LOG_WARN, "optics: %s sigma %u px is below the layer's smallest (~%u px): it comes out ~%u px",
+                       i < 2 ? "Bloom" : "Halation", v, fl, fl);
+#endif
+        if (v > OPT_SIGMA_LAYER_MAX * 5184 / c->width + 1 && (i < 2 ? sb : sh))
+            log_printf(OMK_LOG_WARN, "optics: %s sigma %u px is above the layer's largest (~%u px at width %u): it comes "
+                       "out ~%u px", i < 2 ? "Bloom" : "Halation", v, OPT_SIGMA_LAYER_MAX * 5184 / c->width + 1,
+                       c->width, OPT_SIGMA_LAYER_MAX * 5184 / c->width + 1);
     }
     return 1;
 }
