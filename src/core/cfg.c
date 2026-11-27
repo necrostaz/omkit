@@ -7,6 +7,8 @@
 #define CFG_ENTRIES 128
 #define CFG_ONCE_MAX 1024                   /* a one-shot file of one section's keys (cfg_once) */
 
+/* The sample: one text for both build kinds, a plain sequence of string literals (tools/cardini.py reads it out of this
+ * file for the card bundle's OMKIT.INI). It names no setting of the debug build */
 static const char cfg_template[] =
     "; OMKit settings. Lines starting with ; or # are comments.\r\n"
     "; The file is read when the camera is switched on. Delete it, and core will create this sample again.\r\n"
@@ -14,11 +16,7 @@ static const char cfg_template[] =
     "[core]\r\n"
     "; on | off - whether to write the log OMKIT\\LOG\\CORE.LOG on the card\r\n"
     "log = on\r\n"
-#ifdef OMK_DEBUG
-    "; error | warn | info | debug - how much detail\r\n"
-#else
-    "; error | warn | info - how much detail\r\n"
-#endif
+    "; error | warn | info - how much detail (debug - in a debug build of core only)\r\n"
     "log_level = info\r\n"
     "; on - if the arena runs out of space, take small module buffers (up to 16K) from the firmware heap.\r\n"
     "; Requires fw_heap_limit. The heap is shared with shooting: enable only if the arena is too small for modules\r\n"

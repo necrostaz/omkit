@@ -942,13 +942,12 @@ static void test_kind(void)
     t = read_file("OMKIT.INI", &n);
     CHECK(t && !strstr(t, "[debug]") && !strstr(t, "[shoot]") && !strstr(t, "taskdump") && !strstr(t, "power_rescue"));
     CHECK(t && !strstr(t, "mask_test") && !strstr(t, "core_events") && !strstr(t, "fw_cache_inv"));
+    CHECK(t && strstr(t, "; error | warn | info - how much detail (debug - in a debug build of core only)"));
 #ifdef OMK_DEBUG
     CHECK(!strcmp(OMK_BUILD, "debug") && LOG_MAX == OMK_LOG_DEBUG);
-    CHECK(t && strstr(t, "; error | warn | info | debug - how much detail"));
     CHECK(!cfg_debug_section("debug") && !cfg_debug_section("shoot") && !cfg_debug_section("core"));
 #else
     CHECK(!strcmp(OMK_BUILD, "release") && LOG_MAX == OMK_LOG_INFO);
-    CHECK(t && strstr(t, "; error | warn | info - how much detail") && !strstr(t, "debug"));
     CHECK(cfg_debug_section("debug") && cfg_debug_section("SHOOT") && !cfg_debug_section("core") &&
           !cfg_debug_section("modules") && !cfg_debug_section("grain"));
 #endif
