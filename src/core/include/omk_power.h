@@ -30,6 +30,8 @@ int power_running(void);                    /* card and screen are ours to use *
 int power_card_ok(void);                    /* running, and core may write to the card: not while the lever is off without a
                                                power-off (the battery may go at any moment), nor while core restarts a
                                                stuck camera (the rescue, a debug build's) */
+int power_ui_hold(u32 now);                 /* 1 - the camera is in a half-press or a transition (or left it < 0.5 s ago;
+                                               held at most 6 s): core's card writes wait (RAM words only, drv_ui_state) */
 #ifdef OMK_DEBUG
 u32 power_cancels(void);                    /* how many power-offs and sleeps did not happen (core task) */
 u32 power_hook_count(u32 kind);             /* how many times that hook (POWER_HOOK_*) ran since the start */

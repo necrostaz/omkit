@@ -1075,6 +1075,18 @@ __attribute__((weak)) int drv_ui_probe(u32 *app, u32 *keys)
     return host_ui_state;
 }
 
+/* The same answer from RAM words (both builds: the hold of card writes in a half-press); counted apart from the debug
+ * build's probes */
+u32 host_ui_reads;
+
+__attribute__((weak)) int drv_ui_state(u32 *app, u32 *keys)
+{
+    host_ui_reads++;
+    *app = host_ui_state == DRV_UI_HALF ? 0x5101 : host_app;
+    *keys = host_keys;
+    return host_ui_state;
+}
+
 /* The restart request: counted */
 int host_restarts;
 

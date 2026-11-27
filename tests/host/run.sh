@@ -24,9 +24,9 @@ fail() { echo "  FAIL  $1"; failed=1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-# core parts (tests/host/test_core.c): the default group, then cfg, mem, power, the lever off without a power-off and
-# the build's kind, each on its own empty "card"
-for group in all cfg mem power lever kind; do
+# core parts (tests/host/test_core.c): the default group, then cfg, mem, power, the lever off without a power-off, the
+# hold of card writes in a half-press and the build's kind, each on its own empty "card"
+for group in all cfg mem power lever uihold kind; do
     mkdir "$tmp/$group"
     arg=$group
     [ "$group" = all ] && arg=

@@ -15,9 +15,9 @@
  *    gate), then the firmware's own power-off job with a restart (drv_restart_hfw, as at the test scenario's end); the
  *    camera starts again with the lever off, and the firmware turns it off at once. The watchdog is the last resort.
  *
- * A release build (omk_types.h) has the hooks, the lever's flag (one word of RAM, drv_power_pending) and the hold of card
- * writes only: no probe line, no rescue (it reads the application's state at every pass), no read of the subprocessor
- * clock at a sleep. */
+ * A release build (omk_types.h) has the hooks, the lever's flag (one word of RAM, drv_power_pending), the hold of card
+ * writes at the lever and the hold in a half-press or a transition (power_ui_hold: RAM words, drv_ui_state, once a
+ * pass): no probe line, no rescue, no register read, no read of the subprocessor clock at a sleep. */
 #include "omk_core.h"
 #include "omk_log.h"
 #include "omk_mod.h"
@@ -435,6 +435,44 @@ u32 power_cancels(void)
 int power_running(void)
 {
     return state == POWER_RUN && acked == seq;
+}
+
+/* Core's card writes (the log, the stores - the modules' too) wait while the camera is in a passing state of shooting -
+ * a half-press, whose exposure sequence stops and starts the live view's exposure stream, or a transition -
+ * and UI_SETTLE_MS after it: the firmware itself does no file work then, and a background writer keeps out of the
+ * camera's way as it keeps out of a picture being written (drv_card_busy). Bounded: a passing state longer than
+ * UI_HOLD_MAX_MS is a stuck camera, and its lines go to the card again (the core loop, main.c, asks once a pass).
+ * Both builds (the owner's decision 2026-11-27: a half-press is a critical operation, better nothing of ours during it).
+ * The check reads RAM words only, once a pass (drv_ui_state: the application's state by its chain of pointers and the
+ * raw input byte) - no register of the hardware; the debug build's probe of the camera's state (drv_power_probe, with
+ * the video compositor's register) stays a debug build's */
+#define UI_HOLD_MAX_MS 6000
+#define UI_SETTLE_MS 500
+
+int power_ui_hold(u32 now)
+{
+    static u32 since, left;
+    static int in, after;                   /* in a passing state since `since`; out of it since `left` */
+    u32 app, keys;
+    int r = drv_ui_state(&app, &keys);
+
+    if (r == DRV_UI_HALF || r == DRV_UI_TRANSIENT) {
+        if (!in) {
+            in = 1;
+            since = now;
+        }
+        after = 0;
+        return now - since < UI_HOLD_MAX_MS;
+    }
+    if (in) {
+        in = 0;
+        after = 1;
+        left = now;
+    }
+    if (after && now - left < UI_SETTLE_MS)
+        return 1;
+    after = 0;
+    return 0;
 }
 
 int power_card_ok(void)

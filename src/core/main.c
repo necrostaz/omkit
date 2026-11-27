@@ -272,47 +272,6 @@ static void count_boot(omk_store *s)
                    last[0] ? last : "?");
 }
 
-/* Core's card writes (the log, the stores) wait while the camera is in a passing state of shooting - a half-press, whose
- * exposure sequence stops and starts the live view's exposure stream, or a transition - and UI_SETTLE_MS after it: the
- * firmware itself does no file work then, and a background writer keeps out of the camera's way as it keeps out of a
- * picture being written (drv_card_busy). Bounded: a passing state longer than UI_HOLD_MAX_MS is a stuck camera, and its
- * lines (the task dump) go to the card again.
- * A debug build only: the hold needs the application's state read at every pass, and a release build does not probe the
- * camera's state; its writes are a few short lines and the stores, kept off a picture being written (drv_card_busy,
- * drv_prof_take_recent) and off the lever (power_card_ok) */
-#ifdef OMK_DEBUG
-#define UI_HOLD_MAX_MS 6000
-#define UI_SETTLE_MS 500
-
-static int ui_hold(u32 now)
-{
-    static u32 since, left;
-    static int in, after;                   /* in a passing state since `since`; out of it since `left` */
-    u32 app, keys;
-    int r = drv_ui_probe(&app, &keys);
-
-    if (r == DRV_UI_HALF || r == DRV_UI_TRANSIENT) {
-        if (!in) {
-            in = 1;
-            since = now;
-        }
-        after = 0;
-        return now - since < UI_HOLD_MAX_MS;
-    }
-    if (in) {
-        in = 0;
-        after = 1;
-        left = now;
-    }
-    if (after && now - left < UI_SETTLE_MS)
-        return 1;
-    after = 0;
-    return 0;
-}
-#else
-#define ui_hold(now) 0
-#endif
-
 #ifdef OMK_DEBUG
 int core_prev_ended(void)
 {
@@ -437,7 +396,7 @@ void core_main(void)
         dbg_where(DBG_W_SHOOT);
         tick = shoot_service(now, SERVICE_MS);   /* sooner while a test scenario runs */
         hf_service(now);
-        busy = drv_card_busy() || drv_prof_take_recent() || ui_hold(now) || !power_card_ok();
+        busy = drv_card_busy() || drv_prof_take_recent() || power_ui_hold(now) || !power_card_ok();
         if (busy && !deferred)
             deferred_ms = now;
         deferred += busy;

@@ -409,14 +409,53 @@ int drv_power_pending(void)
     return *(const volatile u32 *)LEVER_OFF_FLAG == 1;
 }
 
-/* From here to the media busy flags: a debug build's - the probe words of the log and of the dumps, the keys and events of
- * the test scenario, the restarts and the reset of the rescue and of the scenario without hands, the USB hold. A release
- * build reads the lever's flag above and nothing more of the camera's state */
-#ifdef OMK_DEBUG
 static int ram_ptr(u32 p)
 {
     return p >= 0x60000000 && p < 0x64000000 && !(p & 3);
 }
+
+/* K2, the application's state: +172 of the object reached from 0x61e497d8 -> +0xd8 -> +0x70 (a hypothesis from the
+ * emulator, every pointer checked); 0xffffffff - the path broken. RAM words through the cache, as the firmware's own
+ * readers on CPU 0 */
+static u32 app_state(void)
+{
+    u32 p = *(const volatile u32 *)0x61e497d8;
+
+    if (!ram_ptr(p))
+        return 0xffffffff;
+    p = *(const volatile u32 *)(p + 0xd8);
+    if (!ram_ptr(p))
+        return 0xffffffff;
+    p = *(const volatile u32 *)(p + 0x70);
+    if (!ram_ptr(p))
+        return 0xffffffff;
+    return *(const volatile u32 *)(p + 172);
+}
+
+/* Application states (K2) that last a moment in normal work: 0x5101 half-press, 0x0002 a transition; the UI hangs
+ * after a shot (core 0.90-0.93, the on-screen text) stayed in them. The input byte K4 (0xa26dea7c, uncached: raw input
+ * byte group 0) changes with the keys of group 0 (bit 1 cleared on half-press: a hypothesis) */
+#define APP_HALF_PRESS 0x5101
+#define APP_TRANSITION 0x0002
+
+/* Both builds: core's card writes wait while the camera is in a passing state (main.c's ui_hold, at every pass of the
+ * core task - the owner's decision 2026-11-27: a half-press is a critical operation of the camera, nothing of ours during
+ * it). Three RAM words of the chain and one byte - no register of the hardware */
+int drv_ui_state(u32 *app, u32 *keys)
+{
+    u32 a = app_state();
+
+    if (a == 0xffffffff)
+        return -1;
+    *app = a;
+    *keys = *(const volatile u8 *)0xa26dea7c;
+    return a == APP_HALF_PRESS ? DRV_UI_HALF : a == APP_TRANSITION ? DRV_UI_TRANSIENT : 0;
+}
+
+/* From here to the media busy flags: a debug build's - the probe words of the log and of the dumps, the keys and events of
+ * the test scenario, the restarts and the reset of the rescue and of the scenario without hands, the USB hold. A release
+ * build reads the lever's flag above, the passing state (drv_ui_state) and nothing more of the camera's state */
+#ifdef OMK_DEBUG
 
 /* For the log: K1 lever flag, K3 (0x61e42010) OlyHfwPower began power-off or sleep, K5 UI state word (0x6234f838, read at
  * its uncached alias 0xa234f838 - see GUI_STATE in pictprof.c; bytes: group, state; 0x0104 - black screen), K4 raw input byte group 0 (0xa26dea7c, uncached; bit 0 - lever in the emulator),
@@ -424,23 +463,14 @@ static int ram_ptr(u32 p)
  * a hypothesis from the emulator, every pointer checked; 0xffffffff - path broken). */
 u32 drv_power_probe(u32 *w, u32 max)
 {
-    u32 v[7], n, p;
+    u32 v[7], n;
 
     v[0] = *(const volatile u32 *)LEVER_OFF_FLAG;
     v[1] = *(const volatile u32 *)0x61e42010;
     v[2] = *(const volatile u32 *)0xa234f838;   /* past the cache, as every reader of the GUI state (pictprof.c) */
     v[3] = *(const volatile u8 *)0xa26dea7c;
     v[4] = *(const volatile u32 *)0x62151ee8;
-    v[5] = 0xffffffff;
-    p = *(const volatile u32 *)0x61e497d8;
-    if (ram_ptr(p)) {
-        p = *(const volatile u32 *)(p + 0xd8);
-        if (ram_ptr(p)) {
-            p = *(const volatile u32 *)(p + 0x70);
-            if (ram_ptr(p))
-                v[5] = *(const volatile u32 *)(p + 172);
-        }
-    }
+    v[5] = app_state();
     /* 1 - the viewfinder: its plane is scaled, the screen's is not. The only register here, read only when asked for (the
      * log's probe line); the passing-state checks of every pass (drv_ui_probe) read RAM only */
     v[6] = max > 6 ? vsc(VSC_RSZ_OSD3) != 0 : 0;
@@ -449,21 +479,10 @@ u32 drv_power_probe(u32 *w, u32 max)
     return n;
 }
 
-/* Application states (K2) that last a moment in normal work: 0x5101 half-press, 0x0002 a transition; the UI hangs
- * after a shot (core 0.90-0.93, the on-screen text) stayed in them. The input byte K4 changes with the keys of group 0
- * (bit 1 cleared on half-press: a hypothesis) */
-#define APP_HALF_PRESS 0x5101
-#define APP_TRANSITION 0x0002
-
+/* The debug build's name of the same check (the dumps, the scenario, the rescue, the debug service) */
 int drv_ui_probe(u32 *app, u32 *keys)
 {
-    u32 w[6];
-
-    if (drv_power_probe(w, 6) < 6 || w[5] == 0xffffffff)
-        return -1;
-    *app = w[5];
-    *keys = w[3];
-    return w[5] == APP_HALF_PRESS ? DRV_UI_HALF : w[5] == APP_TRANSITION ? DRV_UI_TRANSIENT : 0;
+    return drv_ui_state(app, keys);
 }
 
 /* The test scenario's shutter button (core/shoot.c). Keys: API 0xD0002 (0x6032b57f -> 0x601310b8), the path of the

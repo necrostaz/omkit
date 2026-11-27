@@ -1436,6 +1436,39 @@ static void test_layer_sets(void)
     free(t);
 }
 
+/* The hold of core's card writes in a half-press or a transition (power_ui_hold), both builds (the owner's decision
+ * 2026-11-27): held from the first pass in the state, UI_SETTLE_MS (0.5 s) after it, at most UI_HOLD_MAX_MS (6 s) of a
+ * state that lasts (a stuck camera: its lines go to the card); the state read from RAM words only (drv_ui_state) - never
+ * the debug build's probe with its register (host_probes stays 0) */
+static void test_ui_hold(void)
+{
+    u32 now = 1000, reads = host_ui_reads;
+
+    host_ui_state = 0;
+    CHECK(!power_ui_hold(now));
+    host_ui_state = DRV_UI_HALF;
+    CHECK(power_ui_hold(now += 250));                       /* a half-press: held */
+    CHECK(power_ui_hold(now += 2000));
+    host_ui_state = 0;                                      /* released: 0.5 s more */
+    CHECK(power_ui_hold(now += 250));
+    CHECK(power_ui_hold(now += 249));
+    CHECK(!power_ui_hold(now += 252));                      /* 501 ms after it */
+    CHECK(!power_ui_hold(now += 250));
+    host_ui_state = DRV_UI_TRANSIENT;                       /* a transition: held as well */
+    CHECK(power_ui_hold(now += 250));
+    host_ui_state = DRV_UI_HALF;                            /* one passing state after the other: one hold */
+    CHECK(power_ui_hold(now += 5000));
+    CHECK(!power_ui_hold(now += 1000));                     /* 6 s of passing states: a stuck camera, writes again */
+    CHECK(!power_ui_hold(now += 4000));
+    host_ui_state = 0;
+    CHECK(power_ui_hold(now += 250));                       /* out of it: the 0.5 s after it still held */
+    CHECK(!power_ui_hold(now += 600));
+    host_ui_state = -1;                                     /* the state not readable (the MTP mode): no hold */
+    CHECK(!power_ui_hold(now += 250));
+    host_ui_state = 0;
+    CHECK(host_ui_reads - reads == 14 && host_probes == 0);  /* RAM words only, once a call */
+}
+
 /* The lever off without a power-off (the camera stuck, the firmware never powers off): no card writes while it stays off,
  * whatever the log and store services are asked; writes again when it is on. A stuck application (a half-press state,
  * the shutter released): after 8 s the last save, the power-off job twice, then the watchdog; a held half-press is no
@@ -1600,6 +1633,8 @@ int main(int argc, char **argv)
         test_layer_default(atoi(argv[3]));
     else if (argc > 2 && !strcmp(argv[2], "lever"))
         test_lever();
+    else if (argc > 2 && !strcmp(argv[2], "uihold"))
+        test_ui_hold();
     else {
         test_cfg_template();
         test_log();

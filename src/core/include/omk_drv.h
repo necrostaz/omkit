@@ -472,6 +472,10 @@ enum { DRV_UI_HALF = 1, DRV_UI_TRANSIENT = 2 };
 #define DRV_KEYS_S1_UP 0x02                 /* drv_ui_probe's keys: bit 1 set while the shutter is not half-pressed (camera
                                                logs: 0x14 with the half-press state 0x5101, 0x16 after it) */
 int drv_ui_probe(u32 *app, u32 *keys);
+/* drv_ui_state: the same answer in both builds, from RAM words only (the application's state by its chain of pointers,
+ * the raw input byte) - no register: core's card writes wait in a passing state (main.c's ui_hold). drv_ui_probe is the
+ * debug build's name of it */
+int drv_ui_state(u32 *app, u32 *keys);
 
 /* The debug service (core/debug.c, core 1.40).
  * drv_keep_area: memory that outlives a reset of the camera (not a power-off or the battery taken out), outside the

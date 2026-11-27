@@ -65,6 +65,7 @@ extern u32 host_stuck_since, host_k3;
 extern int host_usb_install_rc, host_hfw_rc;
 extern u32 host_usb_mode, host_usb_hits, host_usb_choice, host_usb_factor, host_usb_link, host_usb_installs;
 extern u32 host_ok_presses, host_hfw_posts, host_resets, host_reset_cause;
+extern u32 host_ui_reads;                  /* drv_ui_state's reads (both builds) */
 extern u32 host_probes, host_rtc_reads;    /* the stub's counts: a release build of core must leave them at 0 */
 void host_usb_take(u32 choice);           /* the firmware applies a USB choice (the hook's place) */
 
