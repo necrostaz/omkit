@@ -948,9 +948,9 @@ void optics_setup(void)
         return;
     }
     rc = drv_optics_layer(&lc);
-    if (rc) {
+    if (rc) {                               /* 30 + the kernel check's bits (1..256): codes 31..541 */
         log_printf(OMK_LOG_ERROR, "optics: the layer not set up, code %d%s: no Bloom and Halation", rc, rc >= 30 &&
-                   rc < 158 ? " (a CPU kernel of the layer does not give what plain C gives)" : "");
+                   rc < 30 + 512 ? " (a CPU kernel of the layer does not give what plain C gives)" : "");
         return;
     }
     op.layer = 1;
@@ -977,7 +977,10 @@ static int opt_worker(void)
     rc = drv_optics_worker(&tid);
     op.worker = rc ? -1 : 1;
     dbg_event(rc ? "optics: worker task not made" : "optics: worker task made", 0);
-    if (rc)
+    if (rc == 4)                            /* made, silent within the driver's wait: the jobs take it once it runs */
+        log_printf(OMK_LOG_WARN, "optics: the worker task made but not answering yet (code 4): a job before it runs has no "
+                   "Bloom and Halation");
+    else if (rc)
         log_printf(OMK_LOG_ERROR, "optics: the worker task not running, code %d (task %u)", rc, tid);
     else
         log_printf(OMK_LOG_INFO, "optics: the worker task runs: id %u, CPU 0, priority 56", tid);
@@ -1196,8 +1199,12 @@ static void opt_strength(void)
     op.str = s;
     log_printf(OMK_LOG_INFO, "optics: the look's strengths now: Bloom %u, Halation %u%s%s%s", v[OMK_OPTICS_BLOOM],
                v[OMK_OPTICS_HALATION], mono ? ", black and white (the halation without colour)" : "",
-               s & 0xffff ? "" : " (no step in its stills)", op.test_str ? "; NOT taken where the INI gives a test's "
-               "strengths (a debug build)" : "");
+               s & 0xffff ? "" : " (no step in its stills)",
+#ifdef OMK_DEBUG
+               op.test_str ? "; NOT taken where the INI gives a test's strengths (a debug build)" : "");
+#else
+               "");                         /* a release build has no test's strengths (op.test_str stays 0) */
+#endif
 }
 
 int optics_route(void)

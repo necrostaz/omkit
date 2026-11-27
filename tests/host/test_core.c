@@ -369,6 +369,26 @@ static void test_store(void)
         CHECK(file_size("STORE/TEST.STA") == 512 && file_size("STORE/TEST.STB") == 512);
     }
 
+    /* both slot files gone while the store runs (another card, files removed on a computer): a save in place cannot
+     * open its file and fails once; the next try makes the file anew, in its fixed length - not refused until a restart */
+    {
+        char p[512];
+
+        snprintf(p, sizeof(p), "%s/STORE/TEST.STA", host_dir);
+        remove(p);
+        snprintf(p, sizeof(p), "%s/STORE/TEST.STB", host_dir);
+        remove(p);
+        for (i = 0; i < 4; i++) {           /* each slot: the failed try in place, then the new file */
+            v = 200 + i;
+            store_set(s, 1, &v, 4, OMK_STORE_PERSIST);
+            store_service(t0 + 50000 + 2000 * i);
+            store_service(t0 + 51000 + 2000 * i);
+        }
+        CHECK(file_size("STORE/TEST.STA") == 512 && file_size("STORE/TEST.STB") == 512);
+        store_info(s, &keys, &used, &seq);
+        CHECK(seq == 3 + 4 + 4);            /* version 3, the 4 saves in place, these 4 (a failed try counts none) */
+    }
+
     /* the files of an older core (the exact length of their records) are read as they are; each is made again once,
      * in its fixed length, at its first save, and rewritten in place after that */
     {
@@ -995,7 +1015,8 @@ static void test_bisect(int phase)
             free(t);
             log_flush();
             t = read_file("LOG/CORE.LOG", &n);
-            CHECK(t && strstr(t, "the worker task not running, code 4") && strstr(t, "bisection stopped before W0"));
+            CHECK(t && strstr(t, "the worker task made but not answering yet (code 4)") &&
+                  strstr(t, "bisection stopped before W0"));
         }
         free(t);
         return;

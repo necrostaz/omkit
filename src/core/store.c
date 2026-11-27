@@ -283,6 +283,9 @@ static void save(omk_store *s)
     }
     if (!fp) {                              /* no card, or the card's file module refuses now (the camera's PC mode):
                                                the file is as it was - in place still holds for the next try */
+        if (!made && !drv_exists(path))     /* unless the slot's file is gone (another card, removed on a computer):
+                                               the next try makes it anew */
+            s->in_place[seq & 1] = 0;
         core_card_write(0, path);
         if (!s->failing)                    /* once: without a card it fails on every try */
             log_printf(OMK_LOG_WARN, "store %s: cannot open %s", s->name, path);
