@@ -1,9 +1,15 @@
 # OMKit
 
-**OMKit** is a platform for exploring the firmware of OM System cameras and a modular, extensible custom firmware for
-them. The camera is flashed once, with a small loader patch; from then on everything lives on the SD card: the OMKit
-core, the modules you choose, their updates and all their settings. Adding, updating or removing a module is a matter of
-copying files to the card, and since nothing of OMKit is kept in the camera, going back to the stock behaviour is simple.
+**OMKit** is a platform for exploring the firmware of OM System cameras and a modular custom extension for them. The
+camera is flashed once, with a small loader patch; from then on everything lives on the SD card: the OMKit core, the
+modules you choose, their updates and all their settings. Adding, updating or removing a module is a matter of copying
+files to the card, and since nothing of OMKit is kept in the camera, going back to the stock behaviour is simple.
+
+> [!NOTE]
+> This repository and its releases contain **no firmware images** - neither the manufacturer's original firmware nor a
+> patched one. You make the patched file yourself, on your own computer, with the firmware tool of a release: it takes
+> the official firmware from the manufacturer's update server (or a copy you already have), accepts it only if its
+> SHA-256 is that of the official file, and applies OMKit's loader patch to it ([Install](#install)).
 
 ## Supported cameras and firmware
 
@@ -32,7 +38,9 @@ Details: [docs/modules/creatprf/README.md](docs/modules/creatprf/README.md).
 
 ### Film look (FILMLOOK)
 
-![The film look with the Kodak Portra 400 preset chosen](docs/img/filmlook_portra400.png)
+| ![The film look's column on the camera: the look, its preset, the tone curve, Grain and Bloom, with Bloom set to +2](docs/img/filmlook_column.png) |
+|---|
+| The film look's column: the look, its preset (between the arrows), the tone curve, Grain (G) and Bloom (B, here +2); Halation (H) is on the column's next page |
 
 - A **film look** in the place of one stock picture mode (i-Enhance by default): the dials step through **presets** -
   `.ISP` files on the card, each a set of the camera's own colour tables - and live view and the pictures take the chosen
@@ -122,3 +130,15 @@ What you make with OMKit is yours: your own `.isp` presets, grain tiles, priors 
 licenses. Modules built with the SDK (`src/sdk/`, linked into each module) may use any license their authors choose.
 
 Contributions are accepted under the same licenses (Apache-2.0 section 5; CC BY 4.0 for docs and data).
+
+## Credits
+
+Many thanks to the authors of these projects. Their research, the information they published and their ideas helped
+OMKit a great deal.
+
+- [om-emu](https://github.com/flatpanda/om-emu) - an emulator of OM System and Olympus camera firmware.
+- [caduceus-om3](https://github.com/androidfanman/caduceus-om3) - in-camera colour editing and firmware modifications
+  for an OM System camera.
+- [olympus-firmware-notes](https://github.com/nsud-dev/olympus-firmware-notes) - notes on the firmware of Olympus
+  cameras.
+- [oly_fw_analysis](https://github.com/fishcu/oly_fw_analysis) - an analysis of Olympus camera firmware.

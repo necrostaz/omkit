@@ -14,7 +14,7 @@ debug build it is **off** unless `OMKIT.INI` turns it on (`omkdebug.py info` sho
   the picture while a problem is looked for;
 - optionally, the computer writes files of the `OMKIT` folder (a new `CORE.BIN`, modules, presets, `OMKIT.INI`), each
   one checked by a CRC-32 read back from the card before it replaces the old file, restarts the camera so that they
-  run, and starts or stops the test scenario ([config.md](config.md#10-shoot-the-test-scenario)): a whole test session
+  run, and starts or stops the test scenario ([config.md](config.md#10-shoot-the-test-scenario-debug-build-only)): a whole test session
   from the computer (section 6).
 
 ## 1. Turning it on
