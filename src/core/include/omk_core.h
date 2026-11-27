@@ -5,7 +5,7 @@
 #include "omk_drv.h"
 #include "omk_mem.h"
 
-#define CORE_VERSION "1.45"
+#define CORE_VERSION "1.46"
 #define CORE_KIND OMK_BUILD                  /* "release" or "debug" (omk_types.h): the first line of the log names it */
 #ifndef CORE_BUILD                          /* the Makefile: git branch@commit of the build, "-dirty" with changes */
 #define CORE_BUILD "unknown"

@@ -135,7 +135,7 @@ $(OUT)/CORE.BIN: $(OUT)/core.body
 # way by tools/presetset.py), and OMKIT.INI: core's own sample (src/core/cfg.c) with the bundled modules on, made by
 # tools/cardini.py, so that the modules run from the first start (core writes its sample, which loads no module,
 # only when the card has no OMKIT.INI). RELEASE_MODULES: name:version, in load order
-RELEASE_MODULES := creatprf:1.5 filmlook:1.12
+RELEASE_MODULES := creatprf:1.6 filmlook:1.13
 CARD := $(OUT)/card/OMKIT
 
 card: $(OUT)/CORE.BIN

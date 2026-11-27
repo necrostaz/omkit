@@ -7,7 +7,7 @@ core and the modules are built in two kinds (docs/build.md, "Release and debug b
 the debug service over USB, the task dump, the probes of the camera's state, the test scenario, the log's debug level -
 is compiled only with OMK_DEBUG, and this tool checks the result:
 
-  CORE.BIN   names its kind in the text of the log's first line ("OMKit core 1.45 release"). A release image holds
+  CORE.BIN   names its kind in the text of the log's first line ("OMKit core 1.46 release"). A release image holds
              none of the texts and none of the hardware register addresses listed below; with --map (the linker's map
              of that build) also none of the debug kind's functions and object files.
   NAME.OMM   a debug build of a module holds the text of its debug marker line (OMK_LOG_D in its module_init); a

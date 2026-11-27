@@ -131,7 +131,7 @@ static void log_header(void)
         k += width;
         when[k++] = i == 2 ? ' ' : i == 5 ? 0 : i < 2 ? '-' : ':';
     }
-    /* The version and the build's kind as one text of the image: "OMKit core 1.45 release" (tools/buildcheck.py reads it) */
+    /* The version and the build's kind as one text of the image: "OMKit core 1.46 release" (tools/buildcheck.py reads it) */
     log_banner("======== OMKit core " CORE_VERSION " " CORE_KIND " (%s), %s, run %s, started %s ========", CORE_BUILD, drv_name(), run_id,
                d.year >= 2000 && d.year < 2100 && d.month >= 1 && d.month <= 12 ? when : "?");
 }

@@ -1,6 +1,6 @@
 # CREATPRF: colour and monochrome profiles
 
-CREATPRF (version 1.5, needs core API 19) gives the camera three **colour profiles** and three **monochrome profiles**:
+CREATPRF (version 1.6, needs core API 20) gives the camera three **colour profiles** and three **monochrome profiles**:
 picture modes that are chosen in the picture mode screen, edited there with the camera's own editor column, and applied
 to stills, live view and video recorded from the still modes. The camera's firmware has the settings of these profiles
 but does not offer them; CREATPRF shows them and applies them, without changing the camera's stored settings to anything

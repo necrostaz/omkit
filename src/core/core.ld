@@ -4,7 +4,7 @@
  * camera, causing a reboot loop. The linker refuses an image that does not fit. CORE_CEIL is 0x634b0000: the arena's region
  * 0xa3470000..0xa3780000 was checked word by word on the camera, so the image may grow into its first 256 KB (the film look's
  * editors, core 1.03: 32 KB; its grain item, core 1.15: 32 KB more; the debug service, the test scenario and the optics
- * layer, core 1.42: 64 KB more; the optics layer's colours and the look's white left 1 KB of it, core 1.45: 64 KB more)
+ * layer, core 1.42: 64 KB more; the optics layer's colours and the look's white left 1 KB of it, core 1.46: 64 KB more)
  * and the arena starts after it. The ceiling is a budget, not a reservation: the arena starts
  * at the image's real end, and it is 2.8 MB, of which the bundled modules use less than 1 MB */
 OUTPUT_ARCH(mn10300)

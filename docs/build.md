@@ -110,12 +110,12 @@ bytes. The MN10300 target has no LRA register allocator, so newer GCC branches m
 
 ```sh
 make -C OMKit                                           # core          -> OMKit/build/CORE.BIN
-make -C OMKit/src/modules MOD=filmlook VERSION=1.12     # one module    -> OMKit/build/modules/FILMLOOK.OMM
+make -C OMKit/src/modules MOD=filmlook VERSION=1.13     # one module    -> OMKit/build/modules/FILMLOOK.OMM
 make -C OMKit card                                      # card bundle   -> OMKit/build/card/OMKIT/
 make -C OMKit test                                      # tests and checks (section 5)
 make -C OMKit clean                                     # removes OMKit/build (OUT)
 make -C OMKit BUILD=debug                               # core, debug   -> OMKit/build/debug/CORE.BIN
-make -C OMKit/src/modules MOD=filmlook VERSION=1.12 BUILD=debug   # -> OMKit/build/debug/modules/FILMLOOK.OMM
+make -C OMKit/src/modules MOD=filmlook VERSION=1.13 BUILD=debug   # -> OMKit/build/debug/modules/FILMLOOK.OMM
 make -C OMKit card BUILD=debug                          # a debug card  -> OMKit/build/debug/card/OMKIT/
 ```
 
@@ -180,7 +180,7 @@ options. Module sources build with `-Wall -Wextra -Werror`; `core` with
 | has | what the user needs: the modules' functions, the short log on the card (start, modules, what the user chose, power states, warnings and errors), the hold of card writes at a power-off, while the power lever is off and during a half-press | all of the release build, and: the debug service over USB with its RAM log ([debug.md](debug.md)), the task dump, the rescue of a camera stuck with the lever off, the probes of the camera's state (the `power probe` line, the application state, the live view context), the hooks' and editors' counters, the log's `debug` level and boot checkpoints, the test scenario `[shoot]` with `SHOOT.RUN` and the run without hands, the grain mask test, the emulator probes (`EXTRA=-DOMK_EMU`) |
 | compiled with | - | `-DOMK_DEBUG` (C), `--defsym OMK_DEBUG=1` (assembly) |
 | output | `OMKit/build/` | `OMKit/build/debug/` |
-| first line of the log | `======== OMKit core 1.45 release (...` | `======== OMKit core 1.45 debug (...` |
+| first line of the log | `======== OMKit core 1.46 release (...` | `======== OMKit core 1.46 debug (...` |
 
 - The code of the debug kind is **not compiled** into a release build: its files (`taskdump.c`, `dring.c`, `debug.c`,
   `shoot.c`, `handsfree.c`) are not built, and the debug parts of the other files are under `#ifdef OMK_DEBUG`

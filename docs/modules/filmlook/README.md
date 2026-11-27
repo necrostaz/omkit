@@ -1,6 +1,6 @@
 # FILMLOOK: film looks in the picture mode screen
 
-FILMLOOK (version 1.12, needs core API 16; the grain needs API 17, Bloom and Halation API 20) puts a film look into the
+FILMLOOK (version 1.13, needs core API 16; the grain needs API 17, Bloom and Halation API 20) puts a film look into the
 camera's picture mode screen. One stock picture mode of the strip - the **slot**, i-Enhance by default - is replaced by
 the look. In its place the user steps with the dials through **presets**: `.ISP` files on the card, each a set of colour
 tables for the camera's image processor, usually made to look like one film. Live view and the pictures take the chosen

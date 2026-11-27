@@ -64,6 +64,9 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `CORE.LOG` for all power-ons.
 - **core 1.45** adds test sessions over USB without hands: during a one-shot scenario the camera stays in charge only
   with the cable in, and it restarts itself into the MTP mode at the end.
+- **core 1.46, FILMLOOK 1.13 and CREATPRF 1.6** add Bloom and Halation on the stills (core API 20), the release and
+  debug builds and the card writes held while the lever is off and in a half-press. The image with the stack may now
+  end at `0x634b0000` (was `0x634a0000`). CREATPRF 1.6 needs core API 20.
 - **FILMLOOK stores each preset's Bloom and Halation strengths with its edits** (a new format of the stored edits).
   Going back to the FILMLOOK of 0.1.0 drops the stored edits of all presets (their tone and grain): that version takes
   the new format for an unknown one.
