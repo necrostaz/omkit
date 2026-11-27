@@ -8,80 +8,97 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Bloom and Halation are on by default.** Without an `[optics]` section `core` takes the field-tested values, and the
-  sample `OMKIT.INI` spells them out; `layer = off` turns the layer off
-  ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#52-optics)). A release build writes one line a still (`optics: job N: Bloom B,
-  Halation H, ...`); the layer's probe, bisection, schedule, test strengths and bench are in the debug build only.
-- **Release and debug builds.** `core` and the modules are built in two kinds, chosen by `make BUILD=release` (the
-  default) or `BUILD=debug`. A release build has only what the user needs: the debug service over USB, the task dump,
-  the test scenario, the probes of the camera's state, the log's `debug` level and the rescue of a stuck camera are
-  compiled into the debug build alone, and their settings are read only there. The log's first line names the kind;
-  `tools/buildcheck.py` checks that a release image has nothing of the debug build
-  ([docs/build.md](https://github.com/necrostaz/omkit/blob/main/docs/build.md#35-release-and-debug-builds)). The items below marked "debug build" are in that kind
-  only.
-- **Debug service (core 1.40; debug build), off by default.** With `[debug] enabled = on` in `OMKIT.INI`, the log and snapshots of
-  the camera's tasks also go to RAM that survives a reset, and `tools/omkdebug.py` reads them over USB in the MTP mode,
-  also after a crash; it reads files of the card, and with `write = on` updates files of the `OMKIT` folder, each
-  checked by a CRC-32 read back from the card. `card_writes = off` keeps the log and the stores in RAM only.
-  See [docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md), including its security notes.
-- **Test scenario (core 1.41; debug build), off by default.** `[shoot]` in `OMKIT.INI` takes a series of pictures without the user:
-  `core` presses the shutter button by its own path in the camera and chooses a preset of the film look or a profile
-  before each step, as the user would. For testing presets
-  ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#10-shoot-the-test-scenario-debug-build-only)).
-- **A test session over USB (debug build).** With `[debug] write = on`, the computer restarts the camera over USB by the firmware's own
-  reboot request (a normal power-off that keeps the settings and unmounts the card, then a wake-up alarm), starts or
-  stops the test scenario, and reads the build that runs (`INFO`); `omkdebug.py session` does a whole session: files,
-  scenario, restart, the pictures and the logs ([docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md#6-a-test-session)). A scenario waits until
-  the camera shoots (`[shoot] arm_wait`), and `OMKIT\SHOOT.RUN` starts one at the next power-on only, removed before it
-  runs ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#101-one-scenario-at-the-next-power-on-omkitshootrun)).
-- **A test session without hands (debug build).** `hands_free = on` in `OMKIT\SHOOT.RUN` keeps the USB cable as charge only for that
-  one start, whatever the camera's USB choice (the camera shoots and stays off the computer; its settings are not
-  changed), and at the scenario's end `core` writes the result to `OMKIT\SHOOT.END` and restarts the camera, which comes
-  back in the MTP mode; a stuck camera application ends it too
-  ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#102-without-hands-hands_free--on-in-shootrun)). `omkdebug.py session --hands-free`
-  runs such a session and `--pull-log` also takes the RAM log of the power-on before
-  ([docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md#6-a-test-session)).
-- The log names the build at each power-on: `OMKit core <version> <release|debug> (branch@commit)`.
+- **Bloom and Halation on the film look's stills.** Two optical effects, set per preset:
+  - **Bloom** - the soft glow of a diffusion filter: bright parts of the picture glow into the darker ones around them,
+    with a long faint tail, in the colour of their light;
+  - **Halation** - the halo of colour film without an anti-halation layer: lamps, flames and street lights get a red
+    edge that turns orange where it is strong, the lamp's own core stays white.
+
+  The look's column has two new rows after the grain item (G): **B - Bloom**, the last item of its first page, and
+  **H - Halation**, alone on a second page (step down from Bloom). Each is a slider from 0 (off) to 5, kept with the
+  preset's other edits; a long OK sets it back to 0. **Every preset starts with both at 0: the pictures do not change
+  until you turn a row up.** Black-and-white presets get both without colour. With `exif = on` in `[FILMLOOK]` the
+  JPEG's UserComment carries ` o=B,H`. Everything about them:
+  [docs/modules/filmlook/optics.md](https://github.com/necrostaz/omkit/blob/main/docs/modules/filmlook/optics.md).
+- **What to know about Bloom and Halation** ([limitations](https://github.com/necrostaz/omkit/blob/main/docs/modules/filmlook/optics.md#4-limitations)):
+  - only on the still: live view and the shooting screen never show them - look at the picture in playback;
+  - a still with them reaches the card later, about 2.3-2.9 s after the shutter release instead of about 1.6-1.9 s;
+    bursts are taken as usual, only written more slowly;
+  - RAW+JPEG: only the JPEG gets them. The RAW never does, and the preview inside the ORF (what a computer shows for
+    the RAW file) is without them; the camera's playback shows the JPEG, with them;
+  - only the film look's stills: not CREATPRF profiles, other picture modes, multi-frame shots or video;
+  - in a JPEG a lamp and a white surface in the sun look the same, so sunlit white surfaces get a faint Halation edge
+    too, and an underexposed lamp gets none.
+- **Settings for Bloom and Halation** in the new `[optics]` section of `OMKIT.INI`. The layer is on by default, with
+  the tuning OMKit is released with (the release's `OMKIT.INI` spells it out); `layer = off` removes the effects and
+  their rows, and the other keys tune both effects for all presets ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#6-optics)). Each still
+  with a strength above 0 gets one line in the log: `optics: job N: Bloom B, Halation H, ...`.
+
+#### For developers (debug build)
+
+The published release is a release build (see Changed); the items below are in a debug build of `core` only, built
+from the source with `make BUILD=debug` ([docs/build.md](https://github.com/necrostaz/omkit/blob/main/docs/build.md#35-release-and-debug-builds)), and their settings
+are read only there:
+
+- **The debug service**, off by default: with `[debug] enabled = on` the log and snapshots of the camera's tasks also go
+  to RAM that survives a reset, and `tools/omkdebug.py` reads them, and the card's files, over USB in the MTP mode, also
+  after a crash; with `write = on` it updates files of the `OMKIT` folder, each checked by a CRC-32 read back from the
+  card ([docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md), with its security notes).
+- **The test scenario** `[shoot]`: a series of pictures without the user, `core` pressing the shutter button and
+  choosing a preset or a profile before each step
+  ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#12-shoot-the-test-scenario-debug-build-only)).
+- **Test sessions over USB**: the computer restarts the camera by the firmware's own reboot request, gives it a one-shot
+  scenario `OMKIT\SHOOT.RUN` ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#121-one-scenario-at-the-next-power-on-omkitshootrun)) and
+  reads the build that runs; `omkdebug.py session` does a whole session, `--hands-free` with the USB cable kept as
+  charge only and a restart at the end ([docs/config.md](https://github.com/necrostaz/omkit/blob/main/docs/config.md#122-without-hands-hands_free--on-in-shootrun),
+  [docs/debug.md](https://github.com/necrostaz/omkit/blob/main/docs/debug.md#6-a-test-session)).
+- The log's `debug` level, the task dumps (`[core] taskdump*`), the probes of the camera's state, the rescue of a camera
+  stuck with the lever off (`[core] power_rescue`) and the test keys of `[grain]` and `[optics]`.
+- Two build kinds of `core` and the modules: `make BUILD=release` (the default) and `BUILD=debug`;
+  `tools/buildcheck.py` checks that a release image has nothing of the debug build. A module writes its debug lines
+  with `OMK_LOG_D`, compiled into its debug build only. The image of `core` with its stack may now end at `0x634b0000`
+  (was `0x63490000`).
+- `card_busy` (API 19) also answers 1 while the camera is in a half-press, as `core` holds its own writes then.
 
 ### Changed
 
+- **Versions: core 1.46 (module API 20), CREATPRF 1.6, FILMLOOK 1.13.** Both modules need the `core` of this release:
+  update `CORE.BIN` and the files of `MODULES` together (on the core of 0.1.0 they are not loaded - `needs a newer core
+  API` in the log - and the camera works without them).
+- **A release is a release build.** Its `CORE.BIN` and modules have only what the user needs; the development code is
+  not in them at all. The log's first line names the build: `======== OMKit core 1.46 release (...)`. The debug build's
+  settings in an `OMKIT.INI` of 0.1.0 only give warnings: `log_level = debug` is taken as `info`; `[core]
+  core_events`, `fw_cache_inv` and `taskdump*` get `config: [core] KEY unknown`. The file needs no edit.
+- **No card writes of OMKit in a half-press.** `core` keeps its log and store writes out of a half-press or a change of
+  the camera's state (up to 6 s, and 0.5 s after it), as it keeps them out of a picture being written. It reads the
+  camera's state from memory, once every quarter of a second, and no hardware register.
 - **A reset during a card write no longer breaks the card's volume.** The stores' copies have a fixed length
   and are rewritten in place, so a save changes neither the FAT nor the allocation bitmap nor more than one directory
   entry, and the log is no longer removed and made again at every start. Before, a reset in the middle of a save could
   leave a half-written directory entry set in `OMKIT\STORE` (Windows hid the folder until `chkdsk /f`). The copies of an
   older core are made again once, in the new length, at their first save; the settings in them are kept.
-- **One log for all power-ons.** `OMKIT\LOG\CORE.LOG` is appended to from one start to the next; each
-  power-on begins with a header line - the build (branch and commit), the run id, the camera clock's date and time - and
-  a line with the versions of the loaded modules. The log is written through an open file, so an append costs the
-  same however long the file is; a file the camera closed itself (it mounts the card again in its PC mode over USB) is
-  opened again. `run_logs` is gone (ignored if still in `OMKIT.INI`); old
+- **One log for all power-ons.** `OMKIT\LOG\CORE.LOG` is appended to from one start to the next; each power-on begins
+  with a header line - the build, the run id, the camera clock's date and time - and a line with the versions of the
+  loaded modules. The log is written through an open file, so an append costs the same however long the file is. OMKit
+  never cuts it: delete it on the computer when it gets long. `run_logs` is gone (ignored if still in `OMKIT.INI`); old
   `XXXXXXXX.LOG` files are left on the card.
-- **core 1.42** has both the debug service and the test scenario. Its image with the stack may now end at `0x634a0000`
-  (was `0x63490000`); the module arena still starts at the image's real end.
-- **core 1.43** adds the test session over USB (restart over USB, the one-shot scenario `OMKIT\SHOOT.RUN`, the build
-  in the log's first line and in `INFO`) and fixes writing files over USB, which failed since core 1.40.
-- **core 1.44** keeps the card's volume whole across resets during a save (the stores rewritten in place) and keeps one
-  `CORE.LOG` for all power-ons.
-- **core 1.45** adds test sessions over USB without hands: during a one-shot scenario the camera stays in charge only
-  with the cable in, and it restarts itself into the MTP mode at the end.
-- **core 1.46, FILMLOOK 1.13 and CREATPRF 1.6** add Bloom and Halation on the stills (core API 20), the release and
-  debug builds and the card writes held while the lever is off and in a half-press. The image with the stack may now
-  end at `0x634b0000` (was `0x634a0000`). CREATPRF 1.6 needs core API 20.
 - **FILMLOOK stores each preset's Bloom and Halation strengths with its edits** (a new format of the stored edits).
-  Going back to the FILMLOOK of 0.1.0 drops the stored edits of all presets (their tone and grain): that version takes
-  the new format for an unknown one.
+- **Going back to 0.1.0**
+  ([docs/platform/om5m2/fw1100/install.md](https://github.com/necrostaz/omkit/blob/main/docs/platform/om5m2/fw1100/install.md#6-updating-omkit)): copy its `CORE.BIN`
+  and modules as for an update. The `core` of 0.1.0 reads the stores of this one as they are and does not read
+  `[optics]`; its FILMLOOK (1.12) does not know the new format of the edits and drops them - tone curve and grain too -
+  for every preset edited since the update.
 
 ### Fixed
 
-- **A camera that does not switch off with the power lever** (issue #2: in the viewfinder the camera could stay on, live
-  view running, until the battery was taken out). The camera was already stuck before the lever: its half-press exposure
-  sequence waits for ever, so the firmware never begins its power-off. While the lever is off and the camera still runs,
-  `core` now writes nothing to the card (before, it wrote the log again 5 s after the lever, just when the battery may
-  be taken out). `core` also keeps its card writes out of a half-press or a change of state (up to 6 s, and 0.5 s after
-  it), in both build kinds; a release build reads the application's state from memory once a pass for it and reads no
-  display register. If the camera stays stuck with the lever off for 8 s with the shutter released, a debug build saves
-  once and asks the firmware for a power-off with a restart, so the camera starts with the lever off and switches off;
-  the watchdog is the last resort (`[core] power_rescue`, debug build only).
+- **A camera that did not switch off with the power lever**
+  ([issue #2](https://github.com/necrostaz/omkit/issues/2)): in the viewfinder the camera could stay on, live view
+  running, until the battery was taken out. On the camera this no longer happens with the release build of this
+  version, which reads none of the camera's display registers (0.1.0 read one at every pass for a diagnostic line); the
+  exact mechanism is not proven. Also, while the lever is off and the camera still runs, `core` now writes nothing to
+  the card (before, it wrote the log again 5 s after the lever, just when the battery may be taken out).
+- **A store whose file was removed while the camera was on** (another card put in, files deleted over USB) is made
+  again at its next save; before, its saves failed until the next power-on.
 
 ## [0.1.0] - 2026-11-20
 
