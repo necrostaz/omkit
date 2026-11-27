@@ -250,11 +250,13 @@ def changes_of(text: str, version: str, test: bool) -> str:
 
 
 def unwrap(text: str) -> str:
-    """Joins the wrapped lines of a paragraph or list item: GitHub shows every line break of a release text."""
+    """Joins the wrapped lines of a paragraph or list item: GitHub shows every line break of a release text. A nested
+    (indented) list item starts a line of its own, as a top-level one does."""
     out: list[str] = []
     for ln in text.split("\n"):
         prev = out[-1] if out else ""
-        starts = not ln.strip() or ln.startswith(("#", "- ", "* ", "|", "```")) or re.match(r"^\d+\. ", ln)
+        starts = (not ln.strip() or ln.startswith(("#", "|", "```")) or ln.lstrip().startswith(("- ", "* "))
+                  or re.match(r"^\s*\d+\. ", ln))
         if not starts and prev.strip() and not prev.startswith(("#", "|", "```")):
             out[-1] = prev + " " + ln.strip()
         else:
