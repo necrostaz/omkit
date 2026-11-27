@@ -195,6 +195,7 @@ int look_optics(omk_mod *m, u32 entry, const u8 *strength, u32 count)
         optics_val[i] = strength[i];
     optics_entry = entry;
     optics_known = 1;
+    optics_strength_now();                  /* the next still takes them, not only after core's next pass */
     return rc;
 }
 

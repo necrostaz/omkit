@@ -79,5 +79,7 @@ void optics_service(u32 now);
 /* 1 - the optics layer is on and the stills of the look get a strength (the rows', or a test's): grain.c gives them the
  * mask route's list even without grain */
 int optics_route(void);
+/* look.c, core task: the look's strengths (and the tables' black and white, white) to the driver now */
+void optics_strength_now(void);
 
 #endif

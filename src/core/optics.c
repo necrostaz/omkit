@@ -237,9 +237,10 @@ static struct {
     int worker;                             /* 1 - the worker runs; -1 - it could not be made (not tried again) */
     int layer;                              /* the layer is set up */
     int test_str;                           /* a set gives a test's strength above 0 (in place of the rows') */
-    u32 str;                                /* the look's strengths given to the driver: Bloom | Halation << 8 | mono << 16
-                                               | white << 24, or ~0 */
-} op = {.str = ~0u};
+    u32 str;                                /* the look's strengths logged: Bloom | Halation << 8 | mono << 16 | white << 24,
+                                               or ~0 */
+    u32 pushed;                             /* ... and given to the driver (optics_strength_now, the core loop), or ~0 */
+} op = {.str = ~0u, .pushed = ~0u};
 
 #ifdef OMK_DEBUG
 static struct {
@@ -1127,16 +1128,48 @@ static void opt_arm(const drv_optics_info *st, u32 now, int busy)
 }
 #endif
 
-/* The look's strengths (its owner's preset, the optics rows) to the driver when they change, with whether the colour
- * tables in force are black and white (isp_mono, the rule of the look's grain: no colour in the halation then): the next
- * jobs take them. With a test's strengths in the INI's sets the rows' do not reach those jobs: said with the line */
+/* The look's strengths now (its owner's preset, the optics rows) with whether the colour tables in force are black and
+ * white (isp_mono, the rule of the look's grain: no colour in the halation then) and their white: Bloom | Halation << 8
+ * | mono << 16 | white << 24 */
+static u32 opt_now(u8 *v)
+{
+    u32 mono = isp_mono() ? 1 : 0, white = isp_white() & 0xff;
+
+    look_optics_now(v);
+    return v[OMK_OPTICS_BLOOM] | (u32)v[OMK_OPTICS_HALATION] << 8 | mono << 16 | white << 24;
+}
+
+/* s to the driver when it changed: the next jobs take it */
+static void opt_push(u32 s)
+{
+    if (s == op.pushed)
+        return;
+    op.pushed = s;
+    drv_optics_strength(s & 0xff, s >> 8 & 0xff, s >> 16 & 1, s >> 24);
+}
+
+/* Core task, from look_optics (the module gives a preset's strengths: at a change of preset, after its tables went to
+ * the ISP service, or of a strength): the driver gets them at once, not at the core loop's next pass up to SERVICE_MS
+ * later (review M6: a still in that time took the new preset's tables with the old one's strengths and white). The log's
+ * line comes from the loop (opt_strength) - the module gives every preset's strengths at its start, the chosen one's
+ * last */
+void optics_strength_now(void)
+{
+    u8 v[OMK_OPTICS_ROWS];
+
+    if (op.layer)
+        opt_push(opt_now(v));
+}
+
+/* The core loop: the look's strengths to the driver when they change (the ISP service's tables may change without the
+ * module's call: another owner, back to stock), and the log's line. With a test's strengths in the INI's sets the rows'
+ * do not reach those jobs: said with the line */
 static void opt_strength(void)
 {
     u8 v[OMK_OPTICS_ROWS];
-    u32 s, mono = isp_mono() ? 1 : 0, white = isp_white() & 0xff;
+    u32 s = opt_now(v), white = s >> 24, mono = s >> 16 & 1;
 
-    look_optics_now(v);
-    s = v[OMK_OPTICS_BLOOM] | (u32)v[OMK_OPTICS_HALATION] << 8 | mono << 16 | white << 24;
+    opt_push(s);
     if (s == op.str)
         return;
     if ((s ^ op.str) >> 24)                 /* card170: the look's white (its tone tables), the layer's scale */
@@ -1149,7 +1182,6 @@ static void opt_strength(void)
                        "the jobs take the shelf of the layer's Y ([optics] white auto)");
     }
     op.str = s;
-    drv_optics_strength(v[OMK_OPTICS_BLOOM], v[OMK_OPTICS_HALATION], mono, white);
     log_printf(OMK_LOG_INFO, "optics: the look's strengths now: Bloom %u, Halation %u%s%s%s", v[OMK_OPTICS_BLOOM],
                v[OMK_OPTICS_HALATION], mono ? ", black and white (the halation without colour)" : "",
                s & 0xffff ? "" : " (no step in its stills)", op.test_str ? "; NOT taken where the INI gives a test's "
