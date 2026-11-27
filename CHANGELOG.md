@@ -6,6 +6,8 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-27
+
 ### Added
 
 - **Bloom and Halation on the film look's stills.** Two optical effects, set per preset:
