@@ -38,9 +38,9 @@ Details: [docs/modules/creatprf/README.md](docs/modules/creatprf/README.md).
 
 ### Film look (FILMLOOK)
 
-| ![The film look's column on the camera: the look, its preset, the tone curve, Grain and Bloom, with Bloom set to +2](docs/img/filmlook_column.png) |
+| ![The film look over live view: the cursor on the preset item, the preset's cassette and its number of 32 beside it, the dials' Prev and Next; below it the tone curve, Grain and Bloom](docs/img/filmlook_column.png) |
 |---|
-| The film look's column: the look, its preset (between the arrows), the tone curve, Grain (G) and Bloom (B, here +2); Halation (H) is on the column's next page |
+| The film look's column over live view: its preset under the cursor (between the arrows), with the preset's cassette and number drawn beside it, then the tone curve, Grain (G) and Bloom (B, at the preset's ±0); Halation (H) is on the column's next page |
 
 - A **film look** in the place of one stock picture mode (i-Enhance by default): the dials step through **presets** -
   `.ISP` files on the card, each a set of the camera's own colour tables - and live view and the pictures take the chosen
