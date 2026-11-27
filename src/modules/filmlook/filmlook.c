@@ -139,7 +139,7 @@ static void optics_publish(u32 all)
         if (i != current)
             api->look_optics(self, i, presets[i].e.optics, OMK_OPTICS_ROWS);
     rc = api->look_optics(self, current, presets[current].e.optics, OMK_OPTICS_ROWS);
-    if (rc)
+    if (rc && rc != -3)                     /* -3: [optics] layer = off - core has said so once at its start */
         api->log(self, OMK_LOG_WARN, "optics strengths not given to core, code %d", rc);
 }
 
