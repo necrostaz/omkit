@@ -64,6 +64,9 @@ and OMKit uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
   `CORE.LOG` for all power-ons.
 - **core 1.45** adds test sessions over USB without hands: during a one-shot scenario the camera stays in charge only
   with the cable in, and it restarts itself into the MTP mode at the end.
+- **FILMLOOK stores each preset's Bloom and Halation strengths with its edits** (a new format of the stored edits).
+  Going back to the FILMLOOK of 0.1.0 drops the stored edits of all presets (their tone and grain): that version takes
+  the new format for an unknown one.
 
 ### Fixed
 
