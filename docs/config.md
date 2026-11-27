@@ -164,7 +164,7 @@ These are for developers and troubleshooting; the bundled modules need neither.
 
 | Section | Module | Keys |
 |---|---|---|
-| `[FILMLOOK]` | film looks in a picture mode slot | `slot`, `name`, `presets`, `scope`, `art`, `enable_edits`, `save_preset_edits`, `grain`, `grain_tile`, `exif`: [modules/filmlook/README.md](modules/filmlook/README.md#5-settings) |
+| `[FILMLOOK]` | film looks in a picture mode slot | `slot`, `name`, `presets`, `scope`, `art`, `enable_edits`, `save_preset_edits`, `grain`, `grain_tile`, `optics`, `exif`: [modules/filmlook/README.md](modules/filmlook/README.md#5-settings) |
 | `[CREATPRF]` | colour and monochrome profiles | `mono_filters`: [modules/creatprf/README.md](modules/creatprf/README.md#4-settings) |
 | `[HELLO]` | the example module for developers | `greeting`, `hide`, `fail`: [modules/hello/README.md](modules/hello/README.md) |
 
