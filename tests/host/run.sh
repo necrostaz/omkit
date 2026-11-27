@@ -20,8 +20,9 @@ fail() { echo "  FAIL  $1"; failed=1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-# core parts (tests/host/test_core.c): the default group, then cfg, mem and power, each on its own empty "card"
-for group in all cfg mem power; do
+# core parts (tests/host/test_core.c): the default group, then cfg, mem, power and the lever off without a power-off,
+# each on its own empty "card"
+for group in all cfg mem power lever; do
     mkdir "$tmp/$group"
     arg=$group
     [ "$group" = all ] && arg=

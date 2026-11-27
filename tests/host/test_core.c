@@ -815,6 +815,91 @@ static void test_power(void)
     free(t);
 }
 
+/* The lever off without a power-off (the camera stuck, the firmware never powers off): no card writes while it stays off,
+ * whatever the log and store services are asked; writes again when it is on. A stuck application (a half-press state,
+ * the shutter released): after 8 s the last save, the power-off job twice, then the watchdog; a held half-press is no
+ * hang and gets no rescue */
+static void test_lever(void)
+{
+    omk_store *s;
+    u32 now, v = 7, i, posts;
+    long len0, len1;
+    char *t;
+
+    log_setup(1, OMK_LOG_DEBUG);
+    power_install();
+    now = now_after(0);
+    CHECK(power_service(now) == 1 && power_card_ok());
+    s = store_open("TEST", 64);
+    CHECK(s != 0);
+    log_printf(OMK_LOG_INFO, "before the lever");
+    log_flush();
+    free(read_file("LOG/CORE.LOG", &len0));
+
+    host_power_pending = 1;                                 /* the lever off: polled */
+    CHECK(power_service(now = now_after(250)) == 0 && !power_card_ok());
+    CHECK(power_service(now = now_after(POWER_CANCEL_MS)) == 0);
+    CHECK(power_service(now = now_after(250)) == 1);        /* running again, the lever still off */
+    CHECK(power_running() && !power_card_ok());
+    log_printf(OMK_LOG_INFO, "while the lever is off");
+    store_set(s, 1, &v, sizeof(v), OMK_STORE_PERSIST);
+    for (i = 0; i < 20; i++) {                              /* 10 s of passes: the services write nothing */
+        CHECK(power_service(now = now_after(500)) == 1);
+        log_service(now);
+        store_service(now);
+    }
+    free(read_file("LOG/CORE.LOG", &len1));
+    CHECK(len1 == len0);
+    CHECK(file_size("STORE/TEST.STA") == -1);
+    CHECK(host_hfw_posts == 0);                             /* not stuck (no passing state): no rescue */
+
+    host_power_pending = 0;                                 /* the lever on again: the lines and the store go to the card */
+    CHECK(power_service(now = now_after(250)) == 1 && power_card_ok());
+    for (i = 0; i < 20; i++) {
+        log_service(now = now_after(500));
+        store_service(now);
+    }
+    t = read_file("LOG/CORE.LOG", &len1);
+    CHECK(t && strstr(t, "while the lever is off"));
+    CHECK(t && strstr(t, "power: the lever is off but the camera did not go off: no card writes until the lever is on again"));
+    CHECK(t && strstr(t, "power: the lever is on again, card writes again after "));
+    free(t);
+    CHECK(file_size("STORE/TEST.STA") == 512);
+
+    /* the lever off with a half-press held: the firmware waits for its release by design - no rescue */
+    host_ui = DRV_UI_HALF;
+    host_app = 0x5101;
+    host_keys = 0x15;                                       /* bit 1 clear: half-pressed */
+    host_power_pending = 1;
+    for (i = 0; i < 60; i++)
+        power_service(now = now_after(250));
+    CHECK(host_hfw_posts == 0 && host_resets == 0);
+    host_power_pending = 0;
+    power_service(now = now_after(250));
+
+    /* stuck: the shutter released, the state stays: the rescue */
+    host_keys = 0x17;
+    host_power_pending = 1;
+    for (i = 0; i < 31 && !host_hfw_posts; i++)              /* 7.75 s: not yet */
+        power_service(now = now_after(250));
+    CHECK(host_hfw_posts == 0);
+    for (i = 0; i < 8 && !host_hfw_posts; i++)
+        power_service(now = now_after(250));
+    CHECK(host_hfw_posts == 1 && host_resets == 0 && !power_card_ok());
+    posts = host_hfw_posts;
+    for (i = 0; i < 12; i++)                                /* no power-off hook: posted again after 1 s, then the reset */
+        power_service(now = now_after(250));
+    CHECK(host_hfw_posts == posts + 1 && host_resets == 1 && host_reset_cause == 0x4f4d4b50);
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &len1);
+    CHECK(t && strstr(t, "the application in state 5101 for "));
+    CHECK(t && strstr(t, "power: rescue: the power-off job posted (0), try 1 of 2"));
+    CHECK(t && strstr(t, "power: rescue: the power-off job posted (0), try 2 of 2"));
+    CHECK(t && strstr(t, "power: rescue: the power-off job did not run: reset by the watchdog (cause 4f4d4b50)"));
+    free(t);
+    CHECK(file_size("STORE/TEST.STA") == 512);
+}
+
 int main(int argc, char **argv)
 {
     host_dir = argc > 1 ? argv[1] : ".";
@@ -825,6 +910,8 @@ int main(int argc, char **argv)
         test_mem();
     else if (argc > 2 && !strcmp(argv[2], "power"))
         test_power();
+    else if (argc > 2 && !strcmp(argv[2], "lever"))
+        test_lever();
     else {
         test_cfg_template();
         test_log();

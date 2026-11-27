@@ -45,6 +45,7 @@ extern unsigned char host_mem[4096];
 extern drv_task host_tasks[4];
 extern u32 host_ntasks, host_app;
 extern int host_ui;
+extern u32 host_keys;
 extern int host_in_task;
 extern int host_find;                   /* 1 - drv_findfirst lists the host folder */
 extern int host_restarts;               /* drv_restart_request calls */
