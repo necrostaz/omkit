@@ -234,6 +234,18 @@ for a black-and-white one (the rear dial steps the filter by place on the ring, 
 is shown, the grain item (rear dial: the tile; front dial: Off, Low, Med, High; long OK: Off). Its picture changes with it
 through a picture number of its own (section 5.3).
 
+With the optics layer on (`[optics] layer = on`), two rows follow the grain item: Bloom (item 5372) and Halation (item
+5370), each a slider 0..5 per preset ([modules/filmlook/optics.md](../../modules/filmlook/optics.md)). The column is then
+`[111, 5029, 5375, 5374, Bloom, Halation]` and takes two pages: **Bloom is the last row of the first page, Halation is
+alone on the second**. The firmware has no way to register an item, so the rows are items of OMKit's own: hooks of the
+item lookup find OMKit's descriptors before the stock ones, the rows' keys take free entries of the firmware's switch
+tables, and three methods of the settings object answer the rows' setting ids (`0x7e00 + row`, values 0..5). The number
+next to the sign is the camera's own (`±0`, `+1`..`+5`); a long OK on a row sets it to 0, on a row at 0 it closes the
+screen as on the stock items. The signs left of the number are the look's pictures 12 and 13 (46 x 46). The remembered
+cursor item (2148) is stored as 111 when it is a row, so the stored settings never hold an OMKit item id. The driver
+keeps every preset's strengths, so the column drawn at a preset step already shows the new preset's (OMKit code;
+emulator, camera).
+
 ### 4.5. Dial labels and other widgets
 
 The editors use the Color Creator layout's widgets (screen coordinates of this camera):
