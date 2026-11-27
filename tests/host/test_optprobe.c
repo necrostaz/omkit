@@ -1,6 +1,7 @@
 /* Host test of the optics probe's plain parts (src/platform/om5m2/fw1100/optprobe.h, the code the step runs): the kinds
- * of buffer addresses (window, DRAM, refused), the window check, the sum, and the stripes - bytes 1 and 3 of every group
- * by the stripe's pattern, bytes 0 and 2 as they were, nothing past the pixels asked for. Prints "ok", or what failed. */
+ * of buffer addresses (window, DRAM, refused), the data inside its allocation, the window check, the sum, and the
+ * stripes - bytes 1 and 3 of every group by the stripe's pattern, bytes 0 and 2 as they were, nothing past the pixels
+ * asked for. Prints "ok", or what failed. */
 #include <stdio.h>
 #include <string.h>
 #include "omk_types.h"
@@ -14,6 +15,18 @@ static void check(int ok, const char *what)
         fprintf(stderr, "%s\n", what);
         failed = 1;
     }
+}
+
+/* The data inside its allocation: the start past the allocation's (the small frame's check missed it before) */
+static void inside(void)
+{
+    check(op_inside(0xc0001000u, 0xc0001000u, 0x1000, 0x1000), "the data the whole allocation: inside");
+    check(!op_inside(0xc0001000u, 0xc0001000u, 0x1000, 0x1001), "a byte more than the allocation: outside");
+    check(op_inside(0xc0001100u, 0xc0001000u, 0x1000, 0xf00), "the data past the start, to the end: inside");
+    check(!op_inside(0xc0001100u, 0xc0001000u, 0x1000, 0x1000), "past the start, the length of the allocation: outside");
+    check(!op_inside(0xc0000f00u, 0xc0001000u, 0x1000, 16), "the data before the allocation: outside");
+    check(!op_inside(0xc0002000u, 0xc0001000u, 0x1000, 0), "the data at the allocation's end: outside");
+    check(!op_inside(0xffffff00u, 0x00000100u, 0x1000, 16), "no wrap of the difference: outside");
 }
 
 static void kinds(void)
@@ -101,6 +114,7 @@ static void stripes(void)
 int main(void)
 {
     kinds();
+    inside();
     windows();
     sums();
     stripes();

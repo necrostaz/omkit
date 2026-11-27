@@ -2,8 +2,9 @@
  * step and the worker run): a worker of the test answers after a number of the step's waits, a clock moves by the wait's
  * length. Cases: an answer; a wake-up with another number in done (a flag left set, an answer to another request); the
  * job cancelled (stop asked, the step waits on for the answer); a late worker (stop at the late limit, the step waits
- * on); a worker that never answers (abandon at the give-up limit, and only then back); the worker's view of requests.
- * Prints "ok", or what failed. */
+ * on); a worker that never answers (abandon at the give-up limit, and only then back); no new request while the worker
+ * has not answered the one given up (the abandon word kept), and one again after its late answer; the sequence's wrap;
+ * the worker's view of requests. Prints "ok", or what failed. */
 #include <stdio.h>
 #include "omk_types.h"
 #include "optwork.h"
@@ -80,7 +81,7 @@ int main(void)
 {
     ow_chan_t c = {0, 0, 0, 0};
     sim_t s;
-    u32 st, t;
+    u32 st, t, i;
 
     /* the worker sees a request until it answers */
     check(!ow_take(&c, &t), "no request at first");
@@ -129,6 +130,23 @@ int main(void)
     check(st == (OW_LATE | OW_ABANDON) && s.waits == GIVE_UP_US / 1000 / SLICE_MS && c.abandon && c.stop && s.notes == 2,
           "never answered: abandon at the give-up limit");
     check(ow_take(&c, &t) && t == s.seq, "abandoned: the worker still sees the request (it checks abandon itself)");
+
+    /* the next job while the worker is still on the request given up: nothing posted, abandon kept */
+    t = c.req;
+    check(ow_busy(&c) && ow_post(&c) == 0 && c.req == t && c.abandon && c.stop,
+          "given up and not answered: no new request, abandon and stop kept");
+    /* the worker wakes, sees abandon, answers the old number: the next job is posted, the words cleared */
+    ow_answer(&c, t);
+    check(!ow_busy(&c) && !ow_take(&c, &i), "the late answer: the channel free");
+    s = (sim_t){0};
+    s.answer_at = 2;
+    st = run(&s, &c);
+    check(st == 0 && s.seq == t + 1 && s.waits == 2 && !c.stop && !c.abandon, "after the late answer: a new request");
+
+    /* the sequence wraps past 0 (0 means "not posted") */
+    c.req = c.done = 0xffffffffu;
+    check(ow_post(&c) == 1 && c.req == 1 && ow_busy(&c), "the sequence skips 0");
+    ow_answer(&c, 1);
 
     if (!failed)
         printf("ok\n");

@@ -178,8 +178,8 @@
 #define E_NO_BUFFER 0x9ece                  /* the stock steps' "no buffer" (0x603934cf) */
 #define LAYER_MIN 42                        /* the reduction at most 16 x after the input's 1/8 (in the emulator even
                                                20 x 15 passed: a margin) */
-#define LAYER_MAX 400
-#define LAYER_LEN_MAX 0x233000u             /* the allocator's "small" buffers (0x604265ef) */
+#define LAYER_MAX 400                       /* 400 x 400 x 4 bytes: within the allocator's "small" buffers (0x233000,
+                                               0x604265ef) */
 #define H_B 11364                           /* request B = R of the passes (0x6038b214) */
 #define R_STAGE 12
 #define R_KIND 16
@@ -224,10 +224,12 @@ enum { OW_OFF, OW_TABLE, OW_LAYER, OW_FIXED, OW_NONE };   /* where a job's white
 #define H_P 4                               /* P = h+4: the cancel check's first argument */
 #define H_CANCEL 11318                      /* u16: set by the cancel check (the executor's state word) */
 #define WORKER_PRI 56                       /* below CPU 0's 93 tasks of 55; acre_Task changes only 8..11 (0x60051d78) */
-#define WORKER_STACK 8192                   /* its code ~0.3 KB deep, the window manager and dly_tsk ~0.4 KB, an
-                                               interrupt's frames on top: 4 KB would do (Caduceus' own task has 4 KB,
-                                               DMP_RD_MGR 2 KB); twice that, from a 3 MB arena. acre_Task fills it with
-                                               0xdeadbeef: the task dump shows how much was used */
+#define WORKER_STACK 8192                   /* its own code ~1.4 KB deep (-fstack-usage, the deepest way: the worker's
+                                               main 148, op_layer_work 680, ol_gauss4 308, ol_box_cols 264, op_gpace and
+                                               op_pace 40), the window manager and dly_tsk ~0.4 KB, an interrupt's frames
+                                               on top: ~6 KB stay free (Caduceus' own task has 4 KB, DMP_RD_MGR 2 KB);
+                                               from a 3 MB arena. acre_Task fills it with 0xdeadbeef: the task dump shows
+                                               how much was used */
 #define WORKER_IDLE_MS 1000                 /* the worker's wait for a request, again and again */
 #define WORKER_WAIT_MS 50                   /* the step's wait for done, between its checks */
 #define WORKER_LATE_US 2000000              /* no done after this: stop asked, logged; the wait goes on */
@@ -267,7 +269,7 @@ enum { P_NONE, P_LISTED, P_ENTER, P_WAITED, P_SLOTS, P_SLEPT, P_LOOP, P_BUSY, P_
        P_DOWN, P_DOWN_END, P_LAYER, P_LAYER_END, P_FINAL, P_N };
 
 enum { OE_NONE, OE_WAIT, OE_NOBUF, OE_SLOT, OE_ADDR, OE_MAP, OE_WIN, OE_BUDGET, OE_TASK, OE_WORKER, OE_DOWN, OE_LAYER,
-       OE_STOPPED, OE_BUFFER, OE_N };
+       OE_STOPPED, OE_BUFFER, OE_BUSY, OE_NOROW, OE_N };
 enum { CS_NONE, CS_NOTARMED, CS_NOTWINDOW, CS_BEGUN, CS_DONE };
 
 typedef struct {
@@ -567,8 +569,7 @@ static u32 op_frame_check(const u8 *s, u32 *detail)
     if (!w || !hh || pitch < w || (bus & 3))
         return OE_SLOT;
     *detail = len;
-    if (bus < alloc || bus - alloc >= len || len - (bus - alloc) < OPT_READ ||
-        len - (bus - alloc) < (u32)pitch * 2 * hh)
+    if (!op_inside(bus, alloc, len, OPT_READ) || !op_inside(bus, alloc, len, (u32)pitch * 2 * hh))
         return OE_SLOT;                     /* the picture and the MiB inside the allocation */
     return 0;
 }
@@ -826,7 +827,9 @@ void drv_optics_worker_main(void)
  * 54. Between the waits: the job's cancel check (as the stock waits call it, 0x6038a8a5) - stop asked, the wait goes on;
  * WORKER_LATE_US - stop asked, a crumb, the wait goes on: the step does not return while the worker may touch the
  * picture. Only after WORKER_GIVE_UP_US (the worker stuck in a firmware call, or dead) the step gives up - abandon,
- * which the worker checks before every access to the picture - so that the camera does not hang for good */
+ * which the worker checks before every access to the picture - so that the camera does not hang for good. Until the
+ * worker answers a request given up, no job hands it a new one (OE_BUSY, the chain left out): a new request would clear
+ * the abandon word while the worker may still be on the old job's buffers, freed by then (ow_post) */
 typedef struct {
     volatile op_t *o;
     volatile op_rec_t *r;
@@ -873,8 +876,18 @@ static void op_delegate(volatile op_t *o, volatile op_rec_t *r, u8 *h)
         return;
     }
     r->w_task = o->w_tid;
+    if (ow_busy((ow_chan_t *)&o->ch)) {
+        r->err = OE_BUSY;                   /* still on a request given up: not a new one before its answer */
+        r->detail = o->ch.req;
+        return;
+    }
     o->w_rec = (u32)r;
     seq = ow_post((ow_chan_t *)&o->ch);
+    if (!seq) {
+        r->err = OE_BUSY;
+        r->detail = o->ch.req;
+        return;
+    }
     CR_PUT(CR_WORK, (seq & 0xffff) | (o->ch.done & 0xffff) << 16);
     op_crumb(r->job, r->sub, P_HANDED);
     x.o = o;
@@ -1041,18 +1054,27 @@ static void op_put(u8 *h, u32 k, u32 fn)
     }
 }
 
+/* 1 - the entries after our step k are the layer's chain W put there on the route `route` (PAIR: 0x603932cb, 0x603934ba;
+ * 403: our last step) */
+static int op_chain(const u8 *h, u32 k, u32 route)
+{
+    if (route == DRV_OPTICS_PAIR)
+        return k + 2 < STEPS && *(const u32 *)(h + H_STEPS + 12 * (k + 1)) == STEP_SF_UP &&
+               *(const u32 *)(h + H_STEPS + 12 * (k + 2)) == STEP_SF_OUT;
+    return k + 1 < STEPS && *(const u32 *)(h + H_STEPS + 12 * (k + 1)) == (u32)drv_tramp_optics_final;
+}
+
 /* The chain left out (step k is ours): PAIR - the firmware's CPU step that only waits in place of 0x603932cb (so that it
  * makes no reduction of its own and no 0x1061), the plain pass to the outputs in place of 0x603934ba; 403 - the plain pass
  * in place of our last step. Only entries that are the ones W put there */
 static void op_fallback(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 k)
 {
     if (r->route == DRV_OPTICS_PAIR) {
-        if (k + 2 < STEPS && *(const u32 *)(h + H_STEPS + 12 * (k + 1)) == STEP_SF_UP &&
-            *(const u32 *)(h + H_STEPS + 12 * (k + 2)) == STEP_SF_OUT) {
+        if (op_chain(h, k, DRV_OPTICS_PAIR)) {
             op_put(h, k + 1, STEP_STOCK);
             op_put(h, k + 2, STEP_OUT);
         }
-    } else if (k + 1 < STEPS && *(const u32 *)(h + H_STEPS + 12 * (k + 1)) == (u32)drv_tramp_optics_final) {
+    } else if (op_chain(h, k, DRV_OPTICS_403)) {
         op_put(h, k + 1, STEP_OUT);
     }
     r->fallback = 1;
@@ -1060,15 +1082,11 @@ static void op_fallback(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 k)
     op_crumb(r->job, r->sub, P_FINAL);
 }
 
-/* The layer's size for a picture W x H: the configured width, the height by the aspect */
+/* The layer's size for a picture W x H (optlayer.h's ol_layer_size): the configured width, the height by the aspect; a
+ * picture higher than wide turned (its height the configured width) */
 static u32 op_layer_size(volatile op_t *o, u32 W, u32 H)
 {
-    u32 lw = o->cfg.width, lh;
-
-    lh = W ? (lw * H + W / 2) / W : 0;
-    if (lh < LAYER_MIN)
-        lh = LAYER_MIN;
-    return lw | lh << 16;
+    return ol_layer_size(o->cfg.width, W, H, LAYER_MIN);
 }
 
 /* The step's part from L0 on (the job task, after the wait for the development's pass and the checks of the slots and
@@ -1139,9 +1157,11 @@ static void op_layer_step(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wai
     r->l_pitch = pitch;
     r->l_len = len;
     r->detail = *(const u16 *)(s + SL_FORMAT);
+    /* the layer [l_bus, l_bus + pitch 4 hh) inside its allocation, as op_frame_check has it for the picture: the data
+     * may start past the allocation's start (not seen on the camera: l_bus was the allocation's start in every log) */
     if (*(const u32 *)(s + SL_TYPE) != BUF_SMALL || r->detail != FMT_LAYER || !w || !hh || pitch < w ||
-        (r->l_asked && r->l_wh != r->l_asked) || (r->l_bus & 3) || r->l_bus < *(const u32 *)(s + SL_ALLOC) ||
-        len < pitch * 4 * hh || w > LAYER_MAX || hh > LAYER_MAX) {
+        (r->l_asked && r->l_wh != r->l_asked) || (r->l_bus & 3) || w > LAYER_MAX || hh > LAYER_MAX ||
+        !op_inside(r->l_bus, *(const u32 *)(s + SL_ALLOC), len, pitch * 4 * hh)) {
         r->err = OE_LAYER;                  /* detail: the format */
         goto fail;
     }
@@ -1828,7 +1848,7 @@ u32 drv_optics_step(u8 *h)
 {
     volatile op_t *o = op();
     volatile op_rec_t *r;
-    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, stk = 0, stksz = 0, set = 0, str = 0, task = 0;
+    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, stk = 0, stksz = 0, set = 0, str = 0, task = 0, norow = 1;
 #ifdef OMK_DEBUG
     u32 psw, sp, mode = 0;
 #endif
@@ -1836,6 +1856,7 @@ u32 drv_optics_step(u8 *h)
     if (!h)
         return 0;
     if (o && (i = op_row(o, (u32)h)) < ROWS) {
+        norow = 0;
         sub = o->row[i].sub;
         job = o->row[i].job;
         set = o->row[i].set;
@@ -1902,6 +1923,15 @@ u32 drv_optics_step(u8 *h)
         r->t_wait = t;
         r->wait_rc = rc;
         op_probe(o, r, h, rc);
+        if (norow && o->layer_on && op_chain(h, k, o->cfg.route)) {
+            /* no row (W gave the job one; it was taken by another job since - a leak of rows): the step does nothing
+             * at substage A, but the chain W listed is in place, and without the row the blend hook would not make the
+             * blend additive - the firmware's Soft Focus on the still. Left out as on any failure (review M7) */
+            r->sub = DRV_OPTICS_L4;
+            r->route = o->cfg.route;
+            r->err = OE_NOROW;
+            op_fallback(o, r, h, k);
+        }
         r->seq = seq + 1;
     }
     if (k < STEPS)
@@ -2057,6 +2087,19 @@ static u32 op_mulhi_ref(u32 x, u32 m)
     return xh * mh + (lh >> 16) + (hl >> 16) + (((xl * ml) >> 16) + (lh & 0xffff) + (hl & 0xffff)) / 65536;
 }
 
+/* The read's table sums of the words [row, end) in plain C - the reference for ol_read_pack and ol_read_pack0, whose
+ * own C (ol_read_run, ol_read_run0) loads through OL_TABW's assembly: Y0's entry, and with both Y1's too */
+static u32 op_read_ref(const u32 *row, const u32 *end, const u32 *tab, u32 both)
+{
+    u32 s = 0, w;
+
+    do {
+        w = *row++;
+        s += tab[w & 0xff] + (both ? tab[w >> 16 & 0xff] : 0);
+    } while (row != end);
+    return s;
+}
+
 /* One extended box along n values (stride step) by its definition, the edges clamped, the compiler's multiplication: the
  * first version of the layer's box (the host test's reference), for the start check */
 static void op_box_ref(u16 *v, u32 n, u32 step, u32 r, u32 alpha, u16 *tmp)
@@ -2078,13 +2121,14 @@ static void op_box_ref(u16 *v, u32 n, u32 step, u32 r, u32 alpha, u16 *tmp)
 
 /* Core task, at the layer's set-up: the kernels that use the extension unit or assembly against plain C, on scratch at
  * b (uncached, KCHECK_BYTES and a small layer after it; any CPU): OL_MUL against the compiler's mul, ol_mulhi against
- * op_mulhi_ref (64 pairs each), ol_read_pack loading bytes and loading words against ol_read_run (8 cells of a
- * pseudo-random row), and ol_gauss (its row and column kernels with the unit's multiplies: two columns a step and one)
- * against op_box_ref's passes on small sparse planes; Bloom's colour (card173): ol_gauss4 (its packed rows) against
- * ol_gauss on each of its four planes, ol_colour_at and ol_bloom_chroma (packed halves) against the arithmetic a value
- * at a time. In the emulator this runs at every start, on the camera too - a kernel the CPU computes otherwise keeps the
- * layer off. 0, or a bit set: 1 OL_MUL, 2 ol_mulhi, 4 the read by bytes, 8 by words, 16 the Gaussian, 32 the cover read
- * by bytes, 64 by words, 128 the Gaussian of four, 256 the colour's interpolation and chroma */
+ * op_mulhi_ref (64 pairs each), ol_read_pack and ol_read_pack0 loading bytes and loading words, and the general loops
+ * ol_read_run and ol_read_run0, against the table's sums in plain C (op_read_ref: 8 cells of a pseudo-random row), and
+ * ol_gauss (its row and column kernels with the unit's multiplies: two columns a step and one) against op_box_ref's
+ * passes on small sparse planes; Bloom's colour (card173): ol_gauss4 (its packed rows) against ol_gauss on each of its
+ * four planes, ol_colour_at and ol_bloom_chroma (packed halves) against the arithmetic a value at a time. In the emulator
+ * this runs at every start, on the camera too - a kernel the CPU computes otherwise keeps the layer off. 0, or a bit
+ * set: 1 OL_MUL, 2 ol_mulhi, 4 the read by bytes (or ol_read_run), 8 by words, 16 the Gaussian, 32 the cover read by
+ * bytes (or ol_read_run0), 64 by words, 128 the Gaussian of four, 256 the colour's interpolation and chroma */
 #define KCHECK_CELLS 8
 static u32 op_kcheck_colour(u8 *b, u32 x);
 #define KCHECK_BYTES (1024 + 4 * OL_READ_RUN * KCHECK_CELLS + 4 * KCHECK_CELLS)
@@ -2117,16 +2161,24 @@ static u32 op_kcheck(u8 *b)
             out[i] = 0;
         ol_read_pack(row, out, out + KCHECK_CELLS, tab, !k);
         for (i = 0; i < KCHECK_CELLS; i++)
-            if (out[i] != ol_read_run(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab))
+            if (out[i] != op_read_ref(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab, 1))
                 e |= 4 << k;
+    }
+    for (i = 0; i < KCHECK_CELLS; i++) {    /* the general loops (a layer of another width): their OL_TABW loads */
+        if (ol_read_run(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab) !=
+            op_read_ref(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab, 1))
+            e |= 4;
+        if (ol_read_run0(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab) !=
+            op_read_ref(row + OL_READ_RUN * i, row + OL_READ_RUN * (i + 1), tab, 0))
+            e |= 32;
     }
     for (k = 0; k < 4; k++) {               /* the cover read's loop: bytes and words, stored and added */
         for (i = 0; i < KCHECK_CELLS; i++)
             out[i] = i * 0x00010003u;
         ol_read_pack0(row, out, out + KCHECK_CELLS, tab, !(k & 1), k >> 1);
         for (i = 0; i < KCHECK_CELLS; i++)
-            if (out[i] != (k >> 1 ? i * 0x00010003u : 0) + ol_read_run0(row + OL_READ_RUN * i,
-                                                                      row + OL_READ_RUN * (i + 1), tab))
+            if (out[i] != (k >> 1 ? i * 0x00010003u : 0) + op_read_ref(row + OL_READ_RUN * i,
+                                                                     row + OL_READ_RUN * (i + 1), tab, 0))
                 e |= 32 << (k & 1);
     }
     for (k = 0; k < 4; k++) {               /* widths 20 (pairs) and 21; sigma 3 (r 2) and 1.18 layer px (r 0) */
@@ -2451,8 +2503,8 @@ int drv_optics_worker_test(u32 *us, u32 *work, u32 *state)
     ow_env_t e;
     u32 seq, i;
 
-    if (!o || !o->w_tid)
-        return -1;
+    if (!o || !o->w_tid || ow_busy((ow_chan_t *)&o->ch))
+        return -1;                          /* no worker, or it has not answered a request given up */
     r = &o->test;
     for (i = 0; i < sizeof(op_rec_t) / 4; i++)
         ((volatile u32 *)r)[i] = 0;
@@ -2492,7 +2544,9 @@ static const char *op_err(u32 e)
                                            "time budget used up", "not the task REC_IMAGE (0x20)",
                                            "no worker task", "no small frame from the reduction",
                                            "small frame not as expected", "the worker stopped or was late",
-                                           "a small frame there already"};
+                                           "a small frame there already",
+                                           "the worker task has not answered a job given up yet",
+                                           "the job has no row of the layer's jobs"};
 
     return e < OE_N ? name[e] : "?";
 }

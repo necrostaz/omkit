@@ -499,9 +499,14 @@ static inline u32 ol_bitrev4(u32 j)
 }
 
 /* A word of a table at a byte offset: the CPU's indexed load (mov (Di,Am),Dn of the base instruction set, which the
- * firmware's own code uses throughout; the compiler does not make it for this CPU), plain C elsewhere */
+ * firmware's own code uses throughout; the compiler does not make it for this CPU), plain C elsewhere. The table's 256
+ * words are an input of the statement ("m"): the compiler keeps the load after any write to the table before it */
 #ifdef __mn10300__
-#define OL_TABW(t, off) ({                                                                                                  u32 ol_v_;                                                                                                              __asm__("mov (%1,%2),%0" : "=d"(ol_v_) : "d"(off), "a"(t));                                                             ol_v_;                                                                                                              })
+#define OL_TABW(t, off) ({                                                                                          \
+    u32 ol_v_;                                                                                                      \
+    __asm__("mov (%1,%2),%0" : "=d"(ol_v_) : "d"(off), "a"(t), "m"(*(const u32 (*)[256])(t)));                     \
+    ol_v_;                                                                                                          \
+})
 #else
 #define OL_TABW(t, off) (*(const u32 *)((const u8 *)(t) + (off)))
 #endif
@@ -525,7 +530,7 @@ static OL_KERNEL u32 ol_read_run(const volatile u32 *row, const volatile u32 *en
  * Halation << 16 (16 pixels: each half below 65536), for out .. end (at least one cell). bytes 1: the two Y bytes of a
  * word loaded as bytes (through the cache a load costs the same, and no shift or mask is needed); 0: each word loaded
  * once and split (past the cache each load goes to the bus). On the camera an unrolled loop of 8 (bytes) or 10 (words)
- * instructions a word; the same sums as ol_read_run (drv_optics_layer checks the two against each other at start) */
+ * instructions a word; the same sums as ol_read_run (drv_optics_layer checks both against plain C at start) */
 static OL_KERNEL void ol_read_pack(const volatile u32 *row, u32 *out, const u32 *end, const u32 *tab, u32 bytes)
 {
 #ifdef __mn10300__
@@ -644,7 +649,7 @@ static OL_KERNEL u32 ol_read_run0(const volatile u32 *row, const volatile u32 *e
 
 /* ol_read_pack's cover read: out[cx] = the Y0 sums of a cell of OL_READ_RUN words (Bloom | Halation << 16), added to
  * out[cx] when add (the second row of a row of cells), else stored; bytes as ol_read_pack's. On the camera an unrolled
- * loop of 4 (bytes) or 5 (words) instructions a word; drv_optics_layer checks it against ol_read_run0 at start */
+ * loop of 4 (bytes) or 5 (words) instructions a word; drv_optics_layer checks it against plain C at start */
 #ifdef __mn10300__
 #define OL_PACK0(first, load, mask)                                                                                         \
     "1:\n\t" first "\n\t.irp k,0,8,16,24\n\t" load " (\\k,%3),%1\n\t" load " (\\k+4,%3),%2\n\t"                        \
@@ -811,14 +816,17 @@ static inline u32 ol_isqrt(u32 v)
 
 /* The extended box for one pass of the cascade: radius *r and the end weight *alpha (Q8) whose variance is sigma^2 /
  * OL_BOX_PASSES (sigma Q8, at most OL_SIGMA_MAX). The variance of a box of radius r is r (r + 1) / 3; with the ends at
- * weight a: (r (r + 1) (2r + 1) / 3 + 2a (r + 1)^2) / (2r + 1 + 2a) - solved for a */
+ * weight a: (r (r + 1) (2r + 1) / 3 + 2a (r + 1)^2) / (2r + 1 + 2a) - solved for a. The radius's test and the box's
+ * own term are rounded down apart, so v can lie a fraction of a unit below the box's variance (sigma 362 and 4222):
+ * the numerator is then 0, not a wrap of the unsigned difference (which gave a 255 there, three times the variance) */
 static inline void ol_box_plan(u32 sigma, u32 *r, u32 *alpha)
 {
-    u32 v = sigma * sigma / OL_BOX_PASSES >> 8, k = 0, num, den;   /* v: the variance a pass, Q8 */
+    u32 v = sigma * sigma / OL_BOX_PASSES >> 8, k = 0, num, den, box;   /* v: the variance a pass, Q8 */
 
     while ((k + 1) * (k + 2) * 256 / 3 <= v)
         k++;
-    num = v * (2 * k + 1) - k * (k + 1) * (2 * k + 1) * 256 / 3;
+    box = k * (k + 1) * (2 * k + 1) * 256 / 3;
+    num = v * (2 * k + 1) > box ? v * (2 * k + 1) - box : 0;
     den = 2 * (k + 1) * (k + 1) * 256 - 2 * v;
     *r = k;
     *alpha = den ? (num << 8) / den : 0;
@@ -1625,6 +1633,25 @@ static inline u32 ol_cpu_sigma(u32 sigma, u32 floor, u32 W, u32 lw)
         return 0;
     v = ol_isqrt(sigma * sigma - floor * floor);     /* pixels of the picture, sigma below 65536 */
     return v * lw / W * 256 + (v * lw % W) * 256 / W;
+}
+
+/* The layer's size for a picture W x H: w | h << 16. Its longer side is `side` (the configured width: the worker's buffer
+ * is made for a square of it), the other by the aspect, at least `min`. The picture comes 4:3 (5184 x 3888 in every log of
+ * the cards, the 3:2 stills too: the crop to the aspect comes after the job), so W >= H and the layer is side wide, as
+ * before. A picture higher than wide (not seen; a 3:4 still if it ever came cropped) gets the layer turned: side high,
+ * its width even (the reduction was run with even widths only) - not the fallback of a layer higher than LAYER_MAX */
+static inline u32 ol_layer_size(u32 side, u32 W, u32 H, u32 min)
+{
+    u32 a;
+
+    if (!W || !H)
+        return side | min << 16;
+    if (H > W) {
+        a = (side * W + H / 2) / H & ~1u;
+        return (a < min ? min : a) | side << 16;
+    }
+    a = (side * H + W / 2) / W;
+    return side | (a < min ? min : a) << 16;
 }
 
 /* The smallest sigma (pixels of the picture) of the transport for a layer lw wide on a picture W wide: the camera's ART

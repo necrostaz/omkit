@@ -225,6 +225,72 @@ static void blurs(void)
           "the integer square root");
 }
 
+/* The variance of one pass's kernel, from the kernel itself (not ol_box_plan's formula): weight 1 at |i| <= r, a / 256 at
+ * |i| = r + 1; the second moment over the sum */
+static double box_var(u32 r, u32 a)
+{
+    double sw = 0, sv = 0, w;
+    s32 i;
+
+    for (i = -(s32)r - 1; i <= (s32)r + 1; i++) {
+        w = (u32)(i < 0 ? -i : i) <= r ? 1.0 : a / 256.0;
+        sw += w;
+        sv += w * i * i;
+    }
+    return sv / sw;
+}
+
+/* ol_box_plan for every sigma 0.25 .. OL_SIGMA_MAX layer pixels (Q8) against the kernel's own variance: a pass's
+ * variance within one step of the end weight (and the rounding of v) of sigma^2 / OL_BOX_PASSES; for sigma >= 1 the
+ * cascade's sigma within 1 %. Review M1 (2026-11-27): sigma 362 and 4222 gave the end weight 255, not 0 */
+static void plans(void)
+{
+    u32 s, r, a, bad = 0, first = 0;
+    double want, var, step;
+    char what[96];
+
+    for (s = 64; s <= OL_SIGMA_MAX; s++) {
+        ol_box_plan(s, &r, &a);
+        want = (double)s * s / 65536.0 / OL_BOX_PASSES;
+        var = box_var(r, a);
+        step = box_var(r, a < 256 ? a + 1 : a) - var;
+        if (r > OL_R_MAX || a > 255 || var - want > step + 1.0 / 256 + 1e-9 || want - var > step + 1.0 / 256 + 1e-9 ||
+            (s >= 256 && (var > want * 1.0201 || var < want * 0.9801))) {
+            if (!bad++)
+                first = s;
+        }
+    }
+    snprintf(what, sizeof(what), "the box plans: %u sigmas off their variance (the first %u)", bad, first);
+    check(!bad, what);
+    ol_box_plan(362, &r, &a);
+    check(r == 1 && a < 8, "sigma 362: radius 1, an end weight near 0");
+    ol_box_plan(4222, &r, &a);
+    check(r == 16 && a < 8, "sigma 4222: radius 16, an end weight near 0");
+}
+
+/* The layer's size by the picture's aspect (review B3): 4:3 and 3:2 as before (the configured width, the height by the
+ * aspect); a picture higher than wide turned - its height the configured width, an even width - and its planes within
+ * the worker's buffer (made for a square of the width) */
+static void sizes(void)
+{
+    ol_t o;
+    uptr sq, pt;
+    u8 cwp[400];
+
+    check(ol_layer_size(324, 5184, 3888, 42) == (324 | 243u << 16), "size: 4:3 - 324 x 243");
+    check(ol_layer_size(324, 5184, 3456, 42) == (324 | 216u << 16), "size: 3:2 - 324 x 216");
+    check(ol_layer_size(324, 3888, 3888, 42) == (324 | 324u << 16), "size: 1:1 - 324 x 324");
+    check(ol_layer_size(324, 2916, 3888, 42) == (242 | 324u << 16), "size: 3:4 - 242 x 324 (turned, the width even)");
+    check(ol_layer_size(324, 5184, 100, 42) == (324 | 42u << 16), "size: a strip - the height at least the minimum");
+    check(ol_layer_size(324, 100, 5184, 42) == (42 | 324u << 16), "size: a high strip - the width at least the minimum");
+    check(ol_layer_size(324, 5184, 0, 42) == (324 | 42u << 16) && ol_layer_size(324, 0, 0, 42) == (324 | 42u << 16),
+          "size: no height or width - the minimum, as before");
+    sq = ol_layout(&o, 0, 324, 324);
+    pt = ol_layout(&o, 0, 242, 324);
+    check(pt <= sq, "size: the turned layer's planes within the square's buffer");
+    check(!ol_columns(cwp, 2916, 242), "size: 2916 / 242 - columns made");
+}
+
 static void words(void)
 {
     ol_t o;
@@ -388,7 +454,8 @@ static u32 gauss_same(u32 lw, u32 lh, u32 kind, u32 s1, u32 s2, u32 mix, u32 *do
 
 static void gauss_equal(void)
 {
-    static const u32 sizes[][2] = {{324, 243}, {40, 30}, {41, 29}, {8, 6}, {3, 2}, {1, 7}, {7, 1}, {2, 2}, {250, 188}};
+    static const u32 sizes[][2] = {{324, 243}, {40, 30}, {41, 29}, {8, 6}, {3, 2}, {1, 7}, {7, 1}, {2, 2}, {250, 188},
+                                   {242, 324}};
     static const u32 sig[] = {64, 100, 302, 500, 768, 1100, 1500, 2500, 4000, 8192, 9000};
     u32 si, gi, k, m, worst = 0, done, all, sparse_done = 0, sparse_all = 0, dense_ok = 1;
     char what[160];
@@ -1406,6 +1473,8 @@ int main(int argc, char **argv)
     columns();
     reads();
     blurs();
+    plans();
+    sizes();
     words();
     lanes();
     gauss_equal();

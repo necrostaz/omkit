@@ -41,6 +41,13 @@ static inline u32 op_bus_kind(u32 a, u32 len)
     return OP_BUS_DIRECT;
 }
 
+/* 1 - the data [bus, bus + need) lies inside its allocation [alloc, alloc + len): a job buffer's slot gives the data's
+ * bus address and the allocation's start and length, and the data need not start at the allocation's start */
+static inline int op_inside(u32 bus, u32 alloc, u32 len, u32 need)
+{
+    return bus >= alloc && bus - alloc < len && len - (bus - alloc) >= need;
+}
+
 /* The uncached address of a DRAM buffer (OP_BUS_DIRECT) */
 static inline u32 op_direct(u32 a)
 {

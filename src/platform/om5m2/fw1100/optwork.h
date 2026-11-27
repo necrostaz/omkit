@@ -4,7 +4,9 @@
  *
  * The words: req (the step writes it), done (the worker, after its last access to the picture), stop and abandon (the
  * step; the worker looks at both between its parts and touches no buffer after either). One request at a time: the job
- * task runs one job at a time, and a step returns only when the worker has answered - or after give_up_us. */
+ * task runs one job at a time, and a step returns only when the worker has answered - or after give_up_us. A request
+ * given up (abandon) stays the worker's until it answers it: no new one is posted before that (ow_post gives 0), so
+ * nothing clears the abandon word while the worker may still be on the old request's buffers. */
 #ifndef OMK_OPTWORK_H
 #define OMK_OPTWORK_H
 
@@ -22,12 +24,23 @@ typedef struct {
     void *ctx;
 } ow_env_t;
 
-/* The step: a new request; its sequence number */
+/* 1 - the worker has not answered the last request yet (a request given up after give_up_us, or one under way) */
+static inline int ow_busy(const ow_chan_t *c)
+{
+    return c->done != c->req;
+}
+
+/* The step: a new request; its sequence number (never 0), or 0 - the worker has not answered the last one (ow_busy):
+ * nothing posted, stop and abandon left as they are, the caller goes on without the worker */
 static inline u32 ow_post(ow_chan_t *c)
 {
+    if (ow_busy(c))
+        return 0;
     c->stop = 0;
     c->abandon = 0;
-    return ++c->req;
+    if (++c->req == 0)                      /* 0 means "not posted": the sequence skips it when it wraps */
+        c->req = 1;
+    return c->req;
 }
 
 /* The step: wait for the answer to request seq, slice_ms a wait. The job cancelled - stop asked, the wait goes on; no
