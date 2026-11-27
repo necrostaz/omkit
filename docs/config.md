@@ -131,6 +131,23 @@ release's `OMKIT.INI`. With `enabled = on`, anyone who connects the camera by US
 `write`, `ring_level`, `tasks`, `window_ms`, `window_every`, `stuck_ms`), the security notes and the computer's tool:
 [debug.md](debug.md). An unknown key in `[debug]` gets the warning `config: [debug] KEY unknown`.
 
+### 5.2. `[optics]`
+
+Bloom and Halation on the film look's stills: `core` computes them, a look module (FILMLOOK) lets the user choose their
+strength 0..5 per preset ([modules/filmlook/optics.md](modules/filmlook/optics.md)). The section is read at power-on.
+
+| Key | Type | Default | Effect |
+|---|---|---|---|
+| `layer` | switch | `on` | `off` - no Bloom and Halation, and no rows for them in the look's column |
+| `jobs` | text | `first` | RAW+JPEG: `first` - the effects on the JPEG only; `both` - also on the preview inside the ORF |
+| `white` | text or number | `auto` | the scale of the codes below: `auto` - the white of the preset in force; `off` - 0..255; 160..255 - fixed |
+| `bloom_*` | numbers | | the look of Bloom: `bloom_gain`, `bloom_steps`, `bloom_threshold`, `bloom_emission`, `bloom_sigma`, `bloom_tail`, `bloom_tail_sigma`, `bloom_dark`, `bloom_toe`, `bloom_max`, `bloom_colour` |
+| `halation_*` | numbers | | the look of Halation: `halation_gain`, `halation_steps`, `halation_threshold`, `halation_emission`, `halation_sigma`, `halation_dark`, `halation_toe`, `halation_max`, `halation_cb`, `halation_cr`, `halation_edge_cb`, `halation_edge_cr`, `halation_edge_code`, `halation_core` |
+
+Every key, its default, range and when to change it: [modules/filmlook/optics.md section
+6](modules/filmlook/optics.md#6-settings-optics). A number out of range is clamped, with the warning
+`optics: KEY = N out of LO..HI, D taken`. Other keys of `[optics]` are for development: leave them out.
+
 ## 6. Keys `core` reads in every module's section
 
 A module's section is named after the module: `[CREATPRF]`, `[FILMLOOK]`. Besides the module's own keys, `core` reads two
