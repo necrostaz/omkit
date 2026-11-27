@@ -1362,7 +1362,11 @@ static void test_layer_default(int phase)
     CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 180, sigma 90 + 0 at 0%, gain 110% at 5"));
     CHECK(t && strstr(t, "optics: probe level 0: a step in the look's stills on the mask route; the stills get L4"));
 #else
-    CHECK(t && strstr(t, "optics: Bloom and Halation on: the strengths by the look's rows; Bloom threshold 180, sigma 90, "));
+    CHECK(t && strstr(t, phase == 3 ?
+                      "optics: Bloom and Halation on: the strengths by the look's rows; Bloom threshold 180, sigma 90, "
+                      "gain 90; Halation threshold 240, sigma 45, gain 220\r\n" :
+                      "optics: Bloom and Halation on: the strengths by the look's rows; Bloom threshold 180, sigma 90, "
+                      "gain 110; Halation threshold 240, sigma 45, gain 220\r\n"));
     CHECK(t && !strstr(t, "optics: layer: ") && !strstr(t, "optics: probe") && !strstr(t, "optics: schedule") &&
           !strstr(t, "optics: bisect"));
     CHECK(host_probes == 0);                                /* no word of the camera's state read */

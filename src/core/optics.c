@@ -945,9 +945,11 @@ void optics_setup(void)
     drv_optics_layer_floor(5184, &ws, &wb);
     drv_optics_sub(DRV_OPTICS_L4);
     op.on = 1;
+    (void)wb;
     log_printf(OMK_LOG_INFO, "optics: Bloom and Halation on: the strengths by the look's rows; Bloom threshold %u, sigma %u, "
-               "gain %u; Halation threshold %u, sigma %u, gain %u; the worker's buffer %u bytes", lc.tb, lc.sb & 0xffff,
-               lc.gb * 100 / 256, lc.th, lc.sh & 0xffff, lc.gh * 100 / 256, ws);
+               "gain %u; Halation threshold %u, sigma %u, gain %u", lc.tb, lc.sb & 0xffff, (lc.gb * 100 + 128) / 256, lc.th,
+               lc.sh & 0xffff, (lc.gh * 100 + 128) / 256);
+    log_printf(OMK_LOG_INFO, "optics: the worker's buffer %u bytes", ws);
 }
 #endif
 
