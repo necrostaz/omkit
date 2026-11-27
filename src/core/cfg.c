@@ -31,6 +31,61 @@ static const char cfg_template[] =
     "; colour grain on colour presets, 0..1024 (0 - none; never on black and white presets)\r\n"
     "chroma = 0\r\n"
     "\r\n"
+    "[optics]\r\n"
+    "; Bloom and Halation on the film look's stills. The strength of each is the preset's Bloom and Halation row\r\n"
+    "; in the look's column: 0 - off, 1..5. off here - no Bloom and Halation at all\r\n"
+    "layer = on\r\n"
+    "; The values below are the defaults. The glow starts at the code *_threshold of the picture (0..254);\r\n"
+    "; *_sigma - its size in pixels of the picture; *_gain - the light added at strength 5, percent\r\n"
+    "; Bloom: a diffusion filter. bloom_tail percent of its light in a long tail of bloom_tail_sigma pixels;\r\n"
+    "; bloom_dark - percent less on bright places; bloom_max - at most this percent of white;\r\n"
+    "; bloom_colour - percent of the colour of its sources (0 - neutral)\r\n"
+    "bloom_threshold = 180\r\n"
+    "bloom_sigma = 90\r\n"
+    "bloom_gain = 110\r\n"
+    "bloom_dark = 80\r\n"
+    "bloom_tail = 50\r\n"
+    "bloom_tail_sigma = 400\r\n"
+    "bloom_haze = 0\r\n"
+    "bloom_toe = 0\r\n"
+    "bloom_max = 38\r\n"
+    "bloom_colour = 300\r\n"
+    "; Halation: the red glow around lamps. halation_cb, halation_cr - its colour where it is strong,\r\n"
+    "; halation_edge_cb, halation_edge_cr - at its weak edge, the strong colour from the code halation_edge_code;\r\n"
+    "; halation_core = 1 - a lamp's core stays white; halation_toe, halation_max - percent of white\r\n"
+    "halation_threshold = 240\r\n"
+    "halation_sigma = 45\r\n"
+    "halation_gain = 220\r\n"
+    "halation_dark = 100\r\n"
+    "halation_cb = -24\r\n"
+    "halation_cr = 42\r\n"
+    "halation_edge_cb = -40\r\n"
+    "halation_edge_cr = 75\r\n"
+    "halation_edge_code = 70\r\n"
+    "halation_core = 1\r\n"
+    "halation_toe = 3\r\n"
+    "halation_max = 60\r\n"
+    "; The source: a blown pixel stands for this many whites (0 - only the excess over the threshold);\r\n"
+    "; emission - for both when given, else each its own\r\n"
+    "emission = 16\r\n"
+    "bloom_emission = 4\r\n"
+    "halation_emission = 32\r\n"
+    "; 1 - the halation takes its colour before Bloom is added\r\n"
+    "halation_first = 1\r\n"
+    "; The strengths 1..5 in percent of the gains\r\n"
+    "bloom_steps = 20, 32, 50, 71, 100\r\n"
+    "halation_steps = 10, 19, 34, 80, 140\r\n"
+    "; A day scene (the picture's mean code from..to, or the percent of it at code 200 from..to) may take\r\n"
+    "; day_bloom and day_halation percent of the gains; 100 - the same by day and by night\r\n"
+    "day_mean = 95, 125\r\n"
+    "day_share = 6, 14\r\n"
+    "day_bloom = 100\r\n"
+    "day_halation = 100\r\n"
+    "; auto - the codes on the scale of the look's white; off - as they are; 160..255 - a fixed white\r\n"
+    "white = auto\r\n"
+    "; first - of a RAW+JPEG press only the JPEG gets the layer; both - the preview in the ORF too\r\n"
+    "jobs = first\r\n"
+    "\r\n"
     "[modules]\r\n"
     "; off - do not load any modules\r\n"
     "enabled = on\r\n"
@@ -290,12 +345,15 @@ int cfg_debug_section(const char *section)
     return 0;
 #else
     static const char *const sections[] = {"debug", "shoot"};
+    static const char sets[] = "optics.";   /* [optics.A] ...: the further sets of the optics layer's test schedule */
     u32 i;
 
     for (i = 0; i < sizeof(sections) / sizeof(sections[0]); i++)
         if (str_ieq(section, sections[i]))
             return 1;
-    return 0;
+    for (i = 0; sets[i] && lower(section[i]) == sets[i]; i++)
+        ;
+    return !sets[i];
 #endif
 }
 

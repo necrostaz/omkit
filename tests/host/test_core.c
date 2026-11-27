@@ -1291,6 +1291,90 @@ static void test_layer_rows(void)
     free(t);
 }
 
+/* The layer without an [optics] section (1; with the sample's, 2: the same) - on, the field set's values, the stills get
+ * L4, the look's optics rows wanted, the worker made by the service; 3 - a release build with a debug build's keys:
+ * none read, one warning; 4 - layer = off: nothing installed. For both build kinds but 3 */
+extern u32 host_opt_installs;
+
+static void test_layer_default(int phase)
+{
+    long n;
+    char *t;
+
+    omk_dir(LOG_DIR);
+    if (phase == 1)
+        write_file("OMKIT.INI", "[core]\nlog = on\n");
+    else if (phase == 3)
+        write_file("OMKIT.INI", "[optics]\nprobe = 2\nbisect = 3\nschedule = W0, L4:A\nbloom = 5\nhalation = 5\nbench = 1\n"
+                                "route = 403\nlayer_width = 100\nlayer_bytes = 210\nread = 0\nread_cached = 0\n"
+                                "layer_cached = 0\ngamma = 300\nworker_test = 3\nbloom_gain = 90\n"
+                                "[optics.A]\nbloom_gain = 500\n");
+    else if (phase == 4)
+        write_file("OMKIT.INI", "[optics]\nlayer = off\n");
+    CHECK(cfg_load() == (phase == 2 ? 0 : 1));              /* 2: no file - the sample written and taken */
+    log_setup(1, OMK_LOG_INFO);
+    host_prev_ended = 1;
+    host_opt_worker_rc = 0;
+    host_opt_sub = 99;
+    host_look_rows = 0;
+    host_opt_installs = 0;
+    memset(&host_opt_layer, 0, sizeof(host_opt_layer));
+    memset(&host_opt, 0, sizeof(host_opt));
+    optics_setup();
+    if (phase == 4) {
+        CHECK(host_opt_installs == 0 && host_opt_sub == 99 && host_look_rows == 0 && !optics_route());
+        optics_service(1000);
+        CHECK(host_opt_installs == 0 && host_probes == 0);
+        return;
+    }
+    CHECK(host_opt_installs == 1 && host_opt_level == 0 && host_opt_sub == DRV_OPTICS_L4 && host_look_rows == 1);
+    CHECK(host_opt_layer.sbv == DRV_OPTICS_ROWS && host_opt_layer.shv == DRV_OPTICS_ROWS && host_opt_layer.bench == 0);
+    /* the transport's switches: the field's */
+    CHECK(host_opt_layer.route == DRV_OPTICS_PAIR && host_opt_layer.width == 324 && host_opt_layer.gamma == 220);
+    CHECK(host_opt_layer.order == (0u | 1u << 8 | 2u << 16));
+    CHECK(host_opt_layer.read == 1 && host_opt_layer.cached == 1 && host_opt_layer.lcached == 1);
+    /* the field set (card173, variant A) */
+    CHECK(host_opt_layer.tb == 180 && host_opt_layer.sb == 90 && host_opt_layer.mixb == 0);
+    CHECK(host_opt_layer.gb == (phase == 3 ? 90 : 110) * 256 / 100 && host_opt_layer.bdark == 80 * 256 / 100);
+    CHECK(host_opt_layer.tmix == 50 * 256 / 100 && host_opt_layer.st == 400 && host_opt_layer.haze == 0);
+    CHECK(host_opt_layer.btoe == 0 && host_opt_layer.bmax == 38 * 4095 / 100 && host_opt_layer.bcol == 300 * 256 / 100);
+    CHECK(host_opt_layer.th == 240 && host_opt_layer.sh == 45 && host_opt_layer.mixh == 0);
+    CHECK(host_opt_layer.gh == 220 * 256 / 100 && host_opt_layer.dark == 256);
+    CHECK(host_opt_layer.hcb == -24 * 256 / 100 && host_opt_layer.hcr == 42 * 256 / 100);
+    CHECK(host_opt_layer.hcb2 == -40 * 256 / 100 && host_opt_layer.hcr2 == 75 * 256 / 100 && host_opt_layer.hcode == 70);
+    CHECK(host_opt_layer.hcore == 1 && host_opt_layer.htoe == 3 * 4095 / 100 && host_opt_layer.hmax == 60 * 4095 / 100);
+    /* the sample says emission = 16: the common key is then the default of both, and both are given there */
+    CHECK(host_opt_layer.emb == 4 && host_opt_layer.em == 32 && host_opt_layer.hfirst == 1);
+    CHECK(host_opt_layer.steps[0][0] == 20 && host_opt_layer.steps[0][1] == 32 && host_opt_layer.steps[0][2] == 50 &&
+          host_opt_layer.steps[0][3] == 71 && host_opt_layer.steps[0][4] == 100);
+    CHECK(host_opt_layer.steps[1][0] == 10 && host_opt_layer.steps[1][1] == 19 && host_opt_layer.steps[1][2] == 34 &&
+          host_opt_layer.steps[1][3] == 80 && host_opt_layer.steps[1][4] == 140);
+    CHECK(host_opt_layer.day[0] == 95 && host_opt_layer.day[1] == 125 && host_opt_layer.day[2] == 60 &&
+          host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 100);
+    CHECK(host_opt_layer.white == DRV_OPTICS_WHITE_AUTO && host_opt_layer.jobs == DRV_OPTICS_JOBS_FIRST);
+    optics_service(1000);                                   /* the worker task made: the card is not in use */
+    CHECK(host_opt_workers == 1);
+    optics_service(1250);
+    CHECK(host_opt_workers == 1);
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &n);
+#ifdef OMK_DEBUG
+    CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 180, sigma 90 + 0 at 0%, gain 110% at 5"));
+    CHECK(t && strstr(t, "optics: probe level 0: a step in the look's stills on the mask route; the stills get L4"));
+#else
+    CHECK(t && strstr(t, "optics: Bloom and Halation on: the strengths by the look's rows; Bloom threshold 180, sigma 90, "));
+    CHECK(t && !strstr(t, "optics: layer: ") && !strstr(t, "optics: probe") && !strstr(t, "optics: schedule") &&
+          !strstr(t, "optics: bisect"));
+    CHECK(host_probes == 0);                                /* no word of the camera's state read */
+    if (phase == 3)
+        CHECK(t && strstr(t, " W config: [optics]: 14 keys are not a release build's and are not read (the first: probe)"));
+    else
+        CHECK(t && !strstr(t, "are not a release build's"));
+#endif
+    CHECK(t && strstr(t, "optics: the worker task runs: id "));
+    free(t);
+}
+
 /* The layer's further sets: schedule entries L4:X take [optics.X] over [optics] (a key not given there is [optics]'s),
  * the press of each entry gets its set; bad set entries left out */
 extern drv_optics_layer_cfg host_opt_sets[DRV_OPTICS_SETS + 1];
@@ -1508,6 +1592,8 @@ int main(int argc, char **argv)
         test_layer_sets();
     else if (argc > 2 && !strcmp(argv[2], "layer_rows"))
         test_layer_rows();
+    else if (argc > 3 && !strcmp(argv[2], "layer_default"))
+        test_layer_default(atoi(argv[3]));
     else if (argc > 2 && !strcmp(argv[2], "lever"))
         test_lever();
     else {

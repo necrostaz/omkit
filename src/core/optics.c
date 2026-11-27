@@ -887,6 +887,35 @@ void optics_setup(void)
                ", stripes in the picture", drv_optics_sub_name(sub));
 }
 #else
+/* The keys of [optics] a release build reads; any other one there is a debug build's (or a slip of the pen): one
+ * warning for all of them, none read */
+static void opt_keys(void)
+{
+    static const char *const keys[] = {
+        "layer", "bloom_steps", "halation_steps", "day_mean", "day_share", "day_bloom", "day_halation", "bloom_threshold",
+        "halation_threshold", "bloom_sigma", "bloom_sigma2", "halation_sigma", "halation_sigma2", "bloom_mix",
+        "halation_mix", "bloom_gain", "halation_gain", "halation_cb", "halation_cr", "halation_dark", "emission",
+        "bloom_emission", "halation_emission", "bloom_dark", "halation_first", "bloom_tail", "bloom_tail_sigma",
+        "bloom_haze", "bloom_toe", "bloom_max", "halation_toe", "halation_max", "white", "halation_edge_cb",
+        "halation_edge_cr", "halation_edge_code", "halation_core", "bloom_colour", "jobs",
+    };
+    const char *sec, *key, *val, *first = "";
+    u32 i, k, n = 0;
+
+    for (i = 0; i < cfg_count(); i++) {
+        cfg_entry(i, &sec, &key, &val);
+        if (!str_ieq(sec, "optics"))
+            continue;
+        for (k = 0; k < sizeof(keys) / sizeof(keys[0]) && !str_ieq(key, keys[k]); k++)
+            ;
+        if (k == sizeof(keys) / sizeof(keys[0]) && !n++)
+            first = key;
+    }
+    if (n)
+        log_printf(OMK_LOG_WARN, "config: [optics]: %u keys are not a release build's and are not read (the first: %s)", n,
+                   first);
+}
+
 /* Boot, after the store and before the modules: the layer's settings to the driver, its step and the look's optics
  * rows. A release build: the layer alone - no probe, no store, no crumbs; the stills get L4 */
 void optics_setup(void)
@@ -895,6 +924,7 @@ void optics_setup(void)
     u32 ws, wb;
     int rc;
 
+    opt_keys();
     if (!layer_cfg(&lc, "")) {
         log_printf(OMK_LOG_INFO, "optics: Bloom and Halation off ([optics] layer = off)");
         return;

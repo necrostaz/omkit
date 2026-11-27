@@ -35,6 +35,16 @@ for group in all cfg mem power lever kind; do
     if [ "$out" = ok ]; then pass "core: $group"; else fail "core: $group"; echo "$out" | sed 's/^/        /'; fi
 done
 
+# The optics layer as a user gets it (core/optics.c), both build kinds: 1 - no [optics] section, 2 - no OMKIT.INI (the
+# sample written): on, the field set's values, the stills get the layer; 4 - layer = off: nothing installed. 3, a
+# release build only: the keys of a debug build in [optics] - none read, one warning
+for phase in 1 2 3 4; do
+    [ "$phase" = 3 ] && [ "$KIND" = debug ] && continue
+    mkdir "$tmp/layer_default$phase"
+    out=$("$BIN/test_core" "$tmp/layer_default$phase" layer_default $phase 2>&1)
+    if [ "$out" = ok ]; then pass "core: optics layer by default $phase"; else fail "core: optics layer by default $phase"; echo "$out" | sed 's/^/        /'; fi
+done
+
 if [ "$KIND" = debug ]; then
 # The optics probe's cached read (core/optics.c): three power-ons in one folder - armed only with the log and the state on
 # the card, a reset while armed stops it, another run number starts again

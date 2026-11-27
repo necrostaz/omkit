@@ -805,8 +805,11 @@ int core_prev_ended(void)
     return host_prev_ended;
 }
 
+u32 host_opt_installs;                      /* drv_optics_install calls */
+
 int drv_optics_install(u32 level)
 {
+    host_opt_installs++;
     host_opt_level = level;
     return 0;
 }
