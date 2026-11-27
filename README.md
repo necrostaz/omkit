@@ -43,6 +43,8 @@ Details: [docs/modules/creatprf/README.md](docs/modules/creatprf/README.md).
 - A **tone curve** editor per preset, kept across power-offs.
 - **Film grain** on the stills: 11 grain tiles in four strengths (Off, Low, Med, High), weaker in the shadows and
   highlights as on film ([the tiles](docs/modules/filmlook/grain.md)).
+- **Bloom and Halation** on the stills, strength 0-5 per preset: the glow of a diffusion filter, and the red-orange halo
+  around lamps of a film without an anti-halation layer ([how they work and their limits](docs/modules/filmlook/optics.md)).
 
 Details: [docs/modules/filmlook/README.md](docs/modules/filmlook/README.md).
 
@@ -105,7 +107,8 @@ on.
 The bundled FILMLOOK presets carry film names (Kodak Portra, Ektar, Kodachrome, Tri-X, Vision3, Fujifilm Superia,
 Eterna, Ilford HP5 and others). They describe the character of the look a preset imitates with the camera's own colour
 tables; they are not the manufacturers' products, and their use implies no connection with or approval by the
-trademark owners.
+trademark owners. The documentation names a diffusion filter (Tiffen Pro-Mist) and a film (CineStill) only to describe
+the effects Bloom and Halation imitate.
 
 ## License
 
