@@ -306,7 +306,7 @@ typedef struct {
      * the look's stills. The rows keep every entry's strengths given and show them at once when a dial chooses that entry
      * (the column is drawn then, before the module answers): a module gives all entries' at its start, the chosen entry's
      * last - core takes the last ones given as the chosen entry's. Only the owner of the look; copied. 0; -1 not the owner
-     * or bad; -2 the rows are not available on this firmware */
+     * or bad; -2 the rows are not available on this firmware; -3 no optics layer ([optics] layer off): no rows */
     int (*look_optics)(omk_mod *m, u32 entry, const u8 *strength, u32 count);
 } omk_api;
 
