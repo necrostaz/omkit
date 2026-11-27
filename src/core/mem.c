@@ -438,6 +438,7 @@ static void watch_fw_heap(void)
     }
 }
 
+#ifdef OMK_DEBUG
 static void summary(void)
 {
     u32 i, total, used, largest;
@@ -452,6 +453,7 @@ static void summary(void)
         log_printf(OMK_LOG_DEBUG, "memory: %s used %u peak %u allocs %u fails %u firmware heap %u", owners[i].name,
                    owners[i].i.used, owners[i].i.peak, owners[i].i.allocs, owners[i].i.fails, owners[i].i.fw_used);
 }
+#endif
 
 void mem_service(u32 now)
 {
@@ -476,11 +478,16 @@ void mem_service(u32 now)
         log_printf(OMK_LOG_WARN, "memory: arena %u%% used, %u bytes free, largest %u", pct, total - used, largest);
         warned_pct = pct;
     }
+#ifdef OMK_DEBUG
     watch_fw_heap();
     if (log_level() >= OMK_LOG_DEBUG && (int)(now - next_summary) >= 0) {
         next_summary = now + SUMMARY_MS;
         summary();
     }
+#else
+    if (fw_on)                              /* the firmware heap's counters only while the modules may take from it */
+        watch_fw_heap();
+#endif
 }
 
 /* Word-wise when source and destination have the same alignment, bytes otherwise; overlapping regions are allowed.

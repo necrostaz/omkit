@@ -15,6 +15,17 @@
 #define OMK_LOG_WARN 2
 #define OMK_LOG_INFO 3
 #define OMK_LOG_DEBUG 4
+/* A module's line of the debug level: OMK_LOG_D(api, self, "text %u", n). It is compiled into a debug build of the module
+ * only (OMK_DEBUG, make BUILD=debug); a release build has neither the call nor its text, and its arguments are not
+ * evaluated. A release core keeps no line of the debug level, whoever sends it */
+#ifdef OMK_DEBUG
+#define OMK_LOG_D(api, self, ...) ((api)->log((self), OMK_LOG_DEBUG, __VA_ARGS__))
+#else
+#define OMK_LOG_D(api, self, ...) ((void)0)
+#endif
+/* In module_init, once api and self are known: a debug build of the module says so (a line of the debug level).
+ * tools/buildcheck.py tells a module file's kind by this line's text */
+#define OMK_MODULE_KIND(api, self) OMK_LOG_D(api, self, "a debug build of the module")
 
 #define OMK_STORE_PERSIST 1
 

@@ -95,9 +95,9 @@ def build_card(work: Path) -> Path:
     core, card = work / "core", work / "card" / "OMKIT"
     if os.name == "nt":
         q = lambda p: "'" + wsl_path(p) + "'"
-        cmd = ["wsl", "bash", "-lc", f"make -C {q(OMKIT)} card OUT={q(core)} CARD={q(card)}"]
+        cmd = ["wsl", "bash", "-lc", f"make -C {q(OMKIT)} card BUILD=release OUT={q(core)} CARD={q(card)}"]
     else:
-        cmd = ["make", "-C", str(OMKIT), "card", f"OUT={core}", f"CARD={card}"]
+        cmd = ["make", "-C", str(OMKIT), "card", "BUILD=release", f"OUT={core}", f"CARD={card}"]
     print("building the card:", " ".join(cmd), flush=True)
     if subprocess.run(cmd).returncode:
         fail("make card failed")

@@ -972,12 +972,12 @@ static void tex_service(volatile tex_t *t)
 
     k = drv_alloc_mode();
     if (k != mode_seen) {
-        log_printf(OMK_LOG_INFO, "grain: allocator mode %u", k);
+        log_diag("grain: allocator mode %u", k);
         mode_seen = k;
     }
     if (t->direct != direct_seen) {
         direct_seen = t->direct;
-        log_printf(OMK_LOG_INFO, "grain: %u fills read every word from the tile (not on cpu 0, or the row buffer in use)",
+        log_diag("grain: %u fills read every word from the tile (not on cpu 0, or the row buffer in use)",
                    direct_seen);
     }
     if (t->same_h != same_seen || t->aged != aged_seen) {
@@ -998,7 +998,7 @@ static void tex_service(volatile tex_t *t)
             break;                          /* still being written: the next report */
         k = r->entry < DRV_GRAIN_GENS ? r->entry : 0;
         if (r->what == T_BUILT || r->what == T_SHARED)
-            log_printf(OMK_LOG_INFO, "grain: shot %u type %04x: mode %04x rawjpeg %u filetype %u, P+18/19/21 %u/%u/%u, "
+            log_diag("grain: shot %u type %04x: mode %04x rawjpeg %u filetype %u, P+18/19/21 %u/%u/%u, "
                        "slot %u (%s, gain %u, chroma %u), route %s, level %u, %s, list %s (%u steps), shift %u,%u, "
                        "builder %u us, fill %u us, texture %08x, out %08x", seen + 1, r->type, r->mode & 0xffff,
                        r->mode >> 16 & 0xff, r->mode >> 24, r->pf & 0xff, r->pf >> 8 & 0xff, r->pf >> 16 & 0xff, k + 1,
@@ -1029,7 +1029,7 @@ static void tex_service(volatile tex_t *t)
             d = &t->done[cpu][done_seen[cpu] % DONE_RING].seq;
             if (d[0] != done_seen[cpu] + 1)
                 break;
-            log_printf(OMK_LOG_INFO, "grain: shot %u ended on cpu %u: %u steps, state %04x %04x %04x, W to H3 %u ms", d[1],
+            log_diag("grain: shot %u ended on cpu %u: %u steps, state %04x %04x %04x, W to H3 %u ms", d[1],
                        cpu, d[2], d[3], d[4], d[5], d[6] / 1000);
         }
     }
@@ -1041,7 +1041,7 @@ static void tex_service(volatile tex_t *t)
         if (sum == sums[cpu])
             continue;
         sums[cpu] = sum;
-        log_printf(OMK_LOG_INFO, "grain: texture cpu %u: jobs %u (other types %u, not cpu 0 %u), built %u, shared %u, "
+        log_diag("grain: texture cpu %u: jobs %u (other types %u, not cpu 0 %u), built %u, shared %u, "
                    "failed %u, skipped %u; fills %u, errors %u; freed %u; case 1 given %u, set %u; detail block %u; job W to H3 "
                    "last %u ms, longest %u ms", cpu,
                    t->cnt[cpu][TC_JOBS], t->cnt[cpu][TC_TYPE], t->cnt[cpu][TC_CPU], t->cnt[cpu][TC_BUILT],
@@ -1050,7 +1050,7 @@ static void tex_service(volatile tex_t *t)
                    t->cnt[cpu][TC_DETAIL], t->t_job[cpu] / 1000, t->t_job_max[cpu] / 1000);
         for (i = 0; i < TG_OK; i++)
             if (t->skip[cpu][i])
-                log_printf(OMK_LOG_INFO, "grain: texture cpu %u: case 1 not given or set, %s: %u", cpu, gate[i],
+                log_diag("grain: texture cpu %u: case 1 not given or set, %s: %u", cpu, gate[i],
                            t->skip[cpu][i]);
     }
 }
@@ -1140,6 +1140,7 @@ void drv_grain_route(u32 route, u32 chroma, u32 tag)
     drv_unlock(st);
 }
 
+#ifdef OMK_DEBUG                            /* the mask test's count of jobs */
 int drv_grain_route_state(u32 *freed, u32 *live)
 {
     volatile tex_t *t = tex();
@@ -1156,3 +1157,4 @@ int drv_grain_route_state(u32 *freed, u32 *live)
     *live = n;
     return 0;
 }
+#endif

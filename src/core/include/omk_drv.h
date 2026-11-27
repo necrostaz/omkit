@@ -4,6 +4,11 @@
 
 #include "omk_types.h"
 
+/* OMK_EMU - the probes for runs in an emulator - is an option of a debug build: a release image is tested as it is */
+#if defined(OMK_EMU) && !defined(OMK_DEBUG)
+#error "OMK_EMU needs a debug build (BUILD=debug)"
+#endif
+
 #define OMK_CPUS 3
 
 /* NMI handler record. sp, psw and pc of CPU 0 are overwritten by the regular interrupt, they cannot be trusted */

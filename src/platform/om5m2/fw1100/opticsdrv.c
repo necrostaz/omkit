@@ -413,7 +413,9 @@ static volatile op_t *op(void)
     return (volatile op_t *)slot()[1];
 }
 
-/* The crumbs: words past the arena's end, written past the cache (any CPU; a lost update of the bit set is harmless) */
+/* The crumbs: words past the arena's end, written past the cache (any CPU; a lost update of the bit set is harmless).
+ * A debug build's: a release build writes none (CR_PUT and op_crumb are empty there) */
+#ifdef OMK_DEBUG
 static volatile u32 *crumb(void)
 {
     return (volatile u32 *)CRUMB;
@@ -427,7 +429,13 @@ static void op_crumb(u32 job, u32 sub, u32 phase)
     c[CR_PHASES] = (phase == P_LISTED ? 0 : c[CR_PHASES]) | 1u << phase;
     c[CR_STATE] = (job & 0xffff) << 16 | sub << 8 | phase;
 }
+#define CR_PUT(i, v) (crumb()[i] = (v))
+#else
+#define op_crumb(job, sub, phase) ((void)0)
+#define CR_PUT(i, v) ((void)0)
+#endif
 
+#ifdef OMK_DEBUG
 static u32 op_sp(void)
 {
     u32 v;
@@ -435,7 +443,9 @@ static u32 op_sp(void)
     __asm__ __volatile__("mov sp,%0" : "=a"(v));
     return v;
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 op_psw(void)
 {
     u32 v;
@@ -443,6 +453,7 @@ static u32 op_psw(void)
     __asm__ __volatile__("mov psw,%0" : "=d"(v));
     return v;
 }
+#endif
 
 /* The running task of this CPU from its kernel's words (kernel.c's layout; read only, through the cache - this CPU's
  * kernel writes them so): id, stack base and size; 0 - not the layout expected */
@@ -500,11 +511,13 @@ static void op_fallback(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 k);
 static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p);
 static const volatile drv_optics_layer_cfg *op_cfg(volatile op_t *o, u32 set);
 
+#ifdef OMK_DEBUG
 /* The empty loop: n iterations of 2 instructions */
 static void op_spin(u32 n)
 {
     __asm__ __volatile__("1:\n\tadd -1,%0\n\tbne 1b" : "+d"(n) : : "cc");
 }
+#endif
 
 /* 1 - over the budget; a tick given away every OPT_YIELD_US */
 static int op_pace(pace_t *p)
@@ -523,6 +536,7 @@ static int op_pace(pace_t *p)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 /* Up to `bytes` (a multiple of 4) read from addr in words: the bytes read (less: the budget), their sum in *sum, the time
  * without the ticks given away in *us */
 static u32 op_read(pace_t *p, u32 addr, u32 bytes, u32 *sum, u32 *us)
@@ -538,6 +552,7 @@ static u32 op_read(pace_t *p, u32 addr, u32 bytes, u32 *sum, u32 *us)
     *us = drv_ticks_since(t) - (p->slept - slept);
     return done;
 }
+#endif
 
 /* The picture's slot checked for the reads (and the stripes): 0, or OE_SLOT with the reason in *detail */
 static u32 op_frame_check(const u8 *s, u32 *detail)
@@ -558,6 +573,7 @@ static u32 op_frame_check(const u8 *s, u32 *detail)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 /* Level 2: the same bytes through the cached view, the cache written back and dropped before and after. Only when armed:
  * the arming is taken here, right before the read */
 static void op_cached(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
@@ -589,7 +605,9 @@ static void op_cached(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     r->c_fl1 = drv_ticks_since(t);
     r->c_state = CS_DONE;
 }
+#endif
 
+#ifdef OMK_DEBUG
 /* Level 3: the stripes in the first rows, past the cache; the cache written back after them (the write buffers before
  * the next pass reads the picture) */
 static void op_stripes(volatile op_rec_t *r, u32 base, pace_t *p)
@@ -607,17 +625,22 @@ static void op_stripes(volatile op_rec_t *r, u32 base, pace_t *p)
     drv_fw_cache_flush();
     r->s_fl = drv_ticks_since(t);
 }
+#endif
 
-/* The lowest sp of the step's code, at the places it calls from (record and crumbs) */
+/* The lowest sp of the step's code, at the places it calls from (record and crumbs): a debug build's */
+#ifdef OMK_DEBUG
 static void op_low(volatile op_rec_t *r)
 {
     u32 sp = op_sp();
 
     if (sp < r->sp_min) {
         r->sp_min = sp;
-        crumb()[CR_SP_MIN] = sp;
+        CR_PUT(CR_SP_MIN, sp);
     }
 }
+#else
+#define op_low(r) ((void)0)
+#endif
 
 /* The work handed to the worker task (op_worker_main): the loop of W1 or W2 and, from D on, the window. The record r
  * carries what the step found (the picture's bus address, kind, sizes); nothing of the job's handle is read here. The
@@ -625,7 +648,10 @@ static void op_low(volatile op_rec_t *r)
 static void op_work(volatile op_t *o, volatile op_rec_t *r)
 {
     pace_t p;
-    u32 i, t, base, sum, us, sub = r->sub, job = r->job;
+    u32 sub = r->sub;
+#ifdef OMK_DEBUG
+    u32 i, t, base, sum, us, job = r->job;
+#endif
 
     p.t0 = p.ty = drv_ticks();
     p.slept = p.yields = 0;
@@ -639,6 +665,7 @@ static void op_work(volatile op_t *o, volatile op_rec_t *r)
         op_layer_work(o, r, &p);
         goto out;
     }
+#ifdef OMK_DEBUG                            /* the probe's substages, to the label out */
     r->loop_n = o->loop ? o->loop : OPT_LOOP;
     if (sub == DRV_OPTICS_W1) {             /* at once: the worker's priority 56 is below every task it could hold up */
         t = drv_ticks();
@@ -716,6 +743,7 @@ release:
         r->t_unmap = drv_ticks_since(t);
         op_crumb(job, sub, P_UNMAPPED);
     }
+#endif
 out:
     r->w_yields = p.yields;
     r->w_us = drv_ticks_since(p.t0);
@@ -726,6 +754,7 @@ out:
  * Waits for a request on its flag, does it, says done on the step's flag. Its sequence words tell a request from a
  * flag left set: a request is new while req != done. Touches the arena block, the picture through the window and its
  * own stack; the firmware only through the thunks */
+#ifdef OMK_DEBUG
 static void op_wphase(u32 phase)
 {
     volatile u32 *c = crumb();
@@ -733,21 +762,23 @@ static void op_wphase(u32 phase)
     c[CR_W_TICKS] = drv_ticks();
     c[CR_W_PHASE] = phase;
 }
+#else
+#define op_wphase(phase) ((void)0)
+#endif
 
 void drv_optics_worker_main(void)
 {
     volatile op_t *o = op();
-    volatile u32 *c = crumb();
     u32 seq, stk, stksz, pri, t, row = 0, tid;
     int rc;
 
     if (!o)
         return;
     tid = op_task_pri(&stk, &stksz, &pri);
-    c[CR_W_SP] = o->w_sp = op_sp();
-    c[CR_W_PSW] = o->w_psw = op_psw();
-    c[CR_W_PRI] = o->w_pri = pri;
-    c[CR_W_FLAGS] = (o->w_flag_req & 0xffff) | (u32)(o->w_flag_done & 0xffff) << 16;
+    CR_PUT(CR_W_SP, o->w_sp = op_sp());     /* (a release build keeps neither the crumbs nor these words of the task) */
+    CR_PUT(CR_W_PSW, o->w_psw = op_psw());
+    CR_PUT(CR_W_PRI, o->w_pri = pri);
+    CR_PUT(CR_W_FLAGS, (o->w_flag_req & 0xffff) | (u32)(o->w_flag_done & 0xffff) << 16);
     o->w_stk = stk;
     o->w_tid = tid;                         /* alive: the core task looks for it - last */
     op_wphase(WP_STARTED);
@@ -758,23 +789,23 @@ void drv_optics_worker_main(void)
         drv_ev_clear(o->w_flag_req);
         o->w_loops++;
         o->w_rc = (u32)rc;
-        c[CR_W_LOOPS] = o->w_loops;
-        c[CR_W_RC] = (u32)rc;
+        CR_PUT(CR_W_LOOPS, o->w_loops);
+        CR_PUT(CR_W_RC, (u32)rc);
         op_wphase(WP_WOKEN);
         if (!ow_take((ow_chan_t *)&o->ch, &seq)) {
             o->w_empty++;
-            c[CR_W_EMPTY] = o->w_empty;
+            CR_PUT(CR_W_EMPTY, o->w_empty);
             if (drv_ticks_since(t) >= WORKER_QUICK_US) {
                 row = 0;
                 continue;
             }
             o->w_fast++;
-            c[CR_W_FAST] = o->w_fast;
+            CR_PUT(CR_W_FAST, o->w_fast);
             if (++row >= WORKER_QUICK_MAX) {    /* the wait does not wait: never spin */
                 op_wphase(WP_NAP);
                 drv_sleep(WORKER_NAP_MS);
                 o->w_naps++;
-                c[CR_W_NAPS] = o->w_naps;
+                CR_PUT(CR_W_NAPS, o->w_naps);
             }
             continue;
         }
@@ -784,7 +815,7 @@ void drv_optics_worker_main(void)
             op_work(o, (volatile op_rec_t *)o->w_rec);
         ow_answer((ow_chan_t *)&o->ch, seq);    /* after its last access to the picture */
         o->w_count++;
-        c[CR_W_DONE] = o->w_count;
+        CR_PUT(CR_W_DONE, o->w_count);
         op_wphase(WP_ANSWERED);
         drv_ev_set(o->w_flag_done);
     }
@@ -844,7 +875,7 @@ static void op_delegate(volatile op_t *o, volatile op_rec_t *r, u8 *h)
     r->w_task = o->w_tid;
     o->w_rec = (u32)r;
     seq = ow_post((ow_chan_t *)&o->ch);
-    crumb()[CR_WORK] = (seq & 0xffff) | (o->ch.done & 0xffff) << 16;
+    CR_PUT(CR_WORK, (seq & 0xffff) | (o->ch.done & 0xffff) << 16);
     op_crumb(r->job, r->sub, P_HANDED);
     x.o = o;
     x.r = r;
@@ -858,7 +889,7 @@ static void op_delegate(volatile op_t *o, volatile op_rec_t *r, u8 *h)
     drv_ev_set(o->w_flag_req);
     r->w_state = ow_wait((ow_chan_t *)&o->ch, seq, &e, WORKER_WAIT_MS, WORKER_LATE_US, WORKER_GIVE_UP_US);
     r->w_wait = drv_ticks_since(x.t0);
-    crumb()[CR_WORK] = (seq & 0xffff) | (o->ch.done & 0xffff) << 16;
+    CR_PUT(CR_WORK, (seq & 0xffff) | (o->ch.done & 0xffff) << 16);
     op_crumb(r->job, r->sub, P_BACK);
 }
 
@@ -866,10 +897,13 @@ static void op_delegate(volatile op_t *o, volatile op_rec_t *r, u8 *h)
  * to the worker (W1 on); the record r filled, the crumbs written phase by phase */
 static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
 {
+    pace_t p;
+    u32 sub = r->sub;
+#ifdef OMK_DEBUG
     const u8 *s;
     volatile op_slot_t *d;
-    pace_t p;
-    u32 i, n = 0, used = 0, t, span, sub = r->sub, job = r->job;
+    u32 i, n = 0, used = 0, t, span, job = r->job;
+#endif
 
     p.t0 = p.ty = drv_ticks();
     p.slept = p.yields = 0;
@@ -877,6 +911,7 @@ static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
     p.stop = 0;
     if (sub < DRV_OPTICS_B)
         goto out;
+#ifdef OMK_DEBUG                            /* the job's buffers, for the report */
     for (i = 0; i < SLOTS; i++) {
         s = h + H_SLOTS + SLOT_SIZE * i;
         if (!*(const u32 *)(s + SL_ALLOC))
@@ -895,6 +930,7 @@ static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
     }
     r->nslots = n;
     r->used = used;
+#endif
     r->i_frame = drv_fw_job_buf(h, BUF_FRAME) & 0xffff;   /* a u16 (its callers take the low half) */
     r->i_small = drv_fw_job_buf(h, BUF_SMALL) & 0xffff;
     op_crumb(job, sub, P_SLOTS);
@@ -908,14 +944,19 @@ static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
             op_fallback(o, r, h, r->step & 0xff);
         goto out;
     }
-    p.ty -= OPT_YIELD_US;                   /* one tick given away now, whatever the time */
+#ifdef OMK_DEBUG                            /* the bisection's C1: one tick given away now, whatever the time. A release
+                                               build's step gives none away here: it waits where the layer's work does
+                                               (the reduction's pass, the worker's answer) */
+    p.ty -= OPT_YIELD_US;
     op_pace(&p);
     op_crumb(job, sub, P_SLEPT);
     op_low(r);
+#endif
     if (sub >= DRV_OPTICS_L0) {
         op_layer_step(o, r, h, wait_rc);
         goto out;
     }
+#ifdef OMK_DEBUG                            /* the probe's substages, to the label out */
     if (sub == DRV_OPTICS_C2 || sub == DRV_OPTICS_C3) {
         r->loop_n = sub == DRV_OPTICS_C2 ? LOOP_SHORT : o->loop ? o->loop : OPT_LOOP;
         t = drv_ticks();
@@ -962,6 +1003,7 @@ static void op_probe(volatile op_t *o, volatile op_rec_t *r, u8 *h, u32 wait_rc)
     }
     op_low(r);
     op_delegate(o, r, h);
+#endif
 out:
     r->yields = p.yields;
     r->t_total = drv_ticks_since(p.t0);
@@ -1182,6 +1224,7 @@ static int op_planes(volatile op_t *o, ol_t *L, u32 lw, u32 lh)
 #define OP_BENCH_TMP (OP_BENCH_N + 2 * 1 + 6)
 #define OP_TURNS 10000
 
+#ifdef OMK_DEBUG
 static u32 op_bench_box(u16 *v, u16 *tmp)
 {
     u32 i, ia, ib, t;
@@ -1194,7 +1237,9 @@ static u32 op_bench_box(u16 *v, u16 *tmp)
         ol_box_row(v, OP_BENCH_N, 0, OP_BENCH_N, 1, ia, ib, tmp);
     return drv_ticks_since(t);
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 __attribute__((noipa)) op_loop_plain(u32 n, u32 a)
 {
     u32 b = 1;
@@ -1204,7 +1249,9 @@ static u32 __attribute__((noipa)) op_loop_plain(u32 n, u32 a)
     } while (--n);
     return b;
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 __attribute__((noipa)) op_loop_mul(u32 n, u32 a)
 {
     u32 b = 1;
@@ -1214,7 +1261,9 @@ static u32 __attribute__((noipa)) op_loop_mul(u32 n, u32 a)
     } while (--n);
     return b;
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 __attribute__((noipa)) op_loop_udf(u32 n, u32 a)
 {
     u32 b = 1;
@@ -1224,7 +1273,9 @@ static u32 __attribute__((noipa)) op_loop_udf(u32 n, u32 a)
     } while (--n);
     return b;
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 __attribute__((noipa)) op_loop_hi(u32 n, u32 a)
 {
     u32 b = 1;
@@ -1234,7 +1285,9 @@ static u32 __attribute__((noipa)) op_loop_hi(u32 n, u32 a)
     } while (--n);
     return b;
 }
+#endif
 
+#ifdef OMK_DEBUG
 static void op_bench(volatile op_rec_t *r, ol_t *L)
 {
     volatile u32 sink;                      /* the loops' results kept: the compiler leaves no loop out */
@@ -1258,7 +1311,9 @@ static void op_bench(volatile op_rec_t *r, ol_t *L)
     r->lp_hi = drv_ticks_since(t);
     (void)sink;
 }
+#endif
 
+#ifdef OMK_DEBUG
 /* One row of the picture timed (L4, before the read, out of its budget): the first row, words read with their sum,
  * then read into the sums (into scratch: the second Gaussian's plane, not in use yet) - past the cache, the packing read
  * loading words; with read_cached also through the cached view, loading bytes, the cache written back and dropped
@@ -1296,6 +1351,7 @@ static void op_row_probe(volatile op_t *o, volatile op_rec_t *r, ol_t *L)
     r->rd_sum = sum;
     op_unmap(r, win);
 }
+#endif
 
 /* The picture's rows read into the sources (L4, [optics] read; card169): the cover read of optlayer.h - every row of cells
  * from OL_COVER rows of the picture (ol_cover_y: 4 and 12 of its 16), one pixel of each pair, to the end whatever the
@@ -1321,7 +1377,9 @@ static void op_frame_read(volatile op_t *o, volatile op_rec_t *r, ol_t *L, const
     L->shift = ol_read_shift(L->cwp, lw, OL_COVER / 2);   /* OL_COVER rows of one pixel a pair: as one row of both */
     ol_read_table(L, P);
     ol_rows(L, H);
+#ifdef OMK_DEBUG
     op_row_probe(o, r, L);                  /* out of the read: a row of both pixels, timed */
+#endif
     L->rbytes = cached;                     /* through the cache the packing read loads bytes, past it words */
     t0 = drv_ticks();
     for (cy = 0; cy < lh; cy++) {
@@ -1590,8 +1648,10 @@ static void op_layer_work(volatile op_t *o, volatile op_rec_t *r, pace_t *p)
     mem_set(L.ph, 0, 2 * lw * lh);
     mem_set(L.nrow, 0, lh);
     ol_word_tables(&L, &P);
+#ifdef OMK_DEBUG
     if (cf->bench)
         op_bench(r, &L);
+#endif
     if (cf->read && (P.gb || P.gh))
         op_frame_read(o, r, &L, &P, p);
     if (op_pace(p)) {
@@ -1768,8 +1828,10 @@ u32 drv_optics_step(u8 *h)
 {
     volatile op_t *o = op();
     volatile op_rec_t *r;
-    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, psw, sp, stk = 0, stksz = 0, mode = 0, set = 0, str = 0;
-    volatile u32 *c;
+    u32 k, n, t, rc, seq, st, i, sub = DRV_OPTICS_A, job = 0, stk = 0, stksz = 0, set = 0, str = 0, task = 0;
+#ifdef OMK_DEBUG
+    u32 psw, sp, mode = 0;
+#endif
 
     if (!h)
         return 0;
@@ -1779,21 +1841,26 @@ u32 drv_optics_step(u8 *h)
         set = o->row[i].set;
         str = o->row[i].str;
     }
+#ifdef OMK_DEBUG
     psw = op_psw();
     sp = op_sp();
+#endif
     op_crumb(job, sub, P_ENTER);
     if (sub >= DRV_OPTICS_A) {
-        c = crumb();
-        c[CR_PSW] = psw;
-        c[CR_SP] = c[CR_SP_MIN] = sp;
-        c[CR_TASK] = op_task(&stk, &stksz);
-        c[CR_STK] = stk;
-        c[CR_STKSZ] = stksz;
-        c[CR_WORK] = 0;
+        task = op_task(&stk, &stksz);       /* the task the executor runs in: the layer works in REC_IMAGE only */
+#ifdef OMK_DEBUG                            /* the step's state at its entry, for the report and the crumbs */
+        CR_PUT(CR_PSW, psw);
+        CR_PUT(CR_SP, sp);
+        CR_PUT(CR_SP_MIN, sp);
+        CR_PUT(CR_TASK, task);
+        CR_PUT(CR_STK, stk);
+        CR_PUT(CR_STKSZ, stksz);
+        CR_PUT(CR_WORK, 0);
         mode = *(const u32 *)(h + H_REQ);   /* the request C, when it is a DRAM address (as graindrv.c reads it) */
         mode = op_bus_kind(mode, 512) == OP_BUS_DIRECT ? *(const u16 *)(mode + C_MODE) |
                (u32)*(const u8 *)(mode + C_RAWJPEG) << 16 | (u32)*(const u8 *)(mode + C_FILETYPE) << 24 : 0;
-        c[CR_MODE] = mode;
+        CR_PUT(CR_MODE, mode);
+#endif
     }
     k = *(const u16 *)(h + H_STEP);
     n = *(const u16 *)(h + H_NSTEPS);
@@ -1818,16 +1885,17 @@ u32 drv_optics_step(u8 *h)
         r->set = set <= o->nsets ? set : 0;
         r->str = str;
         if (sub >= DRV_OPTICS_A) {
-            c = crumb();
+            r->task = task;
+#ifdef OMK_DEBUG
             r->psw = psw;
             r->sp = r->sp_min = sp;
-            r->task = c[CR_TASK];
-            r->stk = c[CR_STK];
-            r->stksz = c[CR_STKSZ];
+            r->stk = stk;
+            r->stksz = stksz;
             r->mode = mode;
             r->lock[0] = ((const volatile u32 *)LOCKS)[0];
             r->lock[1] = ((const volatile u32 *)LOCKS)[1];
             op_low(r);
+#endif
         }
         r->cpu = drv_cpu();
         r->step = k | n << 8;
@@ -1903,7 +1971,7 @@ u32 drv_optics_list(u8 *h, u32 room, u32 *out)
     o->row[i].set = set;
     o->row[i].str = str;
     o->row[i].h = (u32)h;
-    crumb()[CR_LISTED] = o->wl;
+    CR_PUT(CR_LISTED, o->wl);
     op_crumb(o->wl, sub, P_LISTED);
     if (sub == DRV_OPTICS_N)
         return 0;
@@ -1929,7 +1997,7 @@ void drv_optics_ended(u8 *h)
     if (!o || (i = op_row(o, (u32)h)) == ROWS)
         return;
     op_crumb(o->row[i].job, o->row[i].sub, P_ENDED);
-    crumb()[CR_ENDED] = o->row[i].job;
+    CR_PUT(CR_ENDED, o->row[i].job);
     if (cpu < CPUS && o->row[i].sub < SUBS)
         o->ended[cpu][o->row[i].sub]++;
     o->row[i].h = 0;
@@ -2209,6 +2277,7 @@ u32 drv_optics_layer_floor(u32 W, u32 *wsize, u32 *wbuf)
     return o && o->layer_on ? ol_floor_sigma(W, o->cfg.width) : 0;
 }
 
+#ifdef OMK_DEBUG
 /* Core task, after drv_optics_layer: the further set k (1..DRV_OPTICS_SETS) of the layer's settings - the route,
  * width, bytes and curve stay the first set's. 0, or 1 */
 int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c)
@@ -2226,7 +2295,9 @@ int drv_optics_layer_set(u32 k, const drv_optics_layer_cfg *c)
         o->nsets = k;
     return 0;
 }
+#endif
 
+#ifdef OMK_DEBUG
 /* Core task: the layer's settings of the jobs listed from now on (0 - the first set; a set not given - the first) */
 void drv_optics_set(u32 k)
 {
@@ -2235,6 +2306,7 @@ void drv_optics_set(u32 k)
     if (o)
         o->set = k <= o->nsets ? k : 0;
 }
+#endif
 
 void drv_optics_strength(u32 bloom, u32 halation, u32 mono, u32 white)
 {
@@ -2260,6 +2332,7 @@ void drv_optics_sub(u32 sub)
         o->sub = sub;
 }
 
+#ifdef OMK_DEBUG
 /* Core task, between presses (the jobs of the one before ended): the loop of C3, W1 and W2 for the jobs from now on */
 void drv_optics_loop(u32 n, u32 sleep_ms)
 {
@@ -2270,7 +2343,9 @@ void drv_optics_loop(u32 n, u32 sleep_ms)
         o->loop_sleep = sleep_ms;
     }
 }
+#endif
 
+#ifdef OMK_DEBUG
 /* Core task, at start, before anything is listed: the crumbs of the run before into old[CR_N] (as they were: valid only
  * with the magic), then this run's start in their place. 1 - the magic was there */
 int drv_optics_crumb(u32 boot, u32 *old)
@@ -2286,12 +2361,15 @@ int drv_optics_crumb(u32 boot, u32 *old)
     c[CR_MAGIC] = CRUMB_MAGIC;
     return old[CR_MAGIC] == CRUMB_MAGIC;
 }
+#endif
 
+#ifdef OMK_DEBUG
 /* Core task, every loop: the heartbeat (ms since start) */
 void drv_optics_beat(u32 ms)
 {
-    crumb()[CR_BEAT] = ms;
+    CR_PUT(CR_BEAT, ms);
 }
+#endif
 
 /* Core task, CPU 0, once: the flags, the stack, the task; then a wait for the task to say it runs. acre_Task gives -1
  * also when its name table is full though the task was made, so the answer is the task's own (w_tid) - and a second
@@ -2339,6 +2417,7 @@ typedef struct {
     u32 t0;
 } op_tctx_t;
 
+#ifdef OMK_DEBUG
 static void op_t_wait(void *x, u32 ms)
 {
     volatile op_t *o = ((op_tctx_t *)x)->o;
@@ -2346,18 +2425,24 @@ static void op_t_wait(void *x, u32 ms)
     drv_ev_wait(o->w_flag_done, ms);
     drv_ev_clear(o->w_flag_done);
 }
+#endif
 
+#ifdef OMK_DEBUG
 static int op_t_cancelled(void *x)
 {
     (void)x;
     return 0;
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 op_t_since(void *x)
 {
     return drv_ticks_since(((op_tctx_t *)x)->t0);
 }
+#endif
 
+#ifdef OMK_DEBUG
 int drv_optics_worker_test(u32 *us, u32 *work, u32 *state)
 {
     volatile op_t *o = op();
@@ -2387,7 +2472,9 @@ int drv_optics_worker_test(u32 *us, u32 *work, u32 *state)
     *work = r->w_us;
     return 0;
 }
+#endif
 
+#ifdef OMK_DEBUG
 void drv_optics_arm(void)
 {
     volatile op_t *o = op();
@@ -2395,6 +2482,7 @@ void drv_optics_arm(void)
     if (o)
         o->armed = 1;
 }
+#endif
 
 static const char *op_err(u32 e)
 {
@@ -2409,6 +2497,7 @@ static const char *op_err(u32 e)
     return e < OE_N ? name[e] : "?";
 }
 
+#ifdef OMK_DEBUG
 /* Core task: names for the log */
 const char *drv_optics_sub_name(u32 sub)
 {
@@ -2417,7 +2506,9 @@ const char *drv_optics_sub_name(u32 sub)
 
     return sub < SUBS ? name[sub] : "?";
 }
+#endif
 
+#ifdef OMK_DEBUG
 const char *drv_optics_phase(u32 phase)
 {
     static const char *const name[P_N] = {"none", "listed", "step entered", "pass waited for", "slots read",
@@ -2432,23 +2523,31 @@ const char *drv_optics_phase(u32 phase)
 
     return phase < P_N ? name[phase] : "?";
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 op_kbs(u32 bytes, u32 us)
 {
     return us ? (bytes >> 10) * 1000000u / us : 0;
 }
+#endif
 
+#ifdef OMK_DEBUG
 /* sigma Q8 as "u.hh" for the log */
 static u32 op_q8i(u32 v)
 {
     return v >> 8;
 }
+#endif
 
+#ifdef OMK_DEBUG
 static u32 op_q8f(u32 v)
 {
     return (v & 0xff) * 100 / 256;
 }
+#endif
 
+#ifdef OMK_DEBUG                            /* the reports in full */
 /* Core task: the layer's lines of a job's block */
 static void op_report_layer(volatile op_rec_t *r, u32 n)
 {
@@ -2629,6 +2728,27 @@ static void op_report(volatile op_rec_t *r, u32 n)
         log_printf(OMK_LOG_INFO, "optics: job %u: stripes %u rows x %u pixels in %u us (%u KB/s), write-back %u us", n, r->s_rows,
                    r->s_px, r->s_us, op_kbs(r->s_rows * r->s_px * 2, r->s_us), r->s_fl);
 }
+#else
+/* A release build's report of a job, core task: one line - the strengths, the look's white, the scene's day weight and
+ * the times (the worker's own, the step's wait for it) - or a warning when the picture went without the layer */
+static void op_report(volatile op_rec_t *r, u32 n)
+{
+    if (r->sub < DRV_OPTICS_L0)
+        return;
+    if (r->err || r->fallback)
+        log_printf(OMK_LOG_WARN, "optics: job %u: no Bloom and Halation on this picture: %s, value %08x", n, op_err(r->err),
+                   r->detail);
+    else
+        log_printf(OMK_LOG_INFO, "optics: job %u: Bloom %u, Halation %u%s, white %u, day %u%%; the worker %u ms, the step "
+                   "waited %u ms", n, r->str & 0xff, r->str >> 8 & 0xff, r->str & OP_MONO ? " (black and white)" : "",
+                   r->white & 0xff, r->sc_day * 100 / 256, r->w_us / 1000, r->w_wait / 1000);
+    if (r->w_state)
+        log_printf(OMK_LOG_WARN, "optics: job %u: the worker task%s%s%s", n,
+                   r->w_state & WS_CANCEL ? ": the job was cancelled, stop asked" : "",
+                   r->w_state & WS_LATE ? ": late, stop asked" : "",
+                   r->w_state & WS_ABANDON ? ": given up, the step returned without it" : "");
+}
+#endif
 
 /* Core task: the reports of the steps that ended; the counts since install in *st (core/optics.c) */
 void drv_optics_service(drv_optics_info *st)
@@ -2654,16 +2774,18 @@ void drv_optics_service(drv_optics_info *st)
         if (r->seq != seen + 1)
             break;                          /* still being written: the next report */
         op_report(r, seen + 1);
-        op_auto_order(o, r);
         c.jobs++;
+#ifdef OMK_DEBUG                            /* layer_bytes = auto and the cached read's counts: the probe's */
+        op_auto_order(o, r);
         if (r->c_state == CS_BEGUN || r->c_state == CS_DONE)
             c.cached++;
         if (r->c_state == CS_DONE && r->c_bytes == r->rd_bytes && r->c_sum == r->rd_sum)
             c.cached_same++;
+#endif
     }
     if (o->noroom != noroom_seen) {
         noroom_seen = o->noroom;
-        log_printf(OMK_LOG_WARN, "optics: %u job lists had no room for the probe's step", noroom_seen);
+        log_printf(OMK_LOG_WARN, "optics: %u job lists had no room for the layer's steps", noroom_seen);
     }
     for (i = 0; i < SUBS; i++)
         for (c.ended[i] = 0, k = 0; k < CPUS; k++)
@@ -2692,8 +2814,8 @@ void drv_optics_service(drv_optics_info *st)
     }
     if (o->seconds != c.seconds) {
         c.seconds = o->seconds;
-        log_printf(OMK_LOG_INFO, "optics: layer: %u second jobs of RAW+JPEG presses without the layer (jobs = first: the "
-                   "JPEG is the first job's picture, the second makes the ORF's preview)", c.seconds);
+        log_diag("optics: layer: %u second jobs of RAW+JPEG presses without the layer (jobs = first: the "
+                 "JPEG is the first job's picture, the second makes the ORF's preview)", c.seconds);
     }
     c.armed = o->armed;
     c.listed = o->listed;

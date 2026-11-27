@@ -52,6 +52,8 @@ static u32 stack_used(void)
     return (u32)((uptr)__stack_top - (uptr)p);
 }
 
+/* Core's own stack, every STACK_REPORT_MS: a warning once when little of it was never used (both builds: an error of
+ * core itself); the debug build also logs the use */
 static void stack_service(u32 now)
 {
     static u32 last;
@@ -71,10 +73,14 @@ static void stack_service(u32 now)
 
 static const char *const level_names[] = {"off", "error", "warn", "info", "debug"};
 /* run_logs: a log file per power-on, dropped (a file made at every start); still known, so that an old
- * OMKIT.INI gets no warning, and ignored */
-static const char *const core_keys[] = {"log", "log_level", "run_logs", "fw_heap", "fw_heap_limit", "core_events",
-                                         "fw_cache_inv", "taskdump", "taskdump_every", "taskdump_base", "taskdump_stuck",
-                                         "power_rescue"};
+ * OMKIT.INI gets no warning, and ignored. The keys of the second list are a debug build's: a release build does not
+ * know them ("[core] KEY unknown") and reads none */
+static const char *const core_keys[] = {"log", "log_level", "run_logs", "fw_heap", "fw_heap_limit",
+#ifdef OMK_DEBUG
+                                         "core_events", "fw_cache_inv", "taskdump", "taskdump_every", "taskdump_base",
+                                         "taskdump_stuck", "power_rescue",
+#endif
+};
 static char run_id[9];
 
 static int parse_level(const char *s)
@@ -125,7 +131,8 @@ static void log_header(void)
         k += width;
         when[k++] = i == 2 ? ' ' : i == 5 ? 0 : i < 2 ? '-' : ':';
     }
-    log_banner("======== OMKit core %s (%s), %s, run %s, started %s ========", CORE_VERSION, CORE_BUILD, drv_name(), run_id,
+    /* The version and the build's kind as one text of the image: "OMKit core 1.45 release" (tools/buildcheck.py reads it) */
+    log_banner("======== OMKit core " CORE_VERSION " " CORE_KIND " (%s), %s, run %s, started %s ========", CORE_BUILD, drv_name(), run_id,
                d.year >= 2000 && d.year < 2100 && d.month >= 1 && d.month <= 12 ? when : "?");
 }
 
@@ -139,6 +146,8 @@ static void setup_log(int cfg_state)
         lvl = OMK_LOG_INFO;
     log_setup(cfg_bool("core", "log", 1), lvl);
     log_header();
+    if (lvl > LOG_MAX)
+        log_printf(OMK_LOG_WARN, "config: log_level = %s is only in a debug build, using %s", lvl_text, level_names[LOG_MAX]);
     log_printf(OMK_LOG_INFO, cfg_state > 0 ? "config OMKIT.INI" :
                cfg_state == 0 ? "config: no OMKIT.INI, template written, defaults used" :
                                 "config: no OMKIT.INI and cannot write template, defaults used");
@@ -156,6 +165,20 @@ static void setup_log(int cfg_state)
         if (k == sizeof(core_keys) / sizeof(core_keys[0]))
             log_printf(OMK_LOG_WARN, "config: [core] %s unknown", key);
     }
+#ifndef OMK_DEBUG
+    /* The sections of the debug build in OMKIT.INI: one line for all their keys; none is read */
+    for (i = 0, bad = 0, sec = key = ""; i < cfg_count(); i++) {
+        const char *s, *q;
+
+        cfg_entry(i, &s, &q, &val);
+        if (cfg_debug_section(s) && !bad++) {
+            sec = s;
+            key = q;
+        }
+    }
+    if (bad)
+        log_printf(OMK_LOG_WARN, "config: %u keys are only in a debug build and are not read (the first: [%s] %s)", bad, sec, key);
+#endif
 }
 
 /* Firmware heap as a reserve for module data: only with fw_heap = on and a limit set */
@@ -175,6 +198,7 @@ static void setup_memory(void)
         log_printf(OMK_LOG_INFO, "memory: firmware heap allowed, limit %u", limit);
 }
 
+#ifdef OMK_DEBUG
 static u32 restart_cause;                   /* the firmware's restart word, read before anything else */
 
 /* The causes 0x60058afa prints for the word (its strings at 0x6007bfd4..) */
@@ -195,7 +219,6 @@ static const char *restart_name(u32 v)
         return "no text in the firmware";
     }
 }
-
 static void log_diagnostics(void)
 {
     omk_crash c;
@@ -218,6 +241,7 @@ static void log_diagnostics(void)
     for (i = 0; drv_fwheap_class(i, &block, &total, &free); i++)
         log_printf(OMK_LOG_DEBUG, "firmware heap %u: %u of %u blocks free", block, free, total);
 }
+#endif
 
 static omk_store *core_store;
 static int prev_ended = 1;                 /* count_boot: the previous run ended with a power-off */
@@ -252,7 +276,11 @@ static void count_boot(omk_store *s)
  * exposure sequence stops and starts the live view's exposure stream, or a transition - and UI_SETTLE_MS after it: the
  * firmware itself does no file work then, and a background writer keeps out of the camera's way as it keeps out of a
  * picture being written (drv_card_busy). Bounded: a passing state longer than UI_HOLD_MAX_MS is a stuck camera, and its
- * lines (the task dump) go to the card again */
+ * lines (the task dump) go to the card again.
+ * A debug build only: the hold needs the application's state read at every pass, and a release build does not probe the
+ * camera's state; its writes are a few short lines and the stores, kept off a picture being written (drv_card_busy,
+ * drv_prof_take_recent) and off the lever (power_card_ok) */
+#ifdef OMK_DEBUG
 #define UI_HOLD_MAX_MS 6000
 #define UI_SETTLE_MS 500
 
@@ -281,16 +309,23 @@ static int ui_hold(u32 now)
     after = 0;
     return 0;
 }
+#else
+#define ui_hold(now) 0
+#endif
 
+#ifdef OMK_DEBUG
 int core_prev_ended(void)
 {
     return prev_ended;
 }
+#endif
 
+#ifdef OMK_DEBUG
 const char *core_run(void)
 {
     return run_id;
 }
+#endif
 
 /* Power-off, at the card-off gate, just before the last save */
 void core_mark_ended(void)
@@ -306,7 +341,7 @@ void core_mark_ended(void)
 void core_main(void)
 {
     u32 *p, tick, deferred = 0, deferred_ms = 0;
-    int cfg_state, loaded = 1, busy, wait_told = 0, dirs_ok;
+    int cfg_state, loaded = 1, busy, wait_told = 0, dirs_ok, events = 1;
 
     for (p = __bss_start; p < __bss_end; p++)
         *p = 0;
@@ -315,7 +350,9 @@ void core_main(void)
                                                firmware function is called - no log either (it takes the firmware
                                                lock and opens a file). Back to the loader, silently */
         return;
+#ifdef OMK_DEBUG
     restart_cause = drv_restart_cause();    /* before core does anything else */
+#endif
     omk_ms();
     mem_init();
     make_run_id();
@@ -326,15 +363,20 @@ void core_main(void)
     if (!dirs_ok)
         log_printf(OMK_LOG_WARN, "cannot make the folders %s and %s", LOG_DIR, STORE_DIR);
     setup_memory();
+#ifdef OMK_DEBUG
     log_diagnostics();
+#endif
     count_boot(store_open("CORE", CORE_STORE_SIZE));
     log_checkpoint("boot: config, log and store ready");
     /* SHOOT.RUN now, not after the modules: a scenario without hands must hold USB before the firmware applies its USB
      * choice - in the start with the cable in that is the card's mount, about when core starts (handsfree.c) */
     hf_setup(shoot_once());
-    if (drv_wait_init(cfg_bool("core", "core_events", 1)) > 0)
+#ifdef OMK_DEBUG
+    events = cfg_bool("core", "core_events", 1);   /* a diagnostic switch: a release build always waits on the flag */
+#endif
+    if (drv_wait_init(events) > 0)
         log_printf(OMK_LOG_DEBUG, "boot: the core task waits on an event flag");
-    else if (cfg_bool("core", "core_events", 1))
+    else if (events)
         log_printf(OMK_LOG_WARN, "boot: no event flag for the core task, plain sleep");
     log_checkpoint("boot: installing power hooks");
     power_install();

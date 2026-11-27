@@ -543,6 +543,7 @@ int drv_edp_install(void)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 void drv_edp_gaps(u32 *min, u32 *last, u32 *count)
 {
     volatile u32 *e = edp();
@@ -551,6 +552,7 @@ void drv_edp_gaps(u32 *min, u32 *last, u32 *count)
     *last = e[EDP_GAP_LAST];
     *count = e[EDP_GAPS];
 }
+#endif
 
 void drv_edp_stats(u32 *items, u32 *renders, u32 *cpu, u32 *drawn, u32 *failed)
 {

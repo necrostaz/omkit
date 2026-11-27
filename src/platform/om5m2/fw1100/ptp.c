@@ -11,9 +11,15 @@
  * handler with calls (a2), a0 the request {u16 code; ...; u32 n @12; u32 p1..p5 @16}, a1 the response (the same layout, not
  * filled in before), and reads d2, d3 after it. A C operation is entered through _drv_ptp_entry, which keeps every register
  * and calls drv_ptp_call; that finds the operation by its code, gives it a copy of the parameters and writes its answer.
- * The table is core's cached data: it is read only by tasks of CPU 0 (0x28, PTPCOM), like the import's tables. */
+ * The table is core's cached data: it is read only by tasks of CPU 0 (0x28, PTPCOM), like the import's tables.
+ *
+ * A release build has the registration alone, for the one operation of the profiles' import (import.c, its handler in
+ * assembly); the C operations with their data phases, the history, the memory rule and the kept memory are the debug
+ * service's, a debug build's. */
 #include "omk_drv.h"
+#ifdef OMK_DEBUG
 #include "memread.h"
+#endif
 
 #define PTP_OPS 8
 #define PTP_FLAG_NO_SESSION 1
@@ -29,12 +35,14 @@ static ptp_op ops[PTP_OPS];
 static volatile u32 n_ops;                  /* an entry is whole before the count includes it */
 static int hooked;
 
-void drv_ptp_entry(void);                   /* thunks.s */
-void drv_tramp_ptp_reg(void);
+void drv_tramp_ptp_reg(void);               /* thunks.s */
 u32 drv_ptp_reg_fw(u32 code, u32 phase, void *handler, u32 flag);
+#ifdef OMK_DEBUG
+void drv_ptp_entry(void);
 u32 drv_ptp_send_fw(u32 len, u32 total, const void *buf);
 u32 drv_ptp_recv_len_fw(void);
 u32 drv_ptp_recv_fw(u32 len, void *buf);
+#endif
 
 /* Driver parts that have a handler of their own in assembly (import.c: 0x970B) */
 int drv_ptp_add_raw(u32 code, u32 phase, void *handler)
@@ -54,6 +62,7 @@ int drv_ptp_add_raw(u32 code, u32 phase, void *handler)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 int drv_ptp_add(u32 code, u32 phase, drv_ptp_fn fn)
 {
     u32 n = n_ops;
@@ -63,6 +72,7 @@ int drv_ptp_add(u32 code, u32 phase, drv_ptp_fn fn)
     ops[n].fn = fn;
     return 0;
 }
+#endif
 
 /* From the hook in the registration tail (task 0x28, CPU 0) */
 void drv_ptp_reg_all(void)
@@ -75,6 +85,7 @@ void drv_ptp_reg_all(void)
         drv_ptp_reg_fw(ops[i].code, ops[i].phase, ops[i].fw, PTP_FLAG_NO_SESSION);
 }
 
+#ifdef OMK_DEBUG
 /* The request and response the dispatcher hands to a handler */
 #define REQ_CODE 0
 #define REQ_N 12
@@ -104,6 +115,7 @@ void drv_ptp_call(const u8 *req, u8 *resp)
     for (i = 0; i < r.n; i++)
         *(u32 *)(resp + REQ_P + 4 * i) = r.p[i];
 }
+#endif
 
 int drv_ptp_install(void)
 {
@@ -113,10 +125,12 @@ int drv_ptp_install(void)
         u8 bytes[8];
     } fns[] = {                             /* the first bytes of the functions the thunks call */
         {0x614c0156, {0x93, 0xfc, 0xa0, 0x44, 0x21, 0x3a, 0x62, 0x96}},   /* registration */
+#ifdef OMK_DEBUG
         {0x614c02d6, {0x93, 0x83, 0xf1, 0xe6, 0xfc, 0xad, 0x9a, 0x11}},   /* data to the computer */
         {0x614c0399, {0xfc, 0xad, 0x9a, 0x11, 0x3a, 0x62, 0x08, 0xa5}},   /* data from it: the header */
         {0x614c040f, {0xfc, 0xa5, 0x94, 0x11, 0x3a, 0x62, 0x92, 0x82}},   /* data from it */
         {0x606aa6ba, {0x47, 0x04, 0x92, 0xdd, 0xa7, 0xe9, 0x00, 0x00}},   /* rename */
+#endif
     };
     u32 i, k;
     int rc;
@@ -133,6 +147,7 @@ int drv_ptp_install(void)
     return rc;
 }
 
+#ifdef OMK_DEBUG
 /* The firmware's check of a data buffer (0x614c0cfc): an even address with bit 30 clear - not a cached alias. Ours are
  * from the arena (uncached), 128-aligned */
 int drv_ptp_buffer_ok(const void *buf)
@@ -200,3 +215,4 @@ int drv_keep_area(void **base, u32 *size)
     *size = KEEP_SIZE;
     return 1;
 }
+#endif

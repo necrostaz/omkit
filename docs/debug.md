@@ -1,7 +1,9 @@
 # DEBUG: the RAM log and the USB debug channel
 
-`core` 1.40 has a debug service for developers. It is **off** unless `OMKIT.INI` turns it on, and the release's
-`OMKIT.INI` does not. With it on:
+`core` 1.40 has a debug service for developers. It exists **only in a debug build** of `core` (`make BUILD=debug`,
+[build.md](build.md#35-release-and-debug-builds)): a release build - every published release - has none of its code, and
+`[debug]` in its `OMKIT.INI` only gets a warning. To use the service, put a debug build's `CORE.BIN` on the card. In a
+debug build it is **off** unless `OMKIT.INI` turns it on. With it on:
 
 - the log of `core` and of the modules, and short snapshots of the camera's file and recording tasks, also go to a
   ring buffer in RAM that survives a reset of the camera (not a power-off and not the battery taken out). After a

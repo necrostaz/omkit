@@ -352,10 +352,13 @@ int drv_power_pending(void)
 
 u32 host_k3;                                /* K3 of the power probe: the firmware's power-off or sleep began */
 
+u32 host_probes, host_rtc_reads;            /* reads of the camera's state words and of the subprocessor clock */
+
 u32 drv_power_probe(u32 *w, u32 max)
 {
     u32 n;
 
+    host_probes++;
     for (n = 0; n < max && n < 6; n++)
         w[n] = n == 0 ? (u32)host_power_pending : n == 1 ? host_k3 : 0;
     return n;
@@ -504,6 +507,7 @@ void drv_date(drv_date_t *d)
 
 int drv_rtc(u32 *sec, u32 *frac1024)
 {
+    host_rtc_reads++;
     if (!host_rtc_ok)
         return -1;
     *sec = host_rtc_sec;
@@ -1062,6 +1066,7 @@ u32 host_keys;                              /* the raw input byte of drv_ui_prob
 
 __attribute__((weak)) int drv_ui_probe(u32 *app, u32 *keys)
 {
+    host_probes++;
     *app = host_ui_state == DRV_UI_HALF ? 0x5101 : host_app;
     *keys = host_keys;
     return host_ui_state;

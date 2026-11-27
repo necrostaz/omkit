@@ -49,12 +49,14 @@ static const struct {
     {0x60051143, {0x5b, 0x38, 0x93, 0x96, 0x86, 0x42, 0x1c, 0x00}},   /* OlyEvWt */
     {0x60051078, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xba, 0x28, 0xc0}},   /* OlyEvSt */
     {0x6005123a, {0x86, 0x83, 0x9a, 0x00, 0xcd, 0xf8, 0x26, 0xc0}},   /* OlyEvCl */
+#ifdef OMK_DEBUG                            /* the functions of the restart job and of the reset */
     {0x60023796, {0xfa, 0xc8, 0x80, 0x00, 0xc5, 0x05, 0x00, 0xca}},   /* scheap_alloc */
     {0x6089e157, {0xfc, 0xa0, 0x18, 0x41, 0xe4, 0x61, 0xb0, 0x00}},   /* CameraCommon */
     {0x608591a7, {0x92, 0xfc, 0xce, 0xf0, 0xad, 0xb4, 0x60, 0x6a}},   /* HFW job constructor */
     {0x60858d8e, {0xfc, 0xa0, 0x6c, 0x20, 0xe4, 0x61, 0xb0, 0x00}},   /* HFW callback executor */
     {0x60858e51, {0x82, 0x43, 0x04, 0x97, 0xbf, 0x00, 0xc9, 0x05}},   /* HFW job post */
     {0x60058ae0, {0xfc, 0x81, 0xb0, 0x00, 0xf0, 0x8f, 0x80, 0x01}},   /* reset on request */
+#endif
 };
 
 const char *drv_name(void)
@@ -122,6 +124,7 @@ int drv_mem_region(u32 i, void **base, u32 *size)
     return 1;
 }
 
+#ifdef OMK_DEBUG
 /* Only the NMI handler writes task, it is the task number. Vector 0x60030020 updates sp, psw, pc of CPU 0 on every interrupt.
  * RAM is lost at power-off: the block is almost all ones with random flipped bits, so the value matters, not the difference from ffffffff */
 int drv_crash_read(int cpu, omk_crash *out)
@@ -138,13 +141,16 @@ int drv_crash_read(int cpu, omk_crash *out)
         out->regs[i] = src[8 + i];
     return out->task > 0 && out->task < 0x1000;
 }
+#endif
 
+#ifdef OMK_DEBUG
 /* A word of the processor's shared memory (0x8ff0...): the firmware reads and writes it with plain mov, as kernel.c
  * reads the kernel pointers next to it. Nothing at start clears it (its writers are the restart paths only) */
 u32 drv_restart_cause(void)
 {
     return *(const volatile u32 *)0x8ff000b0;
 }
+#endif
 
 /* Jump in firmware code through the uncached address: memory protection watches only 0x6....
  * Verified on the camera. The five bytes do not cross an instruction cache line, the first byte is written last */
@@ -283,10 +289,12 @@ static volatile u32 *other_cpu_calls(void)
     return (volatile u32 *)((u32)other_cpu_slot + UNCACHED);
 }
 
+#ifdef OMK_DEBUG                            /* for the log's counters */
 u32 drv_ev_other_cpu(u32 event)
 {
     return event < 16 ? other_cpu_calls()[event] : 0;
 }
+#endif
 
 /* From the trampoline. Response to the firmware: the original one if modules did not change allowed, otherwise 0 or PM_REJECTED */
 void drv_hook_pm(hook_regs *r)
@@ -319,6 +327,7 @@ void drv_hook_s1(void)
     ev_dispatch(OMK_EV_S1_API, 0, s1_orig, 0);
 }
 
+#ifdef OMK_DEBUG
 /* ------------------------------------------------------------------------------------------------------------------
  * Screen or viewfinder, for the power probe line of the log: video compositor channel 0, scale of OSD plane 2. On the camera
  * the screen has no scaling (0), the viewfinder has it (0x11, window 1024 x 768): .
@@ -330,6 +339,7 @@ static u32 vsc(u32 off)
 {
     return ((const volatile u32 *)VSC0)[off / 4];
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------------------------------
  * Power hooks. The sites' bytes are checked against the
@@ -399,6 +409,10 @@ int drv_power_pending(void)
     return *(const volatile u32 *)LEVER_OFF_FLAG == 1;
 }
 
+/* From here to the media busy flags: a debug build's - the probe words of the log and of the dumps, the keys and events of
+ * the test scenario, the restarts and the reset of the rescue and of the scenario without hands, the USB hold. A release
+ * build reads the lever's flag above and nothing more of the camera's state */
+#ifdef OMK_DEBUG
 static int ram_ptr(u32 p)
 {
     return p >= 0x60000000 && p < 0x64000000 && !(p & 3);
@@ -620,6 +634,8 @@ int drv_shutter(u32 key, int down, u32 path)
     return drv_key_api(0x2000100 + key, down ? 0 : 1) & 0xffff;
 }
 
+#endif
+
 /* Media busy flags: the camera's power code waits while (0x61e418f0) = 1 or (0x61e418f4) != 0
  * before sleep. A hypothesis that this is the camera's own card work (a picture being written); core's writes do not set
  * them. Read through the cache on CPU 0, like the firmware */
@@ -728,6 +744,7 @@ int drv_wait_state(void)
     return core_flag;
 }
 
+#ifdef OMK_DEBUG
 /* ------------------------------------------------------------------------------------------------------------------
  * Subprocessor clock: seconds at 0x98e00098, 1/1024 s in bits 5..14 of
  * 0x98e0009c; it keeps counting while the camera sleeps. The firmware checks the block id first: ((0x98e00000) >> 2) & 63 = 42.
@@ -751,3 +768,4 @@ int drv_rtc(u32 *sec, u32 *frac1024)
     }
     return -1;
 }
+#endif

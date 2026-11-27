@@ -23,6 +23,14 @@ static int failed;
         }                                                                       \
     } while (0)
 
+/* A check of something only a debug build has (a line of the debug level, the rescue, the clock correction): the programs
+ * are built and run for both kinds (OMKit/Makefile, BUILD) */
+#ifdef OMK_DEBUG
+#define CHECK_DEBUG(x) CHECK(x)
+#else
+#define CHECK_DEBUG(x) ((void)0)
+#endif
+
 static long file_size(const char *name)
 {
     char p[512];
@@ -674,7 +682,8 @@ static void test_mem(void)
     CHECK(t && strstr(t, " W memory: PROFILES 4 more failures, last 20000 bytes"));
     CHECK(t && strstr(t, " W memory: arena 100% used, 0 bytes free, largest 0"));
     CHECK(t && strstr(t, " I firmware heap 16384: 1 of 4 blocks free, 0 of them ours in use"));
-    CHECK(t && strstr(t, " D memory: PROFILES used 65504 peak 68576 allocs 5 fails 5 firmware heap 0"));
+    CHECK_DEBUG(t && strstr(t, " D memory: PROFILES used 65504 peak 68576 allocs 5 fails 5 firmware heap 0"));
+    CHECK(t && (LOG_MAX == OMK_LOG_DEBUG || !strstr(t, " D ")));   /* a release build writes no line of the debug level */
     free(t);
     mem_free(big);
     mem_free(filler);
@@ -759,7 +768,11 @@ static void test_power(void)
         CHECK(host_wakes == wakes + 2);
         m0 = omk_ms();
         CHECK(power_service(now = now_after(250)) == 1);
-        CHECK(omk_ms() - m0 >= 3 * 1073742 && omk_ms() - m0 < 3 * 1073742 + 1000);
+        /* the correction by the subprocessor clock is a debug build's; a release build does not read that clock */
+        CHECK_DEBUG(omk_ms() - m0 >= 3 * 1073742 && omk_ms() - m0 < 3 * 1073742 + 1000);
+#ifndef OMK_DEBUG
+        CHECK(omk_ms() - m0 < 1000 && host_rtc_reads == 0);
+#endif
         /* a short sleep with the clock set forward by the user meanwhile: no whole turns, nothing added */
         power_hook(POWER_HOOK_SLEEP, 0);
         CHECK(power_service(now = now_after(250)) == 0);
@@ -800,12 +813,15 @@ static void test_power(void)
 
     log_flush();
     t = read_file("LOG/CORE.LOG", &len);
-    CHECK(t && strstr(t, "power: 1 of 1 hooks installed"));
+    CHECK_DEBUG(t && strstr(t, "power: 1 of 1 hooks installed"));
     CHECK(t && strstr(t, "power: power-off already under way at start, modules wait"));
     CHECK(t && strstr(t, "power-off: power lever before core started, "));
     CHECK(t && strstr(t, "power: lever flag still set, ignored until it clears"));
     CHECK(t && strstr(t, "power-off: power lever flag (polled), "));
-    CHECK(t && strstr(t, "power probe: lever 1, "));
+    CHECK_DEBUG(t && strstr(t, "power probe: lever 1, "));
+#ifndef OMK_DEBUG
+    CHECK(t && !strstr(t, "power probe") && host_probes == 0);   /* a release build never reads the probe words */
+#endif
     CHECK(t && strstr(t, "power-off: power lever, "));
     CHECK(t && strstr(t, "power: card off, core ready, waited 0 ms"));
     CHECK(t && strstr(t, "power-off did not happen, running again"));
@@ -1120,28 +1136,33 @@ static void test_layer(int phase)
     if (phase == 1) {
         CHECK(host_opt_sub == DRV_OPTICS_L4);
         CHECK(host_opt_layer.route == DRV_OPTICS_PAIR && host_opt_layer.width == 324);
-        CHECK(host_opt_layer.order == DRV_OPTICS_ORDER_AUTO && host_opt_layer.gamma == 220);
-        CHECK(host_opt_layer.tb == 200 && host_opt_layer.th == 225);
-        CHECK(host_opt_layer.sb == (80u | 200u << 16) && host_opt_layer.mixb == 64 && host_opt_layer.sh == 40);
-        CHECK(host_opt_layer.gb == 150 * 256 / 100 && host_opt_layer.gh == 200 * 256 / 100);   /* the strongest step's */
+        /* the keys not given: the field set's values (optics.c's OPT_*) */
+        CHECK(host_opt_layer.order == (0u | 1u << 8 | 2u << 16) && host_opt_layer.gamma == 220);
+        CHECK(host_opt_layer.tb == 180 && host_opt_layer.th == 240);
+        CHECK(host_opt_layer.sb == (80u | 200u << 16) && host_opt_layer.mixb == 64 && host_opt_layer.sh == 45);
+        CHECK(host_opt_layer.gb == 110 * 256 / 100 && host_opt_layer.gh == 220 * 256 / 100);   /* the strongest step's */
         CHECK(host_opt_layer.sbv == 5 && host_opt_layer.shv == 2);     /* a test's strengths in place of the rows' */
-        CHECK(host_opt_layer.steps[0][0] == 20 && host_opt_layer.steps[0][4] == 100 && host_opt_layer.steps[1][0] == 16);
+        CHECK(host_opt_layer.steps[0][0] == 20 && host_opt_layer.steps[0][4] == 100 && host_opt_layer.steps[1][0] == 10 &&
+              host_opt_layer.steps[1][3] == 80 && host_opt_layer.steps[1][4] == 140);
         CHECK(host_opt_layer.day[0] == 95 && host_opt_layer.day[1] == 125 && host_opt_layer.day[2] == 60 &&
-              host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 6);
+              host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 100);
         CHECK(host_opt_layer.bench == 0 && host_look_rows == 1);
-        CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 70 * 256 / 100);
-        CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 0 && host_opt_layer.cached == 0);
-        CHECK(!host_opt_layer.btoe && !host_opt_layer.bmax && !host_opt_layer.htoe && !host_opt_layer.hmax);  /* no curve */
+        CHECK(host_opt_layer.hcb == -50 * 256 / 100 && host_opt_layer.hcr == 42 * 256 / 100);
+        CHECK(host_opt_layer.hcb2 == -40 * 256 / 100 && host_opt_layer.hcr2 == 75 * 256 / 100 && host_opt_layer.hcode == 70);
+        CHECK(host_opt_layer.hcore == 1 && host_opt_layer.bcol == 300 * 256 / 100 && host_opt_layer.dark == 256);
+        CHECK(host_opt_layer.read == 1 && host_opt_layer.read_us == 0 && host_opt_layer.cached == 1);
+        CHECK(!host_opt_layer.btoe && host_opt_layer.bmax == 38 * 4095 / 100 && host_opt_layer.htoe == 3 * 4095 / 100 &&
+              host_opt_layer.hmax == 60 * 4095 / 100);
         CHECK(host_opt_layer.jobs == DRV_OPTICS_JOBS_FIRST);           /* the second job of RAW+JPEG without the layer */
-        CHECK(host_opt_layer.lcached == 0);
-        CHECK(host_opt_layer.em == 16 && host_opt_layer.bdark == 80 * 256 / 100 && host_opt_layer.hfirst == 1);
-        CHECK(host_opt_layer.emb == 16);                                /* Bloom's source: the common one */
-        CHECK(host_opt_layer.tmix == 0 && host_opt_layer.st == 0);     /* the tail off by default */
-        CHECK(host_opt_layer.haze == 0);                                /* and the haze */
+        CHECK(host_opt_layer.lcached == 1);
+        CHECK(host_opt_layer.em == 32 && host_opt_layer.bdark == 80 * 256 / 100 && host_opt_layer.hfirst == 1);
+        CHECK(host_opt_layer.emb == 4);                                 /* each its own source */
+        CHECK(host_opt_layer.tmix == 50 * 256 / 100 && host_opt_layer.st == 400);   /* half of Bloom in the tail */
+        CHECK(host_opt_layer.haze == 0);                                /* no haze */
     } else {
         CHECK(host_opt_sub == DRV_OPTICS_N);    /* the schedule's first entry later */
         CHECK(host_opt_layer.route == DRV_OPTICS_403 && host_opt_layer.width == 400);   /* 648 clamped to 400 */
-        CHECK(host_opt_layer.order == (1u | 2u << 8 | 0u << 16) && host_opt_layer.gb == 150 * 256 / 100);
+        CHECK(host_opt_layer.order == (1u | 2u << 8 | 0u << 16) && host_opt_layer.gb == 110 * 256 / 100);
         CHECK(host_opt_layer.sbv == DRV_OPTICS_ROWS && host_opt_layer.shv == 1);
         CHECK(host_opt_layer.lcached == 1);
         CHECK(host_opt_layer.htoe == 5 * 4095 / 100 && host_opt_layer.hmax == 60 * 4095 / 100);
@@ -1151,12 +1172,11 @@ static void test_layer(int phase)
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
     CHECK(t && strstr(t, "optics: layer: route"));
-    CHECK(t && strstr(t, phase == 1 ? "the layer read and written past the cache" :
-                                      "the layer read and written through the CACHED view"));
+    CHECK(t && strstr(t, "the layer read and written through the CACHED view"));   /* the default too */
     if (phase == 1)
         CHECK(t && strstr(t, "optics: probe level 0: a step in the look's stills on the mask route; the stills get L4") &&
               strstr(t, "optics: layer: the strength's curve after the blur (percent of white; 0 - none): Bloom toe 0, "
-                        "at most 0; Halation toe 0, at most 0") &&
+                        "at most 38; Halation toe 3, at most 60") &&
               strstr(t, "optics: layer: jobs = first - the second job of a RAW+JPEG press (the ORF's preview) without "
                         "the layer") && strstr(t, "picture read on, 2 rows a cell") &&
               !strstr(t, "read_ms is not taken"));
@@ -1199,12 +1219,12 @@ static void test_layer_rows(void)
     CHECK(host_opt_sub == DRV_OPTICS_L4 && host_look_rows == 1);
     CHECK(host_opt_layer.sbv == DRV_OPTICS_ROWS && host_opt_layer.shv == DRV_OPTICS_ROWS);
     CHECK(host_opt_layer.steps[0][0] == 10 && host_opt_layer.steps[0][3] == 40 && host_opt_layer.steps[0][4] == 200);
-    CHECK(host_opt_layer.steps[1][0] == 16 && host_opt_layer.steps[1][4] == 100);    /* not five: the default */
+    CHECK(host_opt_layer.steps[1][0] == 10 && host_opt_layer.steps[1][4] == 140);    /* not five: the default */
     CHECK(host_opt_layer.day[0] == 60 && host_opt_layer.day[1] == 120 && host_opt_layer.day[2] == 60 &&
           host_opt_layer.day[3] == 140 && host_opt_layer.day[4] == 100 && host_opt_layer.day[5] == 35);
     CHECK(host_opt_layer.bench == 1 && host_opt_layer.tmix == 90 * 256 / 100);   /* the tail at most 90 % */
     CHECK(host_opt_layer.haze == 25 * 4096 / 100);                  /* the haze at most 25 % */
-    CHECK(host_opt_layer.emb == 4 && host_opt_layer.em == 16);      /* Bloom's own source, Halation's the common one */
+    CHECK(host_opt_layer.emb == 4 && host_opt_layer.em == 32);      /* Bloom's own source, the halation's own default */
     CHECK(!optics_route());
     optics_service(1000);                   /* the look gives nothing yet: 0, 0 */
     CHECK(host_opt_str == 0 && host_opt_strs == 1 && !optics_route());
@@ -1254,12 +1274,12 @@ static void test_layer_rows(void)
     CHECK(host_opt_str == 0 && host_opt_strs == 7 && !optics_route());
     log_flush();
     t = read_file("LOG/CORE.LOG", &n);
-    CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 200"));
-    CHECK(t && strstr(t, "optics: layer: strengths 1..5 - Bloom 10 20 30 40 200%, Halation 16 25 40 63 100% of the gains; "
+    CHECK(t && strstr(t, "optics: layer: Bloom by the look's rows (threshold 180"));
+    CHECK(t && strstr(t, "optics: layer: strengths 1..5 - Bloom 10 20 30 40 200%, Halation 10 19 34 80 140% of the gains; "
                          "the bench on"));
     CHECK(t && strstr(t, "optics: layer: a day scene (mean Y 60..120 or 6..14% at code 200): Bloom 100%, "
                          "Halation 35% of the gains"));
-    CHECK(t && strstr(t, "tail 90% of sigma 300, haze 25%)"));
+    CHECK(t && strstr(t, "tail 90% of sigma 400, haze 25%)"));
     CHECK(t && strstr(t, "optics: the look's white now: code 199 (its tables"));
     CHECK(t && strstr(t, "optics: layer: the look's white auto (its tables', else the shelf of the layer's Y)"));
     CHECK(t && strstr(t, "optics: layer: Bloom's own source - the emission of a blown pixel as 4 whites"));
@@ -1286,7 +1306,7 @@ static void test_layer_sets(void)
 
     omk_dir(LOG_DIR);
     write_file("OMKIT.INI", "[optics]\nbloom = 3\nhalation = 3\nemission = 0\nbloom_dark = 0\nhalation_first = 0\n"
-                            "schedule = N, L4, L4:A, L4:b, L4:Z, W1:A, L2:A\n"
+                            "bloom_tail = 0\nschedule = N, L4, L4:A, L4:b, L4:Z, W1:A, L2:A\n"
                             "[optics.A]\nbloom = 5\nemission = 16\nbloom_tail = 30\nbloom_tail_sigma = 250\n"
                             "bloom_dark = 80\n[optics.B]\nhalation_gain = 3000\nhalation_first = 1\n");
     CHECK(cfg_load() == 1);
@@ -1302,10 +1322,10 @@ static void test_layer_sets(void)
     optics_setup();
     CHECK(host_opt_nsets == 2);
     CHECK(host_opt_layer.em == 0 && host_opt_layer.bdark == 0 && host_opt_layer.hfirst == 0 && host_opt_layer.tmix == 0);
-    CHECK(host_opt_layer.gb == 150 * 256 / 100 && host_opt_layer.sbv == 3 && host_opt_layer.shv == 3);
-    CHECK(host_opt_sets[1].sbv == 5 && host_opt_sets[1].shv == 3 && host_opt_sets[1].gh == 200 * 256 / 100);
+    CHECK(host_opt_layer.gb == 110 * 256 / 100 && host_opt_layer.sbv == 3 && host_opt_layer.shv == 3);
+    CHECK(host_opt_sets[1].sbv == 5 && host_opt_sets[1].shv == 3 && host_opt_sets[1].gh == 220 * 256 / 100);
     CHECK(host_opt_sets[1].em == 16 && host_opt_sets[1].tmix == 30 * 256 / 100 && host_opt_sets[1].st == 250);
-    CHECK(host_opt_sets[1].bdark == 80 * 256 / 100 && host_opt_sets[1].hfirst == 0 && host_opt_sets[1].th == 225);
+    CHECK(host_opt_sets[1].bdark == 80 * 256 / 100 && host_opt_sets[1].hfirst == 0 && host_opt_sets[1].th == 240);
     CHECK(host_opt_sets[2].gh == 3000 * 256 / 100 && host_opt_sets[2].hfirst == 1 && host_opt_sets[2].em == 0);
     CHECK(host_opt_sets[2].tmix == 0 && host_opt_sets[2].st == 0);
     optics_service(1000);                   /* the worker made, the first entry given */
@@ -1319,7 +1339,7 @@ static void test_layer_sets(void)
     t = read_file("LOG/CORE.LOG", &n);
     CHECK(t && strstr(t, "optics: schedule of 5 entries"));
     CHECK(t && strstr(t, "'L4:Z' is not a substage") && strstr(t, "'W1:A' is not a substage"));
-    CHECK(t && strstr(t, "optics: layer settings A: Bloom 5, a test (threshold 200, sigma 60 + 0 at 0%, gain 150% at 5, "
+    CHECK(t && strstr(t, "optics: layer settings A: Bloom 5, a test (threshold 180, sigma 90 + 0 at 0%, gain 110% at 5, "
                          "80% less on white; tail 30% of sigma 250, haze 0%)"));
     CHECK(t && strstr(t, "optics: layer settings B: Halation 3, a test") && strstr(t, "before Bloom"));
     CHECK(t && strstr(t, "optics: layer settings A: the source - the emission of a blown pixel as 16 whites"));
@@ -1331,7 +1351,8 @@ static void test_layer_sets(void)
 /* The lever off without a power-off (the camera stuck, the firmware never powers off): no card writes while it stays off,
  * whatever the log and store services are asked; writes again when it is on. A stuck application (a half-press state,
  * the shutter released): after 8 s the last save, the power-off job twice, then the watchdog; a held half-press is no
- * hang and gets no rescue */
+ * hang and gets no rescue. The rescue is a debug build's: a release build holds the writes and reads nothing but the
+ * lever's flag - no probe of the application's state, no job, no reset */
 static void test_lever(void)
 {
     omk_store *s;
@@ -1398,6 +1419,7 @@ static void test_lever(void)
     CHECK(host_hfw_posts == 0);
     for (i = 0; i < 8 && !host_hfw_posts; i++)
         power_service(now = now_after(250));
+#ifdef OMK_DEBUG
     CHECK(host_hfw_posts == 1 && host_resets == 0 && !power_card_ok());
     posts = host_hfw_posts;
     for (i = 0; i < 12; i++)                                /* no power-off hook: posted again after 1 s, then the reset */
@@ -1410,14 +1432,66 @@ static void test_lever(void)
     CHECK(t && strstr(t, "power: rescue: the power-off job posted (0), try 2 of 2"));
     CHECK(t && strstr(t, "power: rescue: the power-off job did not run: reset by the watchdog (cause 4f4d4b50)"));
     free(t);
+#else
+    (void)posts;
+    for (i = 0; i < 80; i++)                                /* 20 s more: the hold stays, nothing else happens */
+        power_service(now = now_after(250));
+    CHECK(host_hfw_posts == 0 && host_resets == 0 && host_probes == 0);
+    CHECK(power_running() && !power_card_ok());
+    host_power_pending = 0;
+    CHECK(power_service(now = now_after(250)) == 1 && power_card_ok());
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &len1);
+    CHECK(t && !strstr(t, "rescue") && !strstr(t, "stuck"));
+    free(t);
+#endif
     CHECK(file_size("STORE/TEST.STA") == 512);
+}
+
+/* The build's kind: the log's highest level, the lines of the debug level, the sample OMKIT.INI and the sections of the
+ * debug build */
+static void test_kind(void)
+{
+    long n;
+    char *t;
+
+    CHECK(cfg_load() == 0);                                 /* no file: the sample is written */
+    t = read_file("OMKIT.INI", &n);
+    CHECK(t && !strstr(t, "[debug]") && !strstr(t, "[shoot]") && !strstr(t, "taskdump") && !strstr(t, "power_rescue"));
+    CHECK(t && !strstr(t, "mask_test") && !strstr(t, "core_events") && !strstr(t, "fw_cache_inv"));
+#ifdef OMK_DEBUG
+    CHECK(!strcmp(OMK_BUILD, "debug") && LOG_MAX == OMK_LOG_DEBUG);
+    CHECK(t && strstr(t, "; error | warn | info | debug - how much detail"));
+    CHECK(!cfg_debug_section("debug") && !cfg_debug_section("shoot") && !cfg_debug_section("core"));
+#else
+    CHECK(!strcmp(OMK_BUILD, "release") && LOG_MAX == OMK_LOG_INFO);
+    CHECK(t && strstr(t, "; error | warn | info - how much detail") && !strstr(t, "debug"));
+    CHECK(cfg_debug_section("debug") && cfg_debug_section("SHOOT") && !cfg_debug_section("core") &&
+          !cfg_debug_section("modules") && !cfg_debug_section("grain"));
+#endif
+    free(t);
+    log_setup(1, OMK_LOG_DEBUG);                            /* log_level = debug asked for */
+    CHECK(log_level() == LOG_MAX);
+    log_printf(OMK_LOG_DEBUG, "a line of the debug level %u", 1u);
+    log_printf(OMK_LOG_INFO, "a line of the info level");
+    log_printf(n ? OMK_LOG_DEBUG : OMK_LOG_INFO, "a level known at run time");
+    log_flush();
+    t = read_file("LOG/CORE.LOG", &n);
+    CHECK(t && strstr(t, " I a line of the info level"));
+    CHECK_DEBUG(t && strstr(t, " D a line of the debug level 1") && strstr(t, " D a level known at run time"));
+#ifndef OMK_DEBUG
+    CHECK(t && !strstr(t, "a line of the debug level") && !strstr(t, "a level known at run time"));
+#endif
+    free(t);
 }
 
 int main(int argc, char **argv)
 {
     host_dir = argc > 1 ? argv[1] : ".";
     mem_init();
-    if (argc > 2 && !strcmp(argv[2], "cfg"))
+    if (argc > 2 && !strcmp(argv[2], "kind"))
+        test_kind();
+    else if (argc > 2 && !strcmp(argv[2], "cfg"))
         test_cfg_parse();
     else if (argc > 2 && !strcmp(argv[2], "mem"))
         test_mem();

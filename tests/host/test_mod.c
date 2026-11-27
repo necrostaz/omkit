@@ -26,6 +26,14 @@ static int failed;
         }                                                                       \
     } while (0)
 
+/* A check of something only a debug build has (a line of the debug level, the rescue, the clock correction): the programs
+ * are built and run for both kinds (OMKit/Makefile, BUILD) */
+#ifdef OMK_DEBUG
+#define CHECK_DEBUG(x) CHECK(x)
+#else
+#define CHECK_DEBUG(x) ((void)0)
+#endif
+
 static char trace[64];
 static u32 ntrace, orig_calls, deferred, after_allowed;
 static const omk_api *the_api;
@@ -450,8 +458,8 @@ static void test_events(void)
     CHECK(t && strstr(t, "event pictmode_check: 2. HELLO replace priority 1"));
     CHECK(t && strstr(t, "event pictmode_check: hook installed, 5 handlers"));
     CHECK(t && strstr(t, "event s1_api: HELLO handler off in OMKIT.INI"));
-    CHECK(t && strstr(t, "event pictmode_check: 3 calls, 0 without handlers on another cpu, 1 nested"));
-    CHECK(t && strstr(t, "event pictmode_check: 5 calls, 0 without handlers on another cpu, 1 nested"));
+    CHECK_DEBUG(t && strstr(t, "event pictmode_check: 3 calls, 0 without handlers on another cpu, 1 nested"));
+    CHECK_DEBUG(t && strstr(t, "event pictmode_check: 5 calls, 0 without handlers on another cpu, 1 nested"));
     CHECK(t && strstr(t, " W event pictmode_check: 1 calls came from another task while the handlers were running"));
     CHECK(t && !strstr(t, "defer queue full"));
     CHECK(t && strstr(t, "phase 3 not allowed"));
@@ -547,7 +555,7 @@ static void test_load(void)
     CHECK(t && strstr(t, " I HELLO: fake init, greeting test"));
     CHECK(t && strstr(t, " W memory: HELLO wants 100000 bytes, over its limit"));
     CHECK(t && strstr(t, " E memory: HELLO frees "));
-    CHECK(t && strstr(t, "TOOLONGNAME.TXT"));
+    CHECK_DEBUG(t && strstr(t, "TOOLONGNAME.TXT"));
     CHECK(t && strstr(t, "modules: 1 running, 0 failed"));
     free(t);
     t = read_text("HELLO/OUT.TXT");
@@ -594,7 +602,7 @@ static void test_load(void)
     CHECK(prof_calls == 2 && prof_seen == OMK_PROF_NONE);
     log_flush();
     t = read_text("LOG/CORE.LOG");
-    CHECK(t && strstr(t, "power: HELLO power-off took ") && strstr(t, "power: HELLO wake took "));
+    CHECK_DEBUG(t && strstr(t, "power: HELLO power-off took ") && strstr(t, "power: HELLO wake took "));
     CHECK(t && strstr(t, "HELLO: on_power only from module_init"));
     CHECK(t && strstr(t, "profiles: 3 colour and 3 monochrome, owned by HELLO; stored picture mode 1"));
     CHECK(t && strstr(t, "profiles: the stored picture mode (5) is not the base one, monochrome profile 2 not applied"));

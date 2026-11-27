@@ -24,6 +24,7 @@ u32 omk_ms(void)
     return ms;
 }
 
+#ifdef OMK_DEBUG
 /* The tick counter wraps every ~1073 s: a sleep longer than that loses whole turns. The caller measured the sleep by a clock
  * that keeps counting (drv_rtc) and adds what the ticks could not see */
 void omk_ms_add(u32 ms)
@@ -35,3 +36,4 @@ void omk_ms_add(u32 ms)
     ms_total += ms;
     drv_unlock(st);
 }
+#endif

@@ -29,8 +29,10 @@ int power_service(u32 now);                 /* core task loop; 1 - running: card
 int power_running(void);                    /* card and screen are ours to use */
 int power_card_ok(void);                    /* running, and core may write to the card: not while the lever is off without a
                                                power-off (the battery may go at any moment), nor while core restarts a
-                                               stuck camera */
+                                               stuck camera (the rescue, a debug build's) */
+#ifdef OMK_DEBUG
 u32 power_cancels(void);                    /* how many power-offs and sleeps did not happen (core task) */
 u32 power_hook_count(u32 kind);             /* how many times that hook (POWER_HOOK_*) ran since the start */
+#endif
 
 #endif

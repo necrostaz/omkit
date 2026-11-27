@@ -678,12 +678,14 @@ int drv_exif_text(const char *t)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 u32 drv_exif_count(void)
 {
     volatile shared_t *sh = shared();
 
     return sh ? sh->exif_put : 0;
 }
+#endif
 
 /* Shooting parameter reader, before its last two fields (any task, maybe another CPU) */
 void drv_take_filter(u8 *s)
@@ -1202,6 +1204,7 @@ void drv_prof_stats(drv_prof_info *st)
 #define LV_SLOT_LAST 0xa26e5766
 #define LV_SLOT_ACTIVE 0xa26e5768
 #define LV_SLOTS 0xa26e57b4
+#ifdef OMK_DEBUG                            /* the live view context, for the log */
 #define LV_SLOT_SIZE 988
 #define LV_SLOT_COUNT 5
 
@@ -1236,6 +1239,7 @@ int drv_prof_lv_read(drv_lv_view *v)
     v->tone[2] = a[794];
     return 0;
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------------------------------
  * Profile icons. The picture table of the UI: word 1 of record 0 of resource block 0x0101,
@@ -2340,13 +2344,16 @@ u32 drv_ui_swallow(u32 id, u32 kind, u32 value)
     }
     if (d)
         look_step(sh, d);
+#ifdef OMK_DEBUG                            /* the dial trace, for the log */
     k = sh->dial_head % DIAL_TRACE;
     sh->dial_t[k] = drv_ticks();
     sh->dial_w[k] = (kind & 15) << 28 | (id == ID_CC_VIVID) << 24 | ((u32)d & 0xff) << 16 | (value & 0xffff);
     sh->dial_head++;
+#endif
     return 1;
 }
 
+#ifdef OMK_DEBUG
 /* The dial trace: up to max entries from *from on into t[], w[] (older than DIAL_TRACE back are lost: *lost); *from moves
  * past them. Returns how many */
 u32 drv_look_trace(u32 *from, u32 *lost, u32 *t, u32 *w, u32 max)
@@ -2369,6 +2376,7 @@ u32 drv_look_trace(u32 *from, u32 *lost, u32 *t, u32 *w, u32 max)
     *from = i;
     return n;
 }
+#endif
 
 /* ------------------------------------------------------------------------------------------------------------------
  * The look's editors (API 16): the tone curve, Color/Vivid of a colour preset, Color/Level of a black-and-white one.
@@ -3723,6 +3731,7 @@ int drv_look_list(const char *const *names, u32 count, u32 current)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 /* The test scenario (core/shoot.c), core task: the look's entry chosen as the user chooses it in the picture mode screen.
  * The look on: OMK_LOOK_ON with the entry for the owner at core's next loop (look_changed_ui, as the UI's own choice);
  * already on: the entry as a dial step (look_pick, OMK_LOOK_ENTRY); off: OMK_LOOK_OFF */
@@ -3783,6 +3792,7 @@ int drv_look_find(const char *name)
     }
     return -1;
 }
+#endif
 
 /* An entry's cassette drawing (a CANI section core has checked): copied into a new arena block (the renderer may still
  * read the old one: not freed) and published in the table. 0, -1 bad index, -2 no memory */

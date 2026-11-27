@@ -1,8 +1,11 @@
 #!/bin/sh
 # Run the host tests built by `make -C OMKit test` (OMKit/Makefile builds the programs; run from OMKit/).
 #
-#   sh tests/host/run.sh <dir of the test programs> <host C compiler> [<module dir> <MN10300 prefix> <python>]
+#   sh tests/host/run.sh <dir of the test programs> <host C compiler> <release|debug> [<module dir> <MN10300 prefix> <python>]
 #
+# The build's kind is the one the programs were compiled as (OMKit/Makefile, BUILD): the tests of the debug kind's own
+# parts - the test scenario, the scenario without hands, the debug service - run for a debug build only, and the group
+# "kind" of test_core checks what each kind does with the debug build's settings.
 # <module dir> holds HELLO.OMM built with the MN10300 toolchain and <MN10300 prefix> is its tool prefix
 # (.../bin/mn10300-elf-); without them (empty) the module loader and the firmware symbol checks are skipped.
 # Each program runs in a fresh temporary folder (it stands for the card); prints one line per check and exits 1 when
@@ -10,9 +13,10 @@
 set -u
 BIN=$1
 HOST_CC=$2
-MODS=${3:-}
-TC=${4:-}
-PYTHON=${5:-python3}
+KIND=$3
+MODS=${4:-}
+TC=${5:-}
+PYTHON=${6:-python3}
 
 failed=0
 pass() { echo "  ok    $1"; }
@@ -20,9 +24,9 @@ fail() { echo "  FAIL  $1"; failed=1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-# core parts (tests/host/test_core.c): the default group, then cfg, mem, power and the lever off without a power-off,
-# each on its own empty "card"
-for group in all cfg mem power lever; do
+# core parts (tests/host/test_core.c): the default group, then cfg, mem, power, the lever off without a power-off and
+# the build's kind, each on its own empty "card"
+for group in all cfg mem power lever kind; do
     mkdir "$tmp/$group"
     arg=$group
     [ "$group" = all ] && arg=
@@ -31,6 +35,7 @@ for group in all cfg mem power lever; do
     if [ "$out" = ok ]; then pass "core: $group"; else fail "core: $group"; echo "$out" | sed 's/^/        /'; fi
 done
 
+if [ "$KIND" = debug ]; then
 # The optics probe's cached read (core/optics.c): three power-ons in one folder - armed only with the log and the state on
 # the card, a reset while armed stops it, another run number starts again
 mkdir "$tmp/optics"
@@ -84,6 +89,7 @@ for case in full next missed stuck badstep ini; do
     out=$("$BIN/test_shoot" "$tmp/hands_$case" hands $case 2>&1)
     if [ "$out" = ok ]; then pass "core: hands-free ($case)"; else fail "core: hands-free ($case)"; echo "$out" | sed 's/^/        /'; fi
 done
+fi
 
 # A module sees only src/sdk/include: the public header declares no driver, and the driver header is not there
 if printf '#include "omk_api.h"\n#ifdef OMK_DRV_H\n#error driver\n#endif\nint f(const omk_api *a) { return a->version; }\n' |
@@ -95,11 +101,13 @@ fi
 
 # The debug service (tests/host/test_debug.c): the RAM ring over power-ons (a torn end, wrap, a damaged header), the
 # memory the computer may read, the USB operations and their jobs, no card writes; each on its own empty "card"
+if [ "$KIND" = debug ]; then
 for group in ring memread proto write nocard stuck; do
     mkdir "$tmp/debug_$group"
     out=$("$BIN/test_debug" "$tmp/debug_$group" $group 2>&1)
     if [ "$out" = ok ]; then pass "debug: $group"; else fail "debug: $group"; echo "$out" | sed 's/^/        /'; fi
 done
+fi
 
 # The black-and-white rule of an ISP block (omk_ispb_mono) and FILMLOOK's use of it after its filter (edits_mono):
 # a line is the parts present, Cb, Cr, the nine matrix numbers, the filter 0..8 and its level; the answer is

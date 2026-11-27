@@ -301,6 +301,7 @@ void drv_isp_writer(u32 base, u8 *S, u8 *ctx, u32 mask)
     ext = *(u32 *)(ctx + CTX_EXT);
     code = *(u32 *)(ctx + CTX_CODE);
     type = job_type(B);
+#ifdef OMK_DEBUG                            /* the census and the stills' own matrices, for the log */
     if (s->census) {
         volatile census_t *c = &s->ring[cpu][s->ring_n[cpu]++ % RING];
 
@@ -330,6 +331,10 @@ void drv_isp_writer(u32 base, u8 *S, u8 *ctx, u32 mask)
         m->flags = *(u32 *)(S + S_FLAGS);
         m->stage = *(const u16 *)(B + B_STAGE);
     }
+#else
+    (void)base;
+    (void)mask;
+#endif
     gen = s->gen;
     sgen = s->sgen;
     if (gen && eligible(s, B, type, code)) {
@@ -460,6 +465,7 @@ int drv_isp_install(void)
     return 0;
 }
 
+#ifdef OMK_DEBUG
 void drv_isp_census(int on)
 {
     volatile isp_t *s = isp();
@@ -467,6 +473,7 @@ void drv_isp_census(int on)
     if (s)
         s->census = on != 0;
 }
+#endif
 
 /* Which jobs get the tables: SCOPE_* bits; 0 - none. Read at every job (eligible), so it takes effect with the next job */
 void drv_isp_scope(u32 scope)
@@ -714,13 +721,17 @@ int drv_isp_grain_mask(u32 key, const u16 *w)
     return 0;
 }
 
-/* Core task: the census and the counters to the log (debug) */
+/* Core task: the pacing stamps; in a debug build also the census and the counters to the log, every 5 s */
 void drv_isp_service(u32 now)
 {
+#ifdef OMK_DEBUG
     static u32 last_ms, seen_h2[CPUS], seen_h1[CPUS], seen_ring[CPUS], seen_mat[CPUS], seen_slow, seen_fast;
     static u32 seen_evicted[CPUS];
     volatile isp_t *s = isp();
     u32 cpu, i, n, told = 0;
+#else
+    (void)now;
+#endif
 
     /* The pacing stamps (drv_ticks | 1; 0 - none) end here once their windows are over: left in place they would say
      * "too soon" again for the window's length every turn of the 30-bit counter (1073 s). Called at every core loop
@@ -731,6 +742,7 @@ void drv_isp_service(u32 now)
         last_fast = 0;
     if (last_mask && drv_ticks_since(last_mask) >= FAST_MIN_US)
         last_mask = 0;
+#ifdef OMK_DEBUG
     if (!s || now - last_ms < 5000)
         return;
     last_ms = now;
@@ -780,4 +792,5 @@ void drv_isp_service(u32 now)
                    s->active ? "on" : "off");
     seen_slow = slow_n;
     seen_fast = fast_n;
+#endif
 }

@@ -63,9 +63,14 @@ int isp_census(omk_mod *m, int on)
 
     if (rc)
         return rc;
+#ifdef OMK_DEBUG
     drv_isp_census(on);
     log_printf(OMK_LOG_INFO, "isp: census %s (debug level)", on ? "on" : "off");
     return 0;
+#else
+    (void)on;                               /* the census of the colour path's jobs: a debug build's */
+    return -1;
+#endif
 }
 
 int isp_scope(omk_mod *m, u32 scope)
@@ -101,7 +106,9 @@ void isp_drop_module(omk_mod *m)
     owner = 0;
     mono = 0;
     white = 0;
+#ifdef OMK_DEBUG
     drv_isp_census(0);
+#endif
     rc = drv_isp_set(0, 0);
     stock_owed = rc == -2;                  /* too soon after the module's own change: isp_service repeats it */
     log_printf(OMK_LOG_WARN, "isp: %s failed to start, the service is free, the camera's own tables %s", m->name,
